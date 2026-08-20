@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kognit - AI Academic Assistant</title>
+
+    <!-- CSS -->
+    <link rel="stylesheet" href="/static/css/style.css">
+
+    <!-- Markdown Parser Library -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+    <!-- LaTeX Math Rendering -->
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+
+    <!-- HTML to PDF Library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+
+    <!-- Supabase JS Client -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+
+<div class="app-layout">
+
+    <!-- SIDEBAR -->
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <button class="btn-primary" onclick="createNewProject()">+ New Project</button>
+            <button class="btn-secondary" onclick="createNewChat()">+ New Chat</button>
+            <button class="btn-quiz" onclick="openQuizModal()">🎯 Take Quiz Test</button>
+        </div>
+
+        <div class="sidebar-search-container">
+            <input type="text" id="sidebar-search-input" placeholder="🔍 Search projects or chats..." onkeyup="handleSidebarSearch(event)">
+        </div>
+
+        <div class="history-section">
+            <div class="history-title">Projects &amp; Conversations</div>
+            <div id="history-list" class="history-list">
+                <!-- Dynamic Projects & Chats render here -->
+            </div>
+        </div>
+
+        <!-- AUTH / USER SECTION -->
+        <div class="sidebar-footer">
+            <div id="auth-guest-view">
+                <button class="btn-auth-login" onclick="openAuthModal()">🔒 Login / Sign Up</button>
+            </div>
+            <div id="auth-logged-view" class="user-profile-bar hidden">
+                <div class="user-info">
+                    <span id="user-display-email" class="user-email-text"></span>
+                </div>
+                <button id="logout-btn" class="btn-auth-logout" onclick="handleLogout()" title="Logout">🚪</button>
+            </div>
+        </div>
+    </aside>
+
+    <!-- MAIN WORKSPACE -->
+    <main class="main-content">
+
+        <!-- TOP BAR -->
+        <header class="navbar">
+            <div class="brand">
+                <div class="logo-text">Kognit</div>
+                <div class="tagline">Personalized AI Academic Assistant</div>
+            </div>
+
+            <div class="context-selector">
+                <select id="board-select" class="context-dropdown">
+                    <option value="BD NCTB (Bangla)">BD NCTB (Bangla)</option>
+                    <option value="BD NCTB (English Version)">BD NCTB (English Version)</option>
+                    <option value="Edexcel / Cambridge (O/A Level)">Edexcel / Cambridge (O/A Level)</option>
+                </select>
+
+                <select id="class-select" class="context-dropdown">
+                    <option value="Class 9-10 (SSC)">Class 9-10 (SSC)</option>
+                    <option value="Class 11-12 (HSC)">Class 11-12 (HSC)</option>
+                    <option value="Class 6-8">Class 6-8</option>
+                </select>
+
+                <select id="stream-select" class="context-dropdown">
+                    <option value="Science (বিজ্ঞান)">Science (বিজ্ঞান)</option>
+                    <option value="Commerce (ব্যবসায় শিক্ষা)">Commerce (ব্যবসায় শিক্ষা)</option>
+                    <option value="Arts (মানবিক)">Arts (মানবিক)</option>
+                </select>
+            </div>
+
+            <div class="export-share-bar">
+                <button class="export-btn" onclick="exportChatToMarkdown()" title="Export Markdown">Export MD</button>
+                <button class="export-btn" onclick="exportChatToPDF()" title="Export PDF">Export PDF</button>
+                <button class="export-btn share-btn" onclick="shareChatLink()" title="Share Link">🔗 Share</button>
+            </div>
+        </header>
+
+        <!-- MODE SWITCHER -->
+        <div class="mode-selector">
+            <button id="btn-direct" class="mode-btn active" onclick="setMode('direct')">Direct Answer</button>
+            <button id="btn-socratic" class="mode-btn" onclick="setMode('socratic')">Help Me Solve (Socratic)</button>
+        </div>
+
+        <!-- CHAT AREA -->
+        <div id="chat-box" class="chat-box">
+            <!-- Dynamic chat messages render here -->
+        </div>
+
+        <!-- PREVIEW / STATUS BARS -->
+        <div id="pdf-status-bar" class="image-preview-bar hidden">
+            <span id="pdf-status-text">📄 PDF Active</span>
+            <button class="remove-attachment-btn" onclick="clearPDFContext()">✕</button>
+        </div>
+
+        <div id="image-preview-bar" class="image-preview-bar hidden">
+            <div class="preview-wrapper">
+                <img id="image-preview-img" src="" alt="Selected Preview">
+                <button class="remove-img-btn" onclick="clearSelectedImage()">✕</button>
+            </div>
+            <span class="preview-text">Image attached</span>
+        </div>
+
+        <!-- INPUT BAR -->
+        <div class="input-container">
+            <label for="pdf-input" class="icon-btn" title="Upload Chapter PDF">📄
+                <input type="file" id="pdf-input" accept=".pdf" onchange="handlePDFUpload(event)" hidden>
+            </label>
+
+            <label for="image-input" class="icon-btn" title="Attach Math/Diagram Image">🖼️
+                <input type="file" id="image-input" accept="image/*" onchange="handleImageSelect(event)" hidden>
+            </label>
+
+            <input type="text" id="user-input" placeholder="Ask about your book, notes, or problem..." onkeypress="handleKeyPress(event)">
+            <button id="send-btn" onclick="sendMessage()">Send</button>
+        </div>
+    </main>
+</div>
+
+<!-- AUTH MODAL -->
+<div id="auth-modal" class="modal-overlay hidden">
+    <div class="modal-card auth-card">
+        <div class="modal-header">
+            <h2 id="auth-modal-title">🔒 Sign In to Kognit</h2>
+            <button class="close-modal-btn" onclick="closeAuthModal()">✕</button>
+        </div>
+
+        <div id="auth-error-msg" class="auth-error-msg hidden"></div>
+
+        <button class="btn-google-auth" onclick="handleGoogleSignIn()">
+            <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google">
+            Continue with Google
+        </button>
+
+        <div class="auth-divider"><span>OR</span></div>
+
+        <div class="form-group">
+            <label>Email Address</label>
+            <input type="email" id="auth-email-input" placeholder="you@example.com">
+        </div>
+
+        <div class="form-group">
+            <label>Password</label>
+            <input type="password" id="auth-password-input" placeholder="••••••••">
+        </div>
+
+        <div class="auth-action-btns">
+            <button id="auth-submit-btn" class="btn-primary" onclick="handleEmailAuth('login')">Sign In</button>
+        </div>
+
+        <div class="auth-toggle-text">
+            <span id="auth-toggle-desc">Don't have an account?</span>
+            <a href="javascript:void(0)" id="auth-toggle-link" onclick="toggleAuthMode()">Sign Up</a>
+        </div>
+    </div>
+</div>
+
+<!-- QUIZ MODAL -->
+<div id="quiz-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+        <div class="modal-header">
+            <h2>🎯 Generate AI Practice Test</h2>
+            <button class="close-modal-btn" onclick="closeQuizModal()">✕</button>
+        </div>
+
+        <!-- QUIZ SETUP VIEW -->
+        <div id="quiz-setup-view" class="modal-body">
+            <p class="modal-desc">Test your understanding based on your curriculum.</p>
+
+            <div class="form-group">
+                <label>Topic / Chapter Name</label>
+                <input type="text" id="quiz-topic-input" placeholder="e.g., Force & Motion, Cell Structure">
+            </div>
+
+            <div class="form-group">
+                <label>Number of Questions</label>
+                <select id="quiz-count-select">
+                    <option value="5">5 Questions (Quick Test)</option>
+                    <option value="10" selected>10 Questions (Standard)</option>
+                    <option value="15">15 Questions (Full Assessment)</option>
+                </select>
+            </div>
+
+            <button class="start-quiz-btn" onclick="generateAndStartQuiz()">Generate Quiz with AI</button>
+        </div>
+
+        <!-- QUIZ ACTIVE VIEW -->
+        <div id="quiz-active-view" class="modal-body hidden">
+            <div class="quiz-progress-bar" id="quiz-progress-text">Question 1 of 5</div>
+            <div id="quiz-question-container"></div>
+            <button id="quiz-next-btn" class="start-quiz-btn" onclick="nextQuizQuestion()">Next Question</button>
+        </div>
+
+        <!-- QUIZ RESULT VIEW -->
+        <div id="quiz-result-view" class="modal-body hidden">
+            <div class="result-summary">
+                <h2>🏆 Quiz Completed!</h2>
+                <div id="result-score-text" class="score-text">Your Score: 0 / 5</div>
+            </div>
+            <div id="result-details-list" class="result-details-list"></div>
+            <button class="start-quiz-btn" onclick="resetQuizModal()">Try Another Test</button>
+        </div>
+    </div>
+</div>
+
+<!-- JS (unchanged) -->
+<script src="/static/js/app.js"></script>
+</body>
+</html>
