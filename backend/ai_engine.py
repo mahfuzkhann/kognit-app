@@ -1,6 +1,7 @@
 import os
 import io
 import json
+import logging
 from PIL import Image
 import google.generativeai as genai
 from dotenv import load_dotenv
@@ -8,6 +9,22 @@ from dotenv import load_dotenv
 load_dotenv()
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+logger = logging.getLogger("kognit.ai_engine")
+
+# User-facing fallback messages. Never expose str(exception) to the client -
+# that can leak internal details (stack traces, provider error text, etc).
+GENERIC_CHAT_ERROR = (
+    "Sorry, Kognit couldn't process that request right now. "
+    "Please try again in a moment."
+)
+
+# How long to wait on a single Gemini call before giving up. This is passed
+# straight through to the SDK's own request_options timeout (seconds), which
+# is the documented/supported way to bound this call in the currently-used
+# google-generativeai SDK. MVP-tunable; not env-driven yet since it's a
+# single constant used in exactly two places below.
+AI_REQUEST_TIMEOUT_SECONDS = 30
 
 def generate_ai_response(
     prompt: str, 
@@ -44,10 +61,17 @@ def generate_ai_response(
             
         contents.append(prompt if prompt else "Please analyze this request based on the context.")
 
-        response = model.generate_content(contents)
+        response = model.generate_content(
+            contents,
+            request_options={"timeout": AI_REQUEST_TIMEOUT_SECONDS},
+        )
         return response.text
-    except Exception as e:
-        return f"Error from Kognit AI Engine: {str(e)}"
+    except Exception:
+        logger.exception(
+            "generate_ai_response failed (mode=%s, board=%s, user_class=%s)",
+            mode, board, user_class
+        )
+        return GENERIC_CHAT_ERROR
 
 
 def generate_quiz_questions(board: str, user_class: str, subject: str, topic: str, count: int = 5) -> list:
@@ -68,7 +92,10 @@ def generate_quiz_questions(board: str, user_class: str, subject: str, topic: st
 
     try:
         model = genai.GenerativeModel("gemini-3.6-flash", system_instruction=system_instruction)
-        response = model.generate_content(f"Create {count} MCQ questions on {topic}.")
+        response = model.generate_content(
+            f"Create {count} MCQ questions on {topic}.",
+            request_options={"timeout": AI_REQUEST_TIMEOUT_SECONDS},
+        )
         
         raw_text = response.text.strip()
         if "```json" in raw_text:
@@ -77,6 +104,9 @@ def generate_quiz_questions(board: str, user_class: str, subject: str, topic: st
             raw_text = raw_text.split("```")[1].split("```")[0].strip()
             
         return json.loads(raw_text)
-    except Exception as e:
-        print("Quiz Generation Error:", e)
+    except Exception:
+        logger.exception(
+            "generate_quiz_questions failed (board=%s, user_class=%s, subject=%s, topic=%s)",
+            board, user_class, subject, topic
+        )
         return []
