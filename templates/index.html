@@ -11,8 +11,35 @@
     <!-- Markdown Parser Library -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 
-    <!-- LaTeX Math Rendering -->
-    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <!-- MathJax Configuration — MUST be loaded before the MathJax script below.
+         Enables $...$ and \(...\) for inline math, and $$...$$ / \[...\] for
+         display math. MathJax v3 does NOT enable $...$ by default. -->
+    <script>
+        window.MathJax = {
+            tex: {
+                inlineMath: [['$', '$'], ['\\(', '\\)']],
+                displayMath: [['$$', '$$'], ['\\[', '\\]']],
+                processEscapes: true,
+                processEnvironments: true
+            },
+            options: {
+                skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
+            },
+            svg: {
+                fontCache: 'global'
+            }
+        };
+    </script>
+
+    <!-- LaTeX Math Rendering.
+         Using SVG output (tex-svg.js) instead of CHTML (tex-mml-chtml.js):
+         CHTML relies on nested custom elements, ::before/::after pseudo-elements,
+         and web-font glyphs for stretchy symbols, which html2canvas (used by
+         html2pdf.js for PDF export) does not reliably capture, producing broken/
+         overlapping equations in exported PDFs. SVG output is pure vector paths
+         and renders correctly under html2canvas, while looking visually the same
+         as CHTML in normal browser chat rendering. -->
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
 
     <!-- HTML to PDF Library -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>

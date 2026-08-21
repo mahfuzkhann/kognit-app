@@ -738,11 +738,22 @@ window.exportChatToMarkdown = async function() {
     }
 };
 
-window.exportChatToPDF = function() {
+window.exportChatToPDF = async function() {
     const chatElement = document.getElementById("chat-box");
     const proj = projects.find(p => p.id === activeProjectId);
     const currentChat = proj ? proj.chats.find(c => c.id === activeChatId) : null;
     const title = currentChat ? currentChat.title : "Kognit_Note";
+
+    // Ensure all math in the chat has fully finished typesetting before
+    // html2canvas captures the DOM. Capturing before/mid-typeset is what
+    // produced malformed/overlapping equations in the exported PDF.
+    if (window.MathJax && window.MathJax.typesetPromise) {
+        try {
+            await MathJax.typesetPromise([chatElement]);
+        } catch (err) {
+            console.error("MathJax typeset error before PDF export:", err);
+        }
+    }
 
     const opt = {
         margin:       10,
