@@ -746,33 +746,22 @@ window.exportChatToMarkdown = async function() {
 // so html2canvas only ever sees a flat <img>, never nested SVG transforms.
 // This is export-only — it never touches the live, on-screen SVG.
 //
-// IMPORTANT (color): MathJax paints glyphs with fill="currentColor", which
-// is resolved via normal CSS inheritance from the page's "color" property
-// (in Kognit's dark theme, chat text inherits a light color). Cloning and
-// serializing only the <svg> node in isolation drops that ancestor CSS
-// context, so currentColor falls back to the CSS initial value (black) —
-// every glyph then paints black onto a transparent canvas, which reads as
-// invisible/missing once composited back into the dark chat layout for
-// capture. Fix: resolve the real on-screen color via getComputedStyle()
-// BEFORE serializing, and set it explicitly as an inline style on the
-// clone's root <svg>, so currentColor has something correct to inherit
-// even with zero ancestor context.
+// COLOR (fixed earlier): MathJax paints glyphs with fill="currentColor",
+// resolved via normal CSS inheritance from the page's "color" property.
+// Cloning/serializing only the <svg> node in isolation drops that ancestor
+// context, so currentColor would fall back to black. Fix: resolve the real
+// on-screen color via getComputedStyle() BEFORE serializing, and bake it
+// onto the clone's root <svg> as an inline style.
 async function svgToPngDataUrl(svgElement, scale = 3) {
     const rect = svgElement.getBoundingClientRect();
     const width = Math.max(1, Math.ceil(rect.width));
     const height = Math.max(1, Math.ceil(rect.height));
 
-    // Resolve the actual rendered color (handles currentColor inheritance
-    // correctly, since getComputedStyle is evaluated in the live document
-    // where the full ancestor chain still exists).
     const resolvedColor = window.getComputedStyle(svgElement).color || "#ffffff";
 
     const clone = svgElement.cloneNode(true);
     clone.setAttribute("width", width * scale);
     clone.setAttribute("height", height * scale);
-    // Bake the resolved color onto the clone's root so currentColor
-    // resolves correctly once this fragment is serialized and parsed in
-    // total isolation (no ancestor CSS context survives serialization).
     clone.style.color = resolvedColor;
     if (!clone.getAttribute("xmlns")) {
         clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
@@ -845,10 +834,21 @@ window.exportChatToPDF = async function() {
         }
     }
 
+    // NOTE ON IMAGE FORMAT: html2pdf.js/html2canvas flattens the ENTIRE
+    // captured chat (native text + the math PNGs inserted above) into a
+    // single bitmap per page, then encodes that bitmap using opt.image.type
+    // before jsPDF embeds it. JPEG's lossy block-based compression is
+    // disproportionately destructive to thin, high-contrast, non-
+    // photographic strokes — fraction bars, radical vinculums, small
+    // subscript/superscript numerals, electron-configuration notation —
+    // while bolder UI/Bengali text survives compression looking fine. That
+    // asymmetry (sharp labels, blurry adjacent math) is what PNG (lossless)
+    // output fixes, without needing to touch rasterization resolution
+    // (svgToPngDataUrl's scale) or html2canvas's scale at all.
     const opt = {
         margin:       10,
         filename:     `${title.replace(/[^a-zA-Z0-9]/g, "_")}.pdf`,
-        image:        { type: 'jpeg', quality: 0.98 },
+        image:        { type: 'png' },
         html2canvas:  { scale: 2 },
         jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' }
     };
