@@ -741,24 +741,39 @@ window.exportChatToMarkdown = async function() {
 // ---- PDF export math-rendering helper ----------------------------------
 // html2canvas (used internally by html2pdf.js) does not correctly compose
 // the nested <g transform="matrix(...)"> groups that MathJax's SVG output
-// uses for display-mode equations, fractions, and radicals (multi-part
-// constructs at different baselines). This produced doubled/overlapping
-// strokes in exported PDFs (e.g. quadratic formula) even though simple
-// inline equations (E=mc^2, H2O) rendered fine, since those use a flatter
-// SVG structure.
+// uses for display-mode equations, fractions, and radicals. Fix: rasterize
+// each MathJax <svg> to a flat PNG on an off-screen canvas before capture,
+// so html2canvas only ever sees a flat <img>, never nested SVG transforms.
+// This is export-only — it never touches the live, on-screen SVG.
 //
-// Fix: rasterize each MathJax <svg> to a flat PNG on an off-screen canvas
-// before capture. A flat PNG has no transform stack for html2canvas to
-// misinterpret. This is export-only — it never touches the live, on-screen
-// SVG that the user sees while chatting.
+// IMPORTANT (color): MathJax paints glyphs with fill="currentColor", which
+// is resolved via normal CSS inheritance from the page's "color" property
+// (in Kognit's dark theme, chat text inherits a light color). Cloning and
+// serializing only the <svg> node in isolation drops that ancestor CSS
+// context, so currentColor falls back to the CSS initial value (black) —
+// every glyph then paints black onto a transparent canvas, which reads as
+// invisible/missing once composited back into the dark chat layout for
+// capture. Fix: resolve the real on-screen color via getComputedStyle()
+// BEFORE serializing, and set it explicitly as an inline style on the
+// clone's root <svg>, so currentColor has something correct to inherit
+// even with zero ancestor context.
 async function svgToPngDataUrl(svgElement, scale = 3) {
     const rect = svgElement.getBoundingClientRect();
     const width = Math.max(1, Math.ceil(rect.width));
     const height = Math.max(1, Math.ceil(rect.height));
 
+    // Resolve the actual rendered color (handles currentColor inheritance
+    // correctly, since getComputedStyle is evaluated in the live document
+    // where the full ancestor chain still exists).
+    const resolvedColor = window.getComputedStyle(svgElement).color || "#ffffff";
+
     const clone = svgElement.cloneNode(true);
     clone.setAttribute("width", width * scale);
     clone.setAttribute("height", height * scale);
+    // Bake the resolved color onto the clone's root so currentColor
+    // resolves correctly once this fragment is serialized and parsed in
+    // total isolation (no ancestor CSS context survives serialization).
+    clone.style.color = resolvedColor;
     if (!clone.getAttribute("xmlns")) {
         clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
     }
