@@ -738,6 +738,55 @@ window.exportChatToMarkdown = async function() {
     }
 };
 
+// ---- PDF export math-rendering helper ----------------------------------
+// html2canvas (used internally by html2pdf.js) does not correctly compose
+// the nested <g transform="matrix(...)"> groups that MathJax's SVG output
+// uses for display-mode equations, fractions, and radicals (multi-part
+// constructs at different baselines). This produced doubled/overlapping
+// strokes in exported PDFs (e.g. quadratic formula) even though simple
+// inline equations (E=mc^2, H2O) rendered fine, since those use a flatter
+// SVG structure.
+//
+// Fix: rasterize each MathJax <svg> to a flat PNG on an off-screen canvas
+// before capture. A flat PNG has no transform stack for html2canvas to
+// misinterpret. This is export-only — it never touches the live, on-screen
+// SVG that the user sees while chatting.
+async function svgToPngDataUrl(svgElement, scale = 3) {
+    const rect = svgElement.getBoundingClientRect();
+    const width = Math.max(1, Math.ceil(rect.width));
+    const height = Math.max(1, Math.ceil(rect.height));
+
+    const clone = svgElement.cloneNode(true);
+    clone.setAttribute("width", width * scale);
+    clone.setAttribute("height", height * scale);
+    if (!clone.getAttribute("xmlns")) {
+        clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    }
+
+    const svgString = new XMLSerializer().serializeToString(clone);
+    const svgBlob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
+    const blobUrl = URL.createObjectURL(svgBlob);
+
+    try {
+        const loadedImage = await new Promise((resolve, reject) => {
+            const image = new Image();
+            image.onload = () => resolve(image);
+            image.onerror = () => reject(new Error("Failed to load SVG as image for PDF export"));
+            image.src = blobUrl;
+        });
+
+        const canvas = document.createElement("canvas");
+        canvas.width = width * scale;
+        canvas.height = height * scale;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(loadedImage, 0, 0, canvas.width, canvas.height);
+
+        return { dataUrl: canvas.toDataURL("image/png"), width, height };
+    } finally {
+        URL.revokeObjectURL(blobUrl);
+    }
+}
+
 window.exportChatToPDF = async function() {
     const chatElement = document.getElementById("chat-box");
     const proj = projects.find(p => p.id === activeProjectId);
@@ -745,13 +794,39 @@ window.exportChatToPDF = async function() {
     const title = currentChat ? currentChat.title : "Kognit_Note";
 
     // Ensure all math in the chat has fully finished typesetting before
-    // html2canvas captures the DOM. Capturing before/mid-typeset is what
-    // produced malformed/overlapping equations in the exported PDF.
+    // any capture step touches the DOM.
     if (window.MathJax && window.MathJax.typesetPromise) {
         try {
             await MathJax.typesetPromise([chatElement]);
         } catch (err) {
             console.error("MathJax typeset error before PDF export:", err);
+        }
+    }
+
+    // Temporarily swap each MathJax SVG for a rasterized PNG (export-only).
+    // restoreList tracks what needs to be undone in the finally block below.
+    const restoreList = [];
+    const mathSvgs = chatElement.querySelectorAll("mjx-container svg");
+
+    for (const svg of mathSvgs) {
+        try {
+            const { dataUrl, width, height } = await svgToPngDataUrl(svg);
+            const img = document.createElement("img");
+            img.src = dataUrl;
+            img.style.width = width + "px";
+            img.style.height = height + "px";
+            img.style.display = "inline-block";
+            img.className = "kognit-pdf-export-math-img";
+
+            const originalDisplay = svg.style.display;
+            svg.style.display = "none";
+            svg.insertAdjacentElement("afterend", img);
+
+            restoreList.push({ svg, img, originalDisplay });
+        } catch (err) {
+            // If rasterization fails for a single equation, leave its SVG
+            // as-is (previous behavior) rather than failing the whole export.
+            console.error("Failed to rasterize an equation for PDF export:", err);
         }
     }
 
@@ -763,7 +838,16 @@ window.exportChatToPDF = async function() {
         jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' }
     };
 
-    html2pdf().set(opt).from(chatElement).save();
+    try {
+        await html2pdf().set(opt).from(chatElement).save();
+    } finally {
+        // Always restore the live chat to its original state, whether
+        // export succeeded or failed.
+        restoreList.forEach(({ svg, img, originalDisplay }) => {
+            img.remove();
+            svg.style.display = originalDisplay;
+        });
+    }
 };
 
 window.shareChatLink = function() {
