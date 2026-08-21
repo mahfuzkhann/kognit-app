@@ -26,7 +26,7 @@
                 skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
             },
             svg: {
-                fontCache: 'local'
+                fontCache: 'none'
             }
         };
     </script>
@@ -39,13 +39,28 @@
          overlapping equations in exported PDFs. SVG output is pure vector paths
          and renders correctly under html2canvas, while looking visually the same
          as CHTML in normal browser chat rendering.
-         fontCache is set to 'local' (not the MathJax default 'global') so every
-         equation's <svg> embeds its own glyph <defs> instead of referencing a
-         shared page-level cache via <use href="#...">. html2canvas captures
-         elements largely in isolation and does not reliably resolve those
-         cross-element <use> references, which was causing equations to render
-         as blank/missing in exported PDFs even though on-screen rendering was
-         correct. -->
+
+         fontCache history for this project:
+         - 'global' (MathJax default): caused equations to render BLANK/MISSING
+           in PDF export. All glyphs are stored once in a shared page-level
+           <defs>, referenced elsewhere via <use href="#...">. html2canvas
+           captures elements largely in isolation and could not reliably
+           resolve those cross-element references once the shared defs block
+           was outside the captured region.
+         - 'local': fixed the blank-equation issue (each equation carries its
+           own <defs>+<use> pair, self-contained), but caused equations to
+           render as solid BLACK BOXES instead. <defs> content is not supposed
+           to render on its own per the SVG spec, but html2canvas does not
+           fully respect that — it can paint the raw glyph <path> sitting
+           inside <defs> directly (default black fill, positioned at the SVG
+           origin), on top of/behind the correctly-positioned <use> copy.
+         - 'none' (current): MathJax skips <defs>/<use> entirely and inlines
+           each glyph as a direct <path> at its correct position. There is no
+           template block left for html2canvas to misinterpret. This is the
+           standard fix for MathJax SVG output combined with canvas-based
+           rasterizers/screenshot tools. Slightly larger SVG payload per
+           equation (paths aren't shared/referenced), which is irrelevant at
+           chat-message scale. -->
     <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
 
     <!-- HTML to PDF Library -->
