@@ -26,7 +26,7 @@
                 skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
             },
             svg: {
-                fontCache: 'global'
+                fontCache: 'local'
             }
         };
     </script>
@@ -38,7 +38,14 @@
          html2pdf.js for PDF export) does not reliably capture, producing broken/
          overlapping equations in exported PDFs. SVG output is pure vector paths
          and renders correctly under html2canvas, while looking visually the same
-         as CHTML in normal browser chat rendering. -->
+         as CHTML in normal browser chat rendering.
+         fontCache is set to 'local' (not the MathJax default 'global') so every
+         equation's <svg> embeds its own glyph <defs> instead of referencing a
+         shared page-level cache via <use href="#...">. html2canvas captures
+         elements largely in isolation and does not reliably resolve those
+         cross-element <use> references, which was causing equations to render
+         as blank/missing in exported PDFs even though on-screen rendering was
+         correct. -->
     <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
 
     <!-- HTML to PDF Library -->
