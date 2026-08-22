@@ -809,6 +809,19 @@ window.exportChatToPDF = async function() {
 
     // Temporarily swap each MathJax SVG for a rasterized PNG (export-only).
     // restoreList tracks what needs to be undone in the finally block below.
+    //
+    // BUG A FIX (DOM-removal swap): previously the original <svg> was hidden
+    // via style.display = 'none'. MathJax injects its own stylesheet rule
+    // controlling mjx-container/svg display; if that rule carries
+    // !important, it beats a plain inline style per the CSS cascade, so the
+    // "hidden" original stayed visible and was captured by html2canvas
+    // OVERLAPPING the new PNG <img> in the same spot — producing the
+    // overlapping/distorted glyphs seen in the quadratic formula, Newton's
+    // law, and the potassium electron configuration. A removed DOM node has
+    // no such loophole: html2canvas cannot capture what isn't in the DOM.
+    // To restore each <svg> to its EXACT original position (not just
+    // appended somewhere in its parent), we record both its parent and its
+    // original nextSibling at removal time.
     const restoreList = [];
     const mathSvgs = chatElement.querySelectorAll("mjx-container svg");
 
@@ -822,11 +835,13 @@ window.exportChatToPDF = async function() {
             img.style.display = "inline-block";
             img.className = "kognit-pdf-export-math-img";
 
-            const originalDisplay = svg.style.display;
-            svg.style.display = "none";
-            svg.insertAdjacentElement("afterend", img);
+            const parent = svg.parentNode;
+            const nextSibling = svg.nextSibling;
 
-            restoreList.push({ svg, img, originalDisplay });
+            parent.insertBefore(img, nextSibling);
+            parent.removeChild(svg);
+
+            restoreList.push({ svg, img, parent, nextSibling });
         } catch (err) {
             // If rasterization fails for a single equation, leave its SVG
             // as-is (previous behavior) rather than failing the whole export.
@@ -834,17 +849,6 @@ window.exportChatToPDF = async function() {
         }
     }
 
-    // NOTE ON IMAGE FORMAT: html2pdf.js/html2canvas flattens the ENTIRE
-    // captured chat (native text + the math PNGs inserted above) into a
-    // single bitmap per page, then encodes that bitmap using opt.image.type
-    // before jsPDF embeds it. JPEG's lossy block-based compression is
-    // disproportionately destructive to thin, high-contrast, non-
-    // photographic strokes — fraction bars, radical vinculums, small
-    // subscript/superscript numerals, electron-configuration notation —
-    // while bolder UI/Bengali text survives compression looking fine. That
-    // asymmetry (sharp labels, blurry adjacent math) is what PNG (lossless)
-    // output fixes, without needing to touch rasterization resolution
-    // (svgToPngDataUrl's scale) or html2canvas's scale at all.
     const opt = {
         margin:       10,
         filename:     `${title.replace(/[^a-zA-Z0-9]/g, "_")}.pdf`,
@@ -856,11 +860,13 @@ window.exportChatToPDF = async function() {
     try {
         await html2pdf().set(opt).from(chatElement).save();
     } finally {
-        // Always restore the live chat to its original state, whether
-        // export succeeded or failed.
-        restoreList.forEach(({ svg, img, originalDisplay }) => {
+        // Always restore every removed <svg> to its exact original position
+        // in the live chat, whether export succeeded or threw. Each restore
+        // uses its own saved parent/nextSibling reference, so this is safe
+        // regardless of ordering.
+        restoreList.forEach(({ svg, img, parent, nextSibling }) => {
+            parent.insertBefore(svg, nextSibling);
             img.remove();
-            svg.style.display = originalDisplay;
         });
     }
 };
