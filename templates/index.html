@@ -60,11 +60,16 @@
            standard fix for MathJax SVG output combined with canvas-based
            rasterizers/screenshot tools. Slightly larger SVG payload per
            equation (paths aren't shared/referenced), which is irrelevant at
-           chat-message scale. -->
-    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+           chat-message scale.
 
-    <!-- HTML to PDF Library -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+         NOTE (PDF export removal): the PDF export feature that motivated the
+         SVG-vs-CHTML and fontCache choices above has been removed from the
+         MVP (see backend/main.py and static/js/app.js — the export endpoint
+         and exportChatToPDF/svgToPngDataUrl code paths are gone). This
+         MathJax configuration is left unchanged because it also renders
+         correctly for normal on-screen chat, and normal chat rendering must
+         not be touched. -->
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
 
     <!-- Supabase JS Client -->
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -137,8 +142,6 @@
             </div>
 
             <div class="export-share-bar">
-                <button class="export-btn" onclick="exportChatToMarkdown()" title="Export Markdown">Export MD</button>
-                <button class="export-btn" onclick="exportChatToPDF()" title="Export PDF">Export PDF</button>
                 <button class="export-btn share-btn" onclick="shareChatLink()" title="Share Link">🔗 Share</button>
             </div>
         </header>
