@@ -754,14 +754,27 @@ window.exportChatToMarkdown = async function() {
 // bake it onto the clone's root <svg> as an inline style.
 async function svgToPngDataUrl(svgElement, scale = 3) {
     const rect = svgElement.getBoundingClientRect();
-    const width = Math.max(1, Math.ceil(rect.width));
-    const height = Math.max(1, Math.ceil(rect.height));
+    // Use the EXACT fractional CSS size the browser laid the SVG out at,
+    // not Math.ceil()'d to a whole pixel. The replacement <img> is later
+    // styled with this same width/height (see exportChatToPDF below); if
+    // that CSS size doesn't match the size MathJax originally typeset the
+    // surrounding text against (even by <1px), the line the img sits in
+    // reflows slightly between typeset time and html2canvas capture time,
+    // which is one contributor to blurred/misaligned text immediately
+    // around swapped equations.
+    const width = Math.max(1, rect.width);
+    const height = Math.max(1, rect.height);
+    // Raster resolution (canvas pixel size) is still rounded up, since
+    // canvas.width/height must be integers — only the CSS box size above
+    // needs to stay fractional/exact.
+    const rasterWidth = Math.max(1, Math.ceil(width * scale));
+    const rasterHeight = Math.max(1, Math.ceil(height * scale));
 
     const resolvedColor = window.getComputedStyle(svgElement).color || "#ffffff";
 
     const clone = svgElement.cloneNode(true);
-    clone.setAttribute("width", width * scale);
-    clone.setAttribute("height", height * scale);
+    clone.setAttribute("width", rasterWidth);
+    clone.setAttribute("height", rasterHeight);
     clone.style.color = resolvedColor;
     if (!clone.getAttribute("xmlns")) {
         clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
@@ -780,8 +793,8 @@ async function svgToPngDataUrl(svgElement, scale = 3) {
         });
 
         const canvas = document.createElement("canvas");
-        canvas.width = width * scale;
-        canvas.height = height * scale;
+        canvas.width = rasterWidth;
+        canvas.height = rasterHeight;
         const ctx = canvas.getContext("2d");
         ctx.drawImage(loadedImage, 0, 0, canvas.width, canvas.height);
 
@@ -853,11 +866,28 @@ window.exportChatToPDF = async function() {
         }
     }
 
+    // BUG A, ROUND 2 (text-near-math blur): the overlap/doubling from the
+    // previous round is fixed (confirmed by user screenshot — equations
+    // are readable). The remaining symptom is different: ordinary text
+    // (headers, Bangla lead-in sentences, English labels) is blurred, but
+    // ONLY when it sits immediately before/after a rendered equation;
+    // plain paragraphs elsewhere are sharp. This points at html2canvas's
+    // text-run rendering rather than anything MathJax-specific: html2canvas
+    // does not use the browser's native text layout engine — by default it
+    // measures each run of same-styled text with canvas.measureText() and
+    // paints it as one stretched unit. That approximation is fragile, and
+    // is well documented to break down for (a) text runs whose layout is
+    // perturbed by a neighboring inline replaced element — exactly what
+    // our SVG→IMG swap introduces next to every equation — and (b) complex
+    // shaped scripts like Bangla conjuncts, which compounds the issue right
+    // at those same boundaries. letterRendering makes html2canvas position
+    // each character from the live DOM instead of a stretched run, which is
+    // the standard fix for this class of symptom.
     const opt = {
         margin:       10,
         filename:     `${title.replace(/[^a-zA-Z0-9]/g, "_")}.pdf`,
         image:        { type: 'png' },
-        html2canvas:  { scale: 2 },
+        html2canvas:  { scale: 2, letterRendering: true },
         jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' }
     };
 
