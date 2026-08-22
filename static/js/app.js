@@ -746,12 +746,12 @@ window.exportChatToMarkdown = async function() {
 // so html2canvas only ever sees a flat <img>, never nested SVG transforms.
 // This is export-only — it never touches the live, on-screen SVG.
 //
-// COLOR (fixed earlier): MathJax paints glyphs with fill="currentColor",
-// resolved via normal CSS inheritance from the page's "color" property.
-// Cloning/serializing only the <svg> node in isolation drops that ancestor
-// context, so currentColor would fall back to black. Fix: resolve the real
-// on-screen color via getComputedStyle() BEFORE serializing, and bake it
-// onto the clone's root <svg> as an inline style.
+// COLOR: MathJax paints glyphs with fill="currentColor", resolved via
+// normal CSS inheritance from the page's "color" property. Cloning and
+// serializing only the <svg> node in isolation drops that ancestor
+// context, so currentColor would fall back to black. Fix: resolve the
+// real on-screen color via getComputedStyle() BEFORE serializing, and
+// bake it onto the clone's root <svg> as an inline style.
 async function svgToPngDataUrl(svgElement, scale = 3) {
     const rect = svgElement.getBoundingClientRect();
     const width = Math.max(1, Math.ceil(rect.width));
@@ -810,18 +810,26 @@ window.exportChatToPDF = async function() {
     // Temporarily swap each MathJax SVG for a rasterized PNG (export-only).
     // restoreList tracks what needs to be undone in the finally block below.
     //
-    // BUG A FIX (DOM-removal swap): previously the original <svg> was hidden
-    // via style.display = 'none'. MathJax injects its own stylesheet rule
-    // controlling mjx-container/svg display; if that rule carries
-    // !important, it beats a plain inline style per the CSS cascade, so the
-    // "hidden" original stayed visible and was captured by html2canvas
-    // OVERLAPPING the new PNG <img> in the same spot — producing the
-    // overlapping/distorted glyphs seen in the quadratic formula, Newton's
-    // law, and the potassium electron configuration. A removed DOM node has
-    // no such loophole: html2canvas cannot capture what isn't in the DOM.
-    // To restore each <svg> to its EXACT original position (not just
-    // appended somewhere in its parent), we record both its parent and its
-    // original nextSibling at removal time.
+    // BUG A FIX (direct-replacement swap): MathJax injects its own
+    // stylesheet rule controlling mjx-container/svg display; if that rule
+    // carries !important, it beats a plain inline style.display = 'none',
+    // so a "hidden" original SVG stayed visible and was captured by
+    // html2canvas OVERLAPPING the new PNG <img> in the same spot —
+    // producing the overlapping/distorted glyphs seen in the quadratic
+    // formula, Newton's law, and the potassium electron configuration.
+    // Fix: remove the SVG from the DOM entirely via svg.replaceWith(img)
+    // instead of hiding it — a removed node cannot be painted by
+    // html2canvas regardless of any competing CSS rule.
+    //
+    // An earlier version of this fix stored each SVG's parent and
+    // nextSibling to restore position via insertBefore(). That approach is
+    // unsafe when multiple MathJax SVGs share a parent: an earlier SVG's
+    // saved nextSibling can itself be a later SVG that also gets removed,
+    // leaving insertBefore() referencing a node no longer in the DOM
+    // (NotFoundError) on restore. svg.replaceWith(img) / img.replaceWith(svg)
+    // avoids this entirely — each swap/restore only ever references its own
+    // svg/img pair, with no shared position bookkeeping and no dependency
+    // on removal or restore order.
     const restoreList = [];
     const mathSvgs = chatElement.querySelectorAll("mjx-container svg");
 
@@ -835,13 +843,9 @@ window.exportChatToPDF = async function() {
             img.style.display = "inline-block";
             img.className = "kognit-pdf-export-math-img";
 
-            const parent = svg.parentNode;
-            const nextSibling = svg.nextSibling;
+            svg.replaceWith(img);
 
-            parent.insertBefore(img, nextSibling);
-            parent.removeChild(svg);
-
-            restoreList.push({ svg, img, parent, nextSibling });
+            restoreList.push({ svg, img });
         } catch (err) {
             // If rasterization fails for a single equation, leave its SVG
             // as-is (previous behavior) rather than failing the whole export.
@@ -860,13 +864,11 @@ window.exportChatToPDF = async function() {
     try {
         await html2pdf().set(opt).from(chatElement).save();
     } finally {
-        // Always restore every removed <svg> to its exact original position
-        // in the live chat, whether export succeeded or threw. Each restore
-        // uses its own saved parent/nextSibling reference, so this is safe
-        // regardless of ordering.
-        restoreList.forEach(({ svg, img, parent, nextSibling }) => {
-            parent.insertBefore(svg, nextSibling);
-            img.remove();
+        // Always restore every replaced <svg> to the live chat, whether
+        // export succeeded or threw. Each restore only touches its own
+        // svg/img pair, so this is safe regardless of ordering.
+        restoreList.forEach(({ svg, img }) => {
+            img.replaceWith(svg);
         });
     }
 };
