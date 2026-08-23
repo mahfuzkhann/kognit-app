@@ -4,6 +4,7 @@ import json
 import logging
 from PIL import Image
 import google.generativeai as genai
+from google.api_core.exceptions import ResourceExhausted
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,6 +18,16 @@ logger = logging.getLogger("kognit.ai_engine")
 GENERIC_CHAT_ERROR = (
     "Sorry, Kognit couldn't process that request right now. "
     "Please try again in a moment."
+)
+
+# Shown specifically when the Gemini API rejects a request due to quota
+# exhaustion (google.api_core.exceptions.ResourceExhausted / HTTP 429).
+# Never interpolate str(exception) into this - the raw error contains
+# provider-internal details (quota metric names, limits, status codes)
+# that must not reach the client. See GENERIC_CHAT_ERROR comment above.
+QUOTA_EXHAUSTED_ERROR = (
+    "⚠️ Kognit-এর AI ব্যবহারের সীমা এই মুহূর্তে পূর্ণ হয়ে গেছে।\n"
+    "এই মুহূর্তে আপনার প্রশ্নের উত্তর তৈরি করা যাচ্ছে না। কিছুক্ষণ পরে আবার চেষ্টা করুন।"
 )
 
 # How long to wait on a single Gemini call before giving up. This is passed
@@ -66,6 +77,12 @@ def generate_ai_response(
             request_options={"timeout": AI_REQUEST_TIMEOUT_SECONDS},
         )
         return response.text
+    except ResourceExhausted:
+        logger.exception(
+            "generate_ai_response quota exhausted (mode=%s, board=%s, user_class=%s)",
+            mode, board, user_class
+        )
+        return QUOTA_EXHAUSTED_ERROR
     except Exception:
         logger.exception(
             "generate_ai_response failed (mode=%s, board=%s, user_class=%s)",
