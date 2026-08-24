@@ -660,12 +660,35 @@ window.sendMessage = async function() {
     }
     chatBox.appendChild(userDiv);
 
+    // Bounded conversation history for same-chat context (CHAT-04 fix).
+    // currentChat.messages currently ends with the user message we just
+    // pushed above (the CURRENT prompt) - exclude it here since it's sent
+    // separately via the "prompt" field. Only prior turns go in "history".
+    // Cap: 10 user+assistant exchanges = 20 messages max (MVP window).
+    // Images are intentionally dropped from history entries (never resend
+    // old base64 image data) - only the role+text of each past turn.
+    // A prior user turn that was image-only (no typed text) still gets a
+    // short text placeholder here rather than being sent empty - the
+    // backend drops empty-text entries, and silently dropping a user turn
+    // while keeping its bot reply would break Gemini's expected user/model
+    // alternation in the history it receives.
+    const MAX_HISTORY_MESSAGES = 20;
+    const priorMessages = currentChat.messages.slice(0, -1);
+    const boundedHistory = priorMessages
+        .slice(-MAX_HISTORY_MESSAGES)
+        .map(m => {
+            let text = (m.text || "").trim();
+            if (!text && m.image) text = "[Student uploaded an image]";
+            return { role: m.role, text: text };
+        });
+
     const formData = new FormData();
     formData.append("prompt", promptText || "Analyze this document/image.");
     formData.append("mode", currentMode);
     formData.append("board", document.getElementById("board-select").value);
     formData.append("user_class", document.getElementById("class-select").value);
     formData.append("stream", document.getElementById("stream-select").value);
+    formData.append("history", JSON.stringify(boundedHistory));
 
     if (selectedImageFile) formData.append("image", selectedImageFile);
 

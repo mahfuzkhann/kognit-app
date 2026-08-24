@@ -37,6 +37,37 @@ QUOTA_EXHAUSTED_ERROR = (
 # single constant used in exactly two places below.
 AI_REQUEST_TIMEOUT_SECONDS = 30
 
+# Kognit's internal message roles -> the Gemini SDK's expected chat-history
+# roles. Gemini's start_chat(history=...) requires "user"/"model"; Kognit
+# stores assistant turns as "bot". This mapping must stay in sync with
+# whatever role strings the frontend sends in the "history" field.
+_KOGNIT_ROLE_TO_GEMINI_ROLE = {"user": "user", "bot": "model"}
+
+
+def _build_gemini_history(history: list) -> list:
+    """
+    Convert Kognit's validated [{"role": "user"|"bot", "text": str}, ...]
+    history into the Gemini SDK's expected
+    [{"role": "user"|"model", "parts": [str]}, ...] shape.
+
+    Any entry with an unrecognized role is skipped defensively (should not
+    happen if main.py's validation ran first, but this function does not
+    assume that and re-checks independently).
+    """
+    if not history:
+        return []
+
+    gemini_history = []
+    for entry in history:
+        role = entry.get("role")
+        text = entry.get("text")
+        gemini_role = _KOGNIT_ROLE_TO_GEMINI_ROLE.get(role)
+        if gemini_role is None or not text:
+            continue
+        gemini_history.append({"role": gemini_role, "parts": [text]})
+    return gemini_history
+
+
 def generate_ai_response(
     prompt: str, 
     mode: str = "direct", 
@@ -44,7 +75,8 @@ def generate_ai_response(
     user_class: str = "SSC", 
     stream: str = "Science",
     image_bytes: bytes = None,
-    pdf_context: str = ""
+    pdf_context: str = "",
+    history: list = None
 ) -> str:
     system_instruction = (
         f"You are Kognit, an expert academic AI tutor for students in {board}, studying {user_class} ({stream} stream).\n"
@@ -72,7 +104,16 @@ def generate_ai_response(
             
         contents.append(prompt if prompt else "Please analyze this request based on the context.")
 
-        response = model.generate_content(
+        # CHAT-04 fix: use the SDK's multi-turn chat session instead of a
+        # stateless single-shot generate_content call, so prior turns in
+        # THIS chat are actually part of the request Gemini sees. history
+        # is empty on a chat's first message, which is equivalent to the
+        # old behavior. system_instruction (board/class/stream/PDF context/
+        # mode) is unchanged - it's baked into the model above and applies
+        # across the whole chat session automatically.
+        gemini_history = _build_gemini_history(history or [])
+        chat_session = model.start_chat(history=gemini_history)
+        response = chat_session.send_message(
             contents,
             request_options={"timeout": AI_REQUEST_TIMEOUT_SECONDS},
         )

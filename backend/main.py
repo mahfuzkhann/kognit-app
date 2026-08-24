@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import secrets
@@ -26,6 +27,15 @@ MAX_PDF_UPLOAD_SIZE_BYTES = 15 * 1024 * 1024  # 15MB - adjust after testing real
 ALLOWED_PDF_CONTENT_TYPES = {"application/pdf"}
 MAX_IMAGE_UPLOAD_SIZE_BYTES = 8 * 1024 * 1024  # 8MB - adjust after testing real student photos
 SESSION_COOKIE_NAME = "kognit_session"
+
+# CHAT-04 fix: bounded same-chat conversation history. MVP window = 10
+# user+assistant exchanges = 20 messages max. Enforced server-side too
+# (never trust the client actually capped it - frontend caps here as well,
+# but this is the authoritative limit). Each message's text is also capped
+# defensively so one oversized entry can't blow up the request.
+MAX_HISTORY_MESSAGES = 20
+MAX_HISTORY_MESSAGE_CHARS = 4000
+VALID_HISTORY_ROLES = {"user", "bot"}
 
 # Cookies should not require Secure (HTTPS-only) in local HTTP development,
 # but should require it in production. Default is "false" so local dev keeps
@@ -113,6 +123,52 @@ async def upload_pdf(request: Request, file: UploadFile = File(...)):
     active_pdf_contexts[session_id] = pdf_text
     return {"status": "success", "filename": file.filename, "length": len(pdf_text)}
 
+def parse_and_validate_history(raw_history: str) -> list:
+    """
+    Parse and validate the client-supplied conversation history for CHAT-04.
+
+    Never trusts the client blindly: malformed JSON, wrong types, unknown
+    roles, or missing fields cause that entry (or the whole payload) to be
+    dropped rather than passed through. Also re-enforces the message-count
+    and per-message length caps server-side, independent of whatever the
+    frontend already did.
+
+    Returns a list of {"role": "user"|"bot", "text": str} dicts - never
+    raises. On any failure, returns an empty list so /api/chat still works
+    with no history rather than erroring out the whole request.
+    """
+    if not raw_history:
+        return []
+
+    try:
+        parsed = json.loads(raw_history)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("chat history: invalid JSON received, ignoring history for this request")
+        return []
+
+    if not isinstance(parsed, list):
+        logger.warning("chat history: expected a JSON array, got %s, ignoring", type(parsed).__name__)
+        return []
+
+    validated = []
+    for entry in parsed:
+        if not isinstance(entry, dict):
+            continue
+        role = entry.get("role")
+        text = entry.get("text")
+        if role not in VALID_HISTORY_ROLES:
+            continue
+        if not isinstance(text, str) or not text.strip():
+            continue
+        validated.append({
+            "role": role,
+            "text": text[:MAX_HISTORY_MESSAGE_CHARS],
+        })
+
+    # Re-enforce the cap server-side regardless of what the client sent.
+    return validated[-MAX_HISTORY_MESSAGES:]
+
+
 @app.post("/api/chat")
 async def chat_endpoint(
     request: Request,
@@ -122,6 +178,7 @@ async def chat_endpoint(
     user_class: str = Form("Class 9-10 / SSC"),
     stream: str = Form("Science"),
     image: Optional[UploadFile] = File(None),
+    history: str = Form("[]"),
     authorization: Optional[str] = Header(None)
 ):
     # authorization header থেকে পাওয়া jwt token যাচাই করার কোড থাকবে
@@ -141,6 +198,7 @@ async def chat_endpoint(
     try:
         session_id = get_session_id(request)
         pdf_context = active_pdf_contexts.get(session_id, "")
+        conversation_history = parse_and_validate_history(history)
 
         # generate_ai_response is a synchronous, blocking call (it calls the
         # Gemini SDK directly). Running it in FastAPI's threadpool keeps it
@@ -155,7 +213,8 @@ async def chat_endpoint(
             user_class=user_class,
             stream=stream,
             image_bytes=image_bytes,
-            pdf_context=pdf_context
+            pdf_context=pdf_context,
+            history=conversation_history
         )
         return {"reply": response}
     except Exception:
