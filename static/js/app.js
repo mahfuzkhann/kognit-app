@@ -40,6 +40,16 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Auth Change Listener
     supabaseClient.auth.onAuthStateChange(async (_event, session) => {
+        // BUG-2 fix: supabase-js fires this callback for many event types,
+        // not just an actual login/logout - including background token
+        // refreshes and tab-visibility session rechecks. Reacting to every
+        // one of those by reloading projects (and re-picking the active
+        // chat via initializeActiveProject) was silently yanking the user
+        // out of whatever chat they had open, with no click from them.
+        // Only react to events that represent a real identity change.
+        if (_event !== "SIGNED_IN" && _event !== "SIGNED_OUT") {
+            return;
+        }
         currentUser = session ? session.user : null;
         updateAuthUI(currentUser);
         if (currentUser) {
@@ -51,6 +61,21 @@ document.addEventListener("DOMContentLoaded", async () => {
 });
 
 // ==================== DATABASE & STORAGE SYNC ====================
+
+// BUG-3 fallback: defends against any legacy/corrupted record missing a
+// title (renderHistoryList() calls .toLowerCase() directly on these -
+// without this, a single untitled record would throw and break the whole
+// sidebar). New projects/chats always get "New Project"/"New Chat" at
+// creation already, so this only matters for pre-existing/imported data.
+function normalizeProjectTitles(projList) {
+    (projList || []).forEach(p => {
+        if (!p.title) p.title = "Untitled Project";
+        (p.chats || []).forEach(c => {
+            if (!c.title) c.title = "Untitled Chat";
+        });
+    });
+    return projList;
+}
 
 async function loadProjectsFromDatabase() {
     if (!currentUser) return;
@@ -68,15 +93,15 @@ async function loadProjectsFromDatabase() {
         }
 
         if (data && data.length > 0) {
-            projects = data.map(p => ({
+            projects = normalizeProjectTitles(data.map(p => ({
                 id: p.id,
                 title: p.title,
                 chats: p.chats || []
-            }));
+            })));
         } else {
             const localData = JSON.parse(localStorage.getItem("kognit_projects")) || [];
             if (localData.length > 0) {
-                projects = localData;
+                projects = normalizeProjectTitles(localData);
                 for (const proj of projects) {
                     await syncProjectToDatabase(proj);
                 }
@@ -95,22 +120,34 @@ async function loadProjectsFromDatabase() {
 }
 
 function loadProjectsFromLocalStorage() {
-    projects = JSON.parse(localStorage.getItem("kognit_projects")) || [];
+    projects = normalizeProjectTitles(JSON.parse(localStorage.getItem("kognit_projects")) || []);
     initializeActiveProject();
 }
 
 function initializeActiveProject() {
     if (projects.length === 0) {
         createNewProject();
-    } else {
-        activeProjectId = projects[0].id;
-        if (projects[0].chats && projects[0].chats.length > 0) {
-            activeChatId = projects[0].chats[0].id;
-        } else {
-            createNewChat();
-        }
+        return;
+    }
+
+    activeProjectId = projects[0].id;
+    const mostRecentChat = (projects[0].chats && projects[0].chats.length > 0) ? projects[0].chats[0] : null;
+    const mostRecentChatIsEmpty = mostRecentChat &&
+        mostRecentChat.messages.filter(m => m.role === "user").length === 0;
+
+    if (mostRecentChatIsEmpty) {
+        // The most recent chat has no user messages yet (e.g. it was just
+        // created and never used) - reuse it rather than piling up empty
+        // "New Chat" entries every time the app is opened.
+        activeChatId = mostRecentChat.id;
         renderHistoryList();
         loadChat(activeProjectId, activeChatId);
+    } else {
+        // BUG-1 fix: start on a genuinely fresh chat instead of silently
+        // resuming whatever conversation was last active. No existing
+        // chat is deleted - all of them remain listed in the sidebar and
+        // can still be reopened manually at any time.
+        createNewChat(activeProjectId);
     }
 }
 
@@ -622,6 +659,55 @@ window.clearSelectedImage = function() {
     document.getElementById("image-preview-bar").classList.add("hidden");
 };
 
+// BUG-3 fix: deterministic, client-side chat title generation - no AI API
+// call. Strips basic Markdown syntax and a few common filler openers
+// ("I am building", "How do I", etc.) so the title leads with the actual
+// subject, then truncates at a word boundary rather than mid-word. Called
+// exactly once per chat (see the guard at its call site in sendMessage) -
+// never re-runs on later messages, so an existing title is always stable.
+function generateChatTitle(rawText) {
+    const MAX_TITLE_LENGTH = 40;
+    if (!rawText) return "New Chat";
+
+    let cleaned = rawText
+        .replace(/[#*_`>~]+/g, "")
+        .replace(/\[(.*?)\]\(.*?\)/g, "$1") // markdown links -> just the link text
+        .replace(/\s+/g, " ")
+        .trim();
+
+    const fillerPrefixes = [
+        /^i am building /i,
+        /^i'm building /i,
+        /^i want to /i,
+        /^please help me (with |understand )?/i,
+        /^please explain /i,
+        /^explain /i,
+        /^how do i /i,
+        /^how can i /i,
+        /^what is /i,
+        /^what are /i,
+        /^can you /i,
+        /^tell me about /i,
+    ];
+    for (const pattern of fillerPrefixes) {
+        if (pattern.test(cleaned)) {
+            cleaned = cleaned.replace(pattern, "");
+            break;
+        }
+    }
+    cleaned = cleaned.trim();
+    if (!cleaned) cleaned = rawText.trim(); // stripping left nothing usable - fall back to the original
+
+    cleaned = cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+
+    if (cleaned.length <= MAX_TITLE_LENGTH) return cleaned;
+
+    const truncated = cleaned.slice(0, MAX_TITLE_LENGTH);
+    const lastSpace = truncated.lastIndexOf(" ");
+    const base = lastSpace > 15 ? truncated.slice(0, lastSpace) : truncated;
+    return base.replace(/[.,;:!?]+$/, "") + "...";
+}
+
 window.sendMessage = async function() {
     const inputField = document.getElementById("user-input");
     const chatBox = document.getElementById("chat-box");
@@ -635,8 +721,7 @@ window.sendMessage = async function() {
     if (!currentChat) return;
 
     if (currentChat.messages.filter(m => m.role === "user").length === 0 && currentChat.title === "New Chat") {
-        const titleText = promptText || "PDF/Image Query";
-        currentChat.title = titleText.length > 18 ? titleText.substring(0, 18) + "..." : titleText;
+        currentChat.title = generateChatTitle(promptText || "PDF/Image Query");
         if (proj.title === "New Project") proj.title = currentChat.title;
         renderHistoryList();
     }
