@@ -39,24 +39,27 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     // Auth Change Listener
-    supabaseClient.auth.onAuthStateChange(async (_event, session) => {
-        // BUG-2 fix: supabase-js fires this callback for many event types,
-        // not just an actual login/logout - including background token
-        // refreshes and tab-visibility session rechecks. Reacting to every
-        // one of those by reloading projects (and re-picking the active
-        // chat via initializeActiveProject) was silently yanking the user
-        // out of whatever chat they had open, with no click from them.
-        // Only react to events that represent a real identity change.
-        if (_event !== "SIGNED_IN" && _event !== "SIGNED_OUT") {
-            return;
-        }
+    supabaseClient.auth.onAuthStateChange((_event, session) => {
+        // CHAT-05 fix: this listener used to reload the entire project list
+        // and re-pick the active chat (via loadProjectsFromDatabase ->
+        // initializeActiveProject) every time it fired - but Supabase's
+        // client fires this for far more than just an actual login/logout,
+        // including session-recovery checks tied to the browser tab
+        // regaining focus/visibility. That was silently replacing whatever
+        // chat was open - even mid-AI-response - with a freshly (re)picked
+        // one, with no click from the user. The true initial page load
+        // above already loads projects once; explicit login
+        // (handleEmailAuth, below) and explicit logout (handleLogout,
+        // below) each already trigger their own project load/reset
+        // directly, on the actual user action rather than on this passive
+        // listener. Google OAuth login is a full-page redirect back to
+        // Kognit, so it's already covered by the initial load above too.
+        // This listener now ONLY keeps currentUser/the header UI in sync -
+        // it must never touch `projects`, `activeProjectId`, or
+        // `activeChatId` again after the initial load, no matter how many
+        // times it fires or why.
         currentUser = session ? session.user : null;
         updateAuthUI(currentUser);
-        if (currentUser) {
-            await loadProjectsFromDatabase();
-        } else {
-            loadProjectsFromLocalStorage();
-        }
     });
 });
 
@@ -252,6 +255,12 @@ window.handleEmailAuth = async function(type) {
         errorMsg.textContent = result.error.message;
         errorMsg.classList.remove("hidden");
     } else {
+        // CHAT-05 fix: onAuthStateChange no longer triggers project loads
+        // (see its comment above) - this explicit user action needs to
+        // drive the load itself now.
+        currentUser = result.data.user;
+        updateAuthUI(currentUser);
+        await loadProjectsFromDatabase();
         closeAuthModal();
         alert(type === 'signup' ? "Registration successful! Please check your email to verify." : "Logged in successfully!");
     }
@@ -720,6 +729,16 @@ window.sendMessage = async function() {
     const currentChat = proj.chats.find(c => c.id === activeChatId);
     if (!currentChat) return;
 
+    // CHAT-05 race-condition protection: remember exactly which chat this
+    // request belongs to by ID. If the user manually switches to a
+    // different chat while this request is still in flight (a legitimate
+    // action, not a bug), the response must still be saved into THIS
+    // chat's data - not lost, and not visually injected into whatever
+    // chat happens to be on screen when it completes. See the re-resolve
+    // by ID below, after the await.
+    const requestProjectId = activeProjectId;
+    const requestChatId = activeChatId;
+
     if (currentChat.messages.filter(m => m.role === "user").length === 0 && currentChat.title === "New Chat") {
         currentChat.title = generateChatTitle(promptText || "PDF/Image Query");
         if (proj.title === "New Project") proj.title = currentChat.title;
@@ -795,29 +814,58 @@ window.sendMessage = async function() {
     try {
         const response = await fetch("/api/chat", { method: "POST", headers: headers, body: formData });
         const data = await response.json();
-        chatBox.removeChild(loadingDiv);
+
+        // Re-resolve the target project/chat by the ID captured before the
+        // request started, rather than trusting the `proj`/`currentChat`
+        // references captured before this await - see the comment above
+        // where requestProjectId/requestChatId were captured.
+        const targetProj = projects.find(p => p.id === requestProjectId);
+        const targetChat = targetProj ? targetProj.chats.find(c => c.id === requestChatId) : null;
+        const isStillViewingThisChat = activeProjectId === requestProjectId && activeChatId === requestChatId;
+
+        // The loading indicator is only meaningful if we're still looking
+        // at the chat that produced it - if the user switched chats since,
+        // loadChat() already cleared/replaced chatBox's content and
+        // loadingDiv isn't part of the currently-rendered chat anyway.
+        if (isStillViewingThisChat && chatBox.contains(loadingDiv)) {
+            chatBox.removeChild(loadingDiv);
+        }
 
         const replyText = data.reply || "No response received.";
-        currentChat.messages.push({ role: "bot", text: replyText });
-        saveProjectsToStorage();
 
-        const botDiv = document.createElement("div");
-        botDiv.className = "bot-message";
-        botDiv.innerHTML = marked.parse(replyText);
-        chatBox.appendChild(botDiv);
-
-        if (window.MathJax) {
-            MathJax.typesetPromise([botDiv]).catch((err) => console.error(err));
+        if (targetChat) {
+            targetChat.messages.push({ role: "bot", text: replyText });
+            saveProjectsToStorage();
         }
+
+        if (isStillViewingThisChat) {
+            const botDiv = document.createElement("div");
+            botDiv.className = "bot-message";
+            botDiv.innerHTML = marked.parse(replyText);
+            chatBox.appendChild(botDiv);
+
+            if (window.MathJax) {
+                MathJax.typesetPromise([botDiv]).catch((err) => console.error(err));
+            }
+        }
+        // If the user switched chats before the response arrived, it's
+        // still correctly saved above - it will simply be there the next
+        // time that chat is reopened, instead of appearing in whichever
+        // chat happens to be on screen right now.
     } catch (error) {
-        if (chatBox.contains(loadingDiv)) chatBox.removeChild(loadingDiv);
-        const errorDiv = document.createElement("div");
-        errorDiv.className = "bot-message";
-        errorDiv.textContent = "Error connecting to Kognit Engine.";
-        chatBox.appendChild(errorDiv);
+        const isStillViewingThisChat = activeProjectId === requestProjectId && activeChatId === requestChatId;
+        if (isStillViewingThisChat) {
+            if (chatBox.contains(loadingDiv)) chatBox.removeChild(loadingDiv);
+            const errorDiv = document.createElement("div");
+            errorDiv.className = "bot-message";
+            errorDiv.textContent = "Error connecting to Kognit Engine.";
+            chatBox.appendChild(errorDiv);
+        }
     }
 
-    chatBox.scrollTop = chatBox.scrollHeight;
+    if (activeProjectId === requestProjectId && activeChatId === requestChatId) {
+        chatBox.scrollTop = chatBox.scrollHeight;
+    }
 };
 
 // Share
