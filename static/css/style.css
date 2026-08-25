@@ -346,7 +346,6 @@ body {
     border-radius: 8px;
     max-width: 90%;
     min-width: 0;
-    overflow: hidden;
     align-self: flex-start;
     line-height: 1.6;
     color: #dddddd;
