@@ -336,6 +336,8 @@ body {
     gap: 16px;
 }
 
+/* ========== OVERFLOW FIX: .bot-message and children ========== */
+
 .bot-message {
     background: #111111;
     border: 1px solid #222222;
@@ -343,6 +345,8 @@ body {
     padding: 14px 18px;
     border-radius: 8px;
     max-width: 90%;
+    min-width: 0;
+    overflow: hidden;
     align-self: flex-start;
     line-height: 1.6;
     color: #dddddd;
@@ -351,17 +355,38 @@ body {
     overflow-wrap: anywhere;
 }
 
-/* Code blocks and pre-formatted text should scroll horizontally if needed */
+/* Code blocks and pre-formatted text must wrap long lines */
 .bot-message pre {
     max-width: 100%;
+    word-break: break-word;
+    overflow-wrap: break-word;
     overflow-x: auto;
 }
 
-/* Tables should scroll horizontally if needed */
+/* Inline code */
+.bot-message code {
+    word-break: break-word;
+    overflow-wrap: break-word;
+    max-width: 100%;
+}
+
+/* Tables must stay contained and cells must wrap */
 .bot-message table {
     max-width: 100%;
-    overflow-x: auto;
     display: block;
+    overflow-x: auto;
+}
+
+.bot-message table td,
+.bot-message table th {
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
+
+/* MathJax SVG equations must scale responsively */
+.bot-message svg {
+    max-width: 100%;
+    height: auto;
 }
 
 /* Images inside bot messages should be responsive */
@@ -369,6 +394,59 @@ body {
     max-width: 100%;
     height: auto;
 }
+
+/* Inline elements must not break container */
+.bot-message span,
+.bot-message strong,
+.bot-message em,
+.bot-message b,
+.bot-message i {
+    word-break: break-word;
+    overflow-wrap: break-word;
+}
+
+/* Lists should wrap content */
+.bot-message ul,
+.bot-message ol {
+    padding-left: 1.5em;
+}
+
+.bot-message li {
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
+
+/* Blockquotes must not expand */
+.bot-message blockquote {
+    max-width: 100%;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
+
+/* Paragraphs and headings */
+.bot-message p,
+.bot-message h1,
+.bot-message h2,
+.bot-message h3,
+.bot-message h4,
+.bot-message h5,
+.bot-message h6 {
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
+
+/* Horizontal rules */
+.bot-message hr {
+    max-width: 100%;
+}
+
+/* Links must not break container */
+.bot-message a {
+    word-break: break-word;
+    overflow-wrap: break-word;
+}
+
+/* ========== END OVERFLOW FIX ========== */
 
 .user-message {
     background: #1e1e1e;
