@@ -348,32 +348,26 @@ body {
     color: #dddddd;
     font-size: 14px;
     word-wrap: break-word;
-    overflow-wrap: break-word;
-    word-break: break-word;
-    overflow-x: auto;
+    overflow-wrap: anywhere;
 }
 
-.bot-message > * {
-    max-width: 100%;
-    overflow-x: auto;
-    word-wrap: break-word;
-    overflow-wrap: break-word;
-}
-
-.bot-message code {
-    word-wrap: break-word;
-    overflow-wrap: break-word;
-}
-
+/* Code blocks and pre-formatted text should scroll horizontally if needed */
 .bot-message pre {
     max-width: 100%;
     overflow-x: auto;
 }
 
+/* Tables should scroll horizontally if needed */
 .bot-message table {
     max-width: 100%;
     overflow-x: auto;
     display: block;
+}
+
+/* Images inside bot messages should be responsive */
+.bot-message img {
+    max-width: 100%;
+    height: auto;
 }
 
 .user-message {
