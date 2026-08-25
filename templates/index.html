@@ -42,25 +42,25 @@
 
          fontCache history for this project:
          - 'global' (MathJax default): caused equations to render BLANK/MISSING
-           in PDF export. All glyphs are stored once in a shared page-level
-           <defs>, referenced elsewhere via <use href="#...">. html2canvas
-           captures elements largely in isolation and could not reliably
-           resolve those cross-element references once the shared defs block
-           was outside the captured region.
+            in PDF export. All glyphs are stored once in a shared page-level
+            <defs>, referenced elsewhere via <use href="#...">. html2canvas
+            captures elements largely in isolation and could not reliably
+            resolve those cross-element references once the shared defs block
+            was outside the captured region.
          - 'local': fixed the blank-equation issue (each equation carries its
-           own <defs>+<use> pair, self-contained), but caused equations to
-           render as solid BLACK BOXES instead. <defs> content is not supposed
-           to render on its own per the SVG spec, but html2canvas does not
-           fully respect that — it can paint the raw glyph <path> sitting
-           inside <defs> directly (default black fill, positioned at the SVG
-           origin), on top of/behind the correctly-positioned <use> copy.
+            own <defs>+<use> pair, self-contained), but caused equations to
+            render as solid BLACK BOXES instead. <defs> content is not supposed
+            to render on its own per the SVG spec, but html2canvas does not
+            fully respect that — it can paint the raw glyph <path> sitting
+            inside <defs> directly (default black fill, positioned at the SVG
+            origin), on top of/behind the correctly-positioned <use> copy.
          - 'none' (current): MathJax skips <defs>/<use> entirely and inlines
-           each glyph as a direct <path> at its correct position. There is no
-           template block left for html2canvas to misinterpret. This is the
-           standard fix for MathJax SVG output combined with canvas-based
-           rasterizers/screenshot tools. Slightly larger SVG payload per
-           equation (paths aren't shared/referenced), which is irrelevant at
-           chat-message scale.
+            each glyph as a direct <path> at its correct position. There is no
+            template block left for html2canvas to misinterpret. This is the
+            standard fix for MathJax SVG output combined with canvas-based
+            rasterizers/screenshot tools. Slightly larger SVG payload per
+            equation (paths aren't shared/referenced), which is irrelevant at
+            chat-message scale.
 
          NOTE (PDF export removal): the PDF export feature that motivated the
          SVG-vs-CHTML and fontCache choices above has been removed from the
@@ -181,7 +181,7 @@
                 <input type="file" id="image-input" accept="image/*" onchange="handleImageSelect(event)" hidden>
             </label>
 
-            <input type="text" id="user-input" placeholder="Ask about your book, notes, or problem..." onkeypress="handleKeyPress(event)">
+            <textarea id="user-input" placeholder="Ask about your book, notes, or problem..." onkeydown="handleKeyDown(event)"></textarea>
             <button id="send-btn" onclick="sendMessage()">Send</button>
         </div>
     </main>
