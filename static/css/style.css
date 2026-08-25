@@ -329,6 +329,7 @@ body {
     border: 1px solid #1a1a1a;
     border-radius: 12px;
     overflow-y: auto;
+    overflow-x: hidden;
     padding: 20px;
     display: flex;
     flex-direction: column;
@@ -346,6 +347,33 @@ body {
     line-height: 1.6;
     color: #dddddd;
     font-size: 14px;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    word-break: break-word;
+    overflow-x: auto;
+}
+
+.bot-message > * {
+    max-width: 100%;
+    overflow-x: auto;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
+
+.bot-message code {
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
+
+.bot-message pre {
+    max-width: 100%;
+    overflow-x: auto;
+}
+
+.bot-message table {
+    max-width: 100%;
+    overflow-x: auto;
+    display: block;
 }
 
 .user-message {
@@ -359,6 +387,8 @@ body {
     display: flex;
     flex-direction: column;
     gap: 8px;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
 }
 
 .user-msg-image {
@@ -421,7 +451,7 @@ body {
 /* Input Bar & Icon Buttons */
 .input-container {
     display: flex;
-    align-items: center;
+    align-items: flex-end;
     gap: 8px;
 }
 
@@ -437,6 +467,7 @@ body {
     border-radius: 8px;
     cursor: pointer;
     transition: 0.2s;
+    flex-shrink: 0;
 }
 
 .icon-btn:hover {
@@ -454,7 +485,13 @@ body {
     color: #ffffff;
     font-size: 14px;
     outline: none;
-    height: 44px;
+    min-height: 44px;
+    max-height: 200px;
+    resize: none;
+    font-family: inherit;
+    overflow-y: auto;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
 }
 
 #user-input:focus {
@@ -472,6 +509,7 @@ body {
     font-weight: 600;
     font-size: 14px;
     transition: 0.2s;
+    flex-shrink: 0;
 }
 
 #send-btn:hover {
