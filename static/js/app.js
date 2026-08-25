@@ -602,8 +602,21 @@ function deleteChat(projId, chatId) {
     }
 }
 
-window.handleKeyPress = function(event) {
-    if (event.key === "Enter") sendMessage();
+// NEW BUG 2 FIX: Replace onkeypress with onkeydown to handle Shift+Enter.
+// Textarea now supports multi-line input. Enter sends message, Shift+Enter
+// inserts newline. Auto-grows up to max-height 200px, then becomes scrollable.
+window.handleKeyDown = function(event) {
+    const textarea = document.getElementById("user-input");
+    
+    if (event.key === "Enter") {
+        // Ctrl+Enter or plain Enter sends the message
+        // Shift+Enter inserts a newline
+        if (!event.shiftKey) {
+            event.preventDefault();
+            sendMessage();
+        }
+        // If Shift is held, the default textarea newline behavior proceeds
+    }
 };
 
 window.handlePDFUpload = async function(event) {
@@ -797,6 +810,8 @@ window.sendMessage = async function() {
     if (selectedImageFile) formData.append("image", selectedImageFile);
 
     inputField.value = "";
+    // Reset textarea height to minimum after sending
+    inputField.style.height = "auto";
     clearSelectedImage();
     chatBox.scrollTop = chatBox.scrollHeight;
 
