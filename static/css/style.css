@@ -8,13 +8,20 @@
 body {
     background-color: #000000;
     color: #ffffff;
-    height: 100vh;
+    height: 100vh; /* fallback for browsers without dvh support */
+    height: 100dvh; /* tracks the real visible viewport on mobile, where
+                        the address/toolbar can show or hide; 100vh alone
+                        is pinned to the largest-possible viewport and can
+                        leave part of the layout pushed off-screen once
+                        browser chrome is visible (root cause of BUG 1's
+                        inconsistent/clipped symptoms on mobile) */
     overflow: hidden;
 }
 
 .app-layout {
     display: flex;
     height: 100vh;
+    height: 100dvh;
     width: 100vw;
 }
 
@@ -250,6 +257,7 @@ body {
     padding: 20px;
     gap: 12px;
     height: 100vh;
+    height: 100dvh;
 }
 
 /* Navbar & Branding */
@@ -404,7 +412,8 @@ body {
 
 .bot-message mjx-container[display="true"] {
     display: block;
-    overflow-x: auto;
+    width: 100%;
+    max-width: 100%;
     margin: 6px 0;
 }
 
