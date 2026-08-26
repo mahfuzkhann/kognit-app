@@ -325,6 +325,10 @@ body {
 /* Chat Box */
 .chat-box {
     flex: 1;
+    min-height: 0; /* required so this flex child can shrink below its content's
+                       intrinsic height inside .main-content's column flex layout;
+                       without this, long content grows the box instead of
+                       scrolling inside it (root cause of BUG 1) */
     background: #080808;
     border: 1px solid #1a1a1a;
     border-radius: 12px;
@@ -386,6 +390,22 @@ body {
 .bot-message svg {
     max-width: 100%;
     height: auto;
+}
+
+/* MathJax wraps every equation's <svg> in an <mjx-container>. That wrapper
+   is inline-block and normally shrinks to fit its (now-capped) svg, but as
+   a defense-in-depth measure it is capped directly too, and a wide display
+   equation gets its own isolated horizontal scroll instead of ever pushing
+   on .bot-message's width. Inline equations are left as inline-block so
+   they still sit naturally inside a line of text. */
+.bot-message mjx-container {
+    max-width: 100%;
+}
+
+.bot-message mjx-container[display="true"] {
+    display: block;
+    overflow-x: auto;
+    margin: 6px 0;
 }
 
 /* Images inside bot messages should be responsive */
