@@ -102,17 +102,17 @@ async function loadProjectsFromDatabase() {
                 chats: p.chats || []
             })));
         } else {
-            const localData = JSON.parse(localStorage.getItem("kognit_projects")) || [];
-            if (localData.length > 0) {
-                projects = normalizeProjectTitles(localData);
-                for (const proj of projects) {
-                    await syncProjectToDatabase(proj);
-                }
-            } else {
-                projects = [];
-                createNewProject();
-                return;
-            }
+            // Security fix: this used to fall back to whatever was cached
+            // in localStorage["kognit_projects"] and silently sync it into
+            // this (possibly brand-new) account. That leftover data could
+            // belong to a different person entirely (e.g. a previous user
+            // on a shared browser who logged out without clearing local
+            // data). A newly logged-in account with an empty database must
+            // always start fresh - it must never inherit anyone else's
+            // local cache, guest or otherwise.
+            projects = [];
+            createNewProject();
+            return;
         }
 
         initializeActiveProject();
@@ -285,6 +285,17 @@ window.handleLogout = async function() {
     await supabaseClient.auth.signOut();
     currentUser = null;
     updateAuthUI(null);
+
+    // Security fix: the logged-in user's projects were mirrored into
+    // localStorage while they were signed in (see saveProjectsToStorage).
+    // Clearing it here ensures the next person to use this browser -
+    // whether a guest or a different account - cannot see or inherit this
+    // user's chats/projects.
+    localStorage.removeItem("kognit_projects");
+    projects = [];
+    activeProjectId = null;
+    activeChatId = null;
+
     loadProjectsFromLocalStorage();
     alert("Logged out successfully!");
 };
@@ -813,10 +824,27 @@ window.handlePDFUpload = async function(event) {
     chatBox.appendChild(loadingMsg);
     chatBox.scrollTop = chatBox.scrollHeight;
 
+    const headers = {};
+    const { data: { session } } = await supabaseClient.auth.getSession();
+    if (session) {
+        headers["Authorization"] = `Bearer ${session.access_token}`;
+    }
+
     try {
-        const response = await fetch("/api/pdf/upload", { method: "POST", body: formData });
+        const response = await fetch("/api/pdf/upload", { method: "POST", headers: headers, body: formData });
         await response.json();
         chatBox.removeChild(loadingMsg);
+
+        if (!response.ok) {
+            // Covers 401 (not logged in / expired session) as well as any
+            // other upload failure - never show the "loaded successfully"
+            // message for a non-2xx response.
+            alert(response.status === 401
+                ? "Please log in to upload a PDF."
+                : "Failed to upload and parse PDF.");
+            chatBox.scrollTop = chatBox.scrollHeight;
+            return;
+        }
 
         isPDFLoaded = true;
         document.getElementById("pdf-status-text").textContent = `📄 PDF Active: ${file.name}`;
@@ -1105,8 +1133,14 @@ window.generateAndStartQuiz = async function() {
     setupBtn.textContent = "AI is generating questions...";
     setupBtn.disabled = true;
 
+    const headers = {};
+    const { data: { session } } = await supabaseClient.auth.getSession();
+    if (session) {
+        headers["Authorization"] = `Bearer ${session.access_token}`;
+    }
+
     try {
-        const res = await fetch("/api/quiz/generate", { method: "POST", body: formData });
+        const res = await fetch("/api/quiz/generate", { method: "POST", headers: headers, body: formData });
         const data = await res.json();
 
         if (data.questions && data.questions.length > 0) {
