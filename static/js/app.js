@@ -306,6 +306,53 @@ function updateAuthUI(user) {
 
 // ==================== WORKSPACE & CHAT FUNCTIONS ====================
 
+// BUG FIX (can't copy formulas): MathJax renders every equation as an SVG
+// made of vector <path> shapes, not real text - the browser's native
+// select/copy has nothing to grab there (this is a side effect of MathJax
+// using SVG output instead of CHTML, see templates/index.html for why).
+// Rather than fighting MathJax's rendering, every bot message gets its own
+// "Copy" button that copies the ORIGINAL raw Markdown+LaTeX source (already
+// held in memory as msg.text/replyText) straight to the clipboard - formulas
+// included, exactly as Gemini wrote them ($...$, $$...$$, etc.) - while the
+// on-screen MathJax rendering itself is completely untouched.
+function createBotMessageElement(rawText) {
+    const wrapper = document.createElement("div");
+    wrapper.className = "bot-message";
+
+    const contentDiv = document.createElement("div");
+    contentDiv.className = "bot-message-content";
+    contentDiv.innerHTML = marked.parse(rawText);
+    wrapper.appendChild(contentDiv);
+
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "copy-answer-btn";
+    copyBtn.title = "Copy full answer, including formulas";
+    copyBtn.textContent = "📋 Copy";
+    copyBtn.onclick = () => copyBotMessageText(rawText, copyBtn);
+    wrapper.appendChild(copyBtn);
+
+    return wrapper;
+}
+
+function copyBotMessageText(rawText, btnEl) {
+    if (!navigator.clipboard) {
+        alert("Clipboard access isn't available in this browser.");
+        return;
+    }
+    navigator.clipboard.writeText(rawText).then(() => {
+        const originalLabel = btnEl.textContent;
+        btnEl.textContent = "✅ Copied";
+        btnEl.disabled = true;
+        setTimeout(() => {
+            btnEl.textContent = originalLabel;
+            btnEl.disabled = false;
+        }, 1500);
+    }).catch(() => {
+        alert("Couldn't copy to clipboard. Please try selecting the text manually.");
+    });
+}
+
 window.setMode = function(mode) {
     currentMode = mode;
     document.getElementById("btn-direct").classList.toggle("active", mode === "direct");
@@ -385,10 +432,9 @@ function loadChat(projId, chatId) {
     if (!chat) return;
 
     chat.messages.forEach(msg => {
-        const div = document.createElement("div");
-        div.className = msg.role === "user" ? "user-message" : "bot-message";
-
         if (msg.role === "user") {
+            const div = document.createElement("div");
+            div.className = "user-message";
             if (msg.image) {
                 const img = document.createElement("img");
                 img.src = msg.image;
@@ -400,11 +446,10 @@ function loadChat(projId, chatId) {
                 span.textContent = msg.text;
                 div.appendChild(span);
             }
+            chatBox.appendChild(div);
         } else {
-            div.innerHTML = marked.parse(msg.text);
+            chatBox.appendChild(createBotMessageElement(msg.text));
         }
-
-        chatBox.appendChild(div);
     });
 
     if (window.MathJax) {
@@ -854,9 +899,7 @@ window.sendMessage = async function() {
         }
 
         if (isStillViewingThisChat) {
-            const botDiv = document.createElement("div");
-            botDiv.className = "bot-message";
-            botDiv.innerHTML = marked.parse(replyText);
+            const botDiv = createBotMessageElement(replyText);
             chatBox.appendChild(botDiv);
 
             if (window.MathJax) {

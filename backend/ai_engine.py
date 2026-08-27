@@ -2,9 +2,16 @@ import os
 import io
 import json
 import logging
+import time
 from PIL import Image
 import google.generativeai as genai
-from google.api_core.exceptions import ResourceExhausted
+from google.api_core.exceptions import (
+    ResourceExhausted,
+    DeadlineExceeded,
+    ServiceUnavailable,
+    InternalServerError,
+    Aborted,
+)
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -30,12 +37,39 @@ QUOTA_EXHAUSTED_ERROR = (
     "এই মুহূর্তে আপনার প্রশ্নের উত্তর তৈরি করা যাচ্ছে না। কিছুক্ষণ পরে আবার চেষ্টা করুন।"
 )
 
+# Shown when Gemini returns a response with no usable content - almost
+# always because its safety filters blocked the prompt or the generated
+# candidate (finish_reason != STOP), which raises ValueError when we read
+# response.text. This is NOT a network/provider failure, so retrying would
+# not help - kept as a distinct, non-retried message so it's diagnosable
+# from a student's report without needing server log access.
+BLOCKED_RESPONSE_ERROR = (
+    "Kognit couldn't generate a response for this specific question - it may "
+    "have been blocked by a content safety filter. Please try rephrasing your question."
+)
+
 # How long to wait on a single Gemini call before giving up. This is passed
 # straight through to the SDK's own request_options timeout (seconds), which
 # is the documented/supported way to bound this call in the currently-used
 # google-generativeai SDK. MVP-tunable; not env-driven yet since it's a
 # single constant used in exactly two places below.
 AI_REQUEST_TIMEOUT_SECONDS = 30
+
+# BUG FIX (intermittent "Sorry, Kognit couldn't process..." errors): a single
+# Gemini call can transiently fail even when the service is fine overall - a
+# timeout under load, a momentary 503/500 from Google's side, etc. Previously
+# ANY exception other than ResourceExhausted fell straight through to
+# GENERIC_CHAT_ERROR with zero retry, so a one-off blip looked identical to a
+# real failure to the student on their very first question. These four are
+# the documented transient/retryable exception types in
+# google.api_core.exceptions (504/503/500/409). Retrying once after a short
+# pause resolves the large majority of these without the student ever seeing
+# an error. Deliberately NOT applied to ResourceExhausted (quota exhaustion
+# will not clear in 1.5s) or to the blocked-response case below (retrying an
+# identical request that got safety-blocked just wastes another API call).
+RETRYABLE_EXCEPTIONS = (DeadlineExceeded, ServiceUnavailable, InternalServerError, Aborted)
+MAX_ATTEMPTS = 2  # 1 initial attempt + 1 retry
+RETRY_DELAY_SECONDS = 1.5
 
 # Kognit's internal message roles -> the Gemini SDK's expected chat-history
 # roles. Gemini's start_chat(history=...) requires "user"/"model"; Kognit
@@ -84,7 +118,12 @@ def generate_ai_response(
         "1. IMAGE ANALYSIS: If an image is provided, carefully read handwritten questions, printed equations, or diagrams. Solve step-by-step.\n"
         "2. PDF CONTEXT: If a PDF document text context is provided below, prioritize answering questions based on that document content.\n"
         "3. HYPER-LOCAL CQ FORMAT: When answering Creative Questions (সৃজনশীল) or solutions, strictly format using (ক) জ্ঞানমূলক, (খ) অনুধাবনমূলক, (গ) প্রয়োগমূলক, and (ঘ) উচ্চতর দক্ষতার standard exam rules.\n"
-        "4. FORMULA NOTATION: Wrap inline math in $ ... $ and main equations in $$ ... $$.\n"
+        "4. FORMULA NOTATION: Wrap inline math in $ ... $ and main equations in $$ ... $$. "
+        "CRITICAL: Only pure mathematical notation belongs inside $ ... $ or $$ ... $$ - "
+        "variables, numbers, operators, and standard math symbols (e.g. FV, PV, i, n, +, =, /). "
+        "NEVER put Bangla or English words, labels, or explanations inside math delimiters - "
+        "this breaks Bangla text rendering. Write all Bangla/English labels, explanations, "
+        "and descriptions as normal Markdown text OUTSIDE the $ ... $ / $$ ... $$ delimiters.\n"
         "5. Tone must be encouraging, clear, precise, and aligned with the student's curriculum."
     )
     
@@ -94,42 +133,71 @@ def generate_ai_response(
     if mode == "socratic":
         system_instruction += " DO NOT give direct answers immediately. Guide the student step-by-step using helpful questions!"
 
-    try:
-        model = genai.GenerativeModel("gemini-3.6-flash", system_instruction=system_instruction)
-        
-        contents = []
-        if image_bytes:
-            img = Image.open(io.BytesIO(image_bytes))
-            contents.append(img)
-            
-        contents.append(prompt if prompt else "Please analyze this request based on the context.")
+    contents = []
+    if image_bytes:
+        img = Image.open(io.BytesIO(image_bytes))
+        contents.append(img)
 
-        # CHAT-04 fix: use the SDK's multi-turn chat session instead of a
-        # stateless single-shot generate_content call, so prior turns in
-        # THIS chat are actually part of the request Gemini sees. history
-        # is empty on a chat's first message, which is equivalent to the
-        # old behavior. system_instruction (board/class/stream/PDF context/
-        # mode) is unchanged - it's baked into the model above and applies
-        # across the whole chat session automatically.
-        gemini_history = _build_gemini_history(history or [])
-        chat_session = model.start_chat(history=gemini_history)
-        response = chat_session.send_message(
-            contents,
-            request_options={"timeout": AI_REQUEST_TIMEOUT_SECONDS},
-        )
-        return response.text
-    except ResourceExhausted:
-        logger.exception(
-            "generate_ai_response quota exhausted (mode=%s, board=%s, user_class=%s)",
-            mode, board, user_class
-        )
-        return QUOTA_EXHAUSTED_ERROR
-    except Exception:
-        logger.exception(
-            "generate_ai_response failed (mode=%s, board=%s, user_class=%s)",
-            mode, board, user_class
-        )
-        return GENERIC_CHAT_ERROR
+    contents.append(prompt if prompt else "Please analyze this request based on the context.")
+
+    # CHAT-04: history is built once - identical on every retry attempt below.
+    gemini_history = _build_gemini_history(history or [])
+
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            model = genai.GenerativeModel("gemini-3.6-flash", system_instruction=system_instruction)
+
+            # CHAT-04 fix: use the SDK's multi-turn chat session instead of a
+            # stateless single-shot generate_content call, so prior turns in
+            # THIS chat are actually part of the request Gemini sees. history
+            # is empty on a chat's first message, which is equivalent to the
+            # old behavior. system_instruction (board/class/stream/PDF context/
+            # mode) is unchanged - it's baked into the model above and applies
+            # across the whole chat session automatically.
+            chat_session = model.start_chat(history=gemini_history)
+            response = chat_session.send_message(
+                contents,
+                request_options={"timeout": AI_REQUEST_TIMEOUT_SECONDS},
+            )
+            return response.text
+        except ResourceExhausted:
+            logger.exception(
+                "generate_ai_response quota exhausted (mode=%s, board=%s, user_class=%s)",
+                mode, board, user_class
+            )
+            return QUOTA_EXHAUSTED_ERROR
+        except RETRYABLE_EXCEPTIONS as e:
+            if attempt < MAX_ATTEMPTS:
+                logger.warning(
+                    "generate_ai_response transient error on attempt %d/%d (mode=%s, board=%s, user_class=%s): %s",
+                    attempt, MAX_ATTEMPTS, mode, board, user_class, type(e).__name__
+                )
+                time.sleep(RETRY_DELAY_SECONDS)
+                continue
+            logger.exception(
+                "generate_ai_response failed after %d attempts (mode=%s, board=%s, user_class=%s)",
+                MAX_ATTEMPTS, mode, board, user_class
+            )
+            return GENERIC_CHAT_ERROR
+        except ValueError:
+            # response.text raises ValueError when Gemini returns no usable
+            # candidate/part - almost always a safety-filter block, not a
+            # transient failure. Not retried: an identical request would
+            # just get blocked again.
+            logger.exception(
+                "generate_ai_response got a blocked/empty response (mode=%s, board=%s, user_class=%s)",
+                mode, board, user_class
+            )
+            return BLOCKED_RESPONSE_ERROR
+        except Exception:
+            logger.exception(
+                "generate_ai_response failed (mode=%s, board=%s, user_class=%s)",
+                mode, board, user_class
+            )
+            return GENERIC_CHAT_ERROR
+
+    # Not reachable (the loop always returns), kept as a defensive fallback.
+    return GENERIC_CHAT_ERROR
 
 
 def generate_quiz_questions(board: str, user_class: str, subject: str, topic: str, count: int = 5) -> list:

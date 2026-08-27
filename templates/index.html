@@ -33,7 +33,18 @@
                 inlineMath: [['$', '$'], ['\\(', '\\)']],
                 displayMath: [['$$', '$$'], ['\\[', '\\]']],
                 processEscapes: true,
-                processEnvironments: true
+                processEnvironments: true,
+                // BUG FIX (Bangla formula text breaking): MathJax's built-in
+                // fonts have no Bengali coverage/shaping at all, so any
+                // Bangla text that ends up inside math mode - even properly
+                // wrapped in \text{...} - renders with broken conjuncts.
+                // This makes \text{...} inherit the surrounding page font
+                // (Noto Sans Bengali, see the <link> above) instead of
+                // MathJax's own fonts. This is a second line of defense;
+                // the primary fix is the AI prompt in ai_engine.py now
+                // instructing Gemini not to put Bangla inside math
+                // delimiters at all - this covers cases where it still does.
+                mtextInheritFont: true
             },
             options: {
                 skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']

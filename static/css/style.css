@@ -1041,3 +1041,35 @@ body {
     cursor: pointer;
     flex-shrink: 0;
 }
+
+/* Copy-answer button (BUG FIX: can't copy formulas). Sits below each bot
+   message's rendered content. width: fit-content + margin-left: auto is
+   what right-aligns it without changing .bot-message's own layout mode
+   (it stays a plain block element - no flex/grid conversion needed, since
+   .bot-message now only ever has two block children: the content div and
+   this button, which is exactly the block-stacking behavior it already
+   had before this button existed). */
+.copy-answer-btn {
+    display: block;
+    width: fit-content;
+    margin: 10px 0 0 auto;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: #cccccc;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.copy-answer-btn:hover {
+    background: rgba(255, 255, 255, 0.18);
+    color: #ffffff;
+}
+
+.copy-answer-btn:disabled {
+    cursor: default;
+    opacity: 0.85;
+}
