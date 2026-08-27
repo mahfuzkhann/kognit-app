@@ -423,6 +423,82 @@ body {
     height: auto;
 }
 
+/* ========== BUG FIX: Bengali text broken inside math formulas ==========
+   MathJax's SVG renderer does not run full complex-script text shaping on
+   Bengali Unicode inside math mode, so conjuncts/matras break apart into
+   isolated glyphs. static/js/app.js now intercepts any $...$/$$...$$
+   segment that contains Bengali BEFORE MathJax sees it and renders it as
+   real HTML text here instead, so the browser's own (correct) Bengali
+   shaping is used. Segments with no Bengali are untouched and still
+   styled purely by the existing .bot-message mjx-container rules above -
+   nothing here affects normal MathJax output. */
+.kognit-bengali-formula {
+    font-family: "Noto Sans Bengali", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: inherit;
+    font-size: 1em;
+    line-height: 1.8;
+}
+
+/* Display math ($$...$$) is centered on its own line, matching how
+   mjx-container[display="true"] is presented for normal MathJax output. */
+.kognit-bengali-formula--block {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    flex-wrap: wrap;
+    margin: 6px 0;
+    padding: 6px 4px;
+    text-align: center;
+}
+
+.kognit-bengali-formula sup,
+.kognit-bengali-formula sub {
+    font-size: 0.72em;
+}
+
+/* Real HTML fraction (numerator over denominator with a bar) so Bengali
+   text inside a \frac{...}{...} stays genuine, browser-shaped text. */
+.kg-frac {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    vertical-align: middle;
+    margin: 0 4px;
+    text-align: center;
+}
+
+.kg-frac-num,
+.kg-frac-den {
+    padding: 0 4px;
+}
+
+.kg-frac-num {
+    border-bottom: 1.5px solid currentColor;
+    padding-bottom: 2px;
+}
+
+.kg-frac-den {
+    padding-top: 2px;
+}
+
+/* Square root: radical glyph beside the content, with a top border
+   standing in for the vinculum over the (possibly Bengali) content. */
+.kg-sqrt {
+    display: inline-flex;
+    align-items: flex-start;
+    vertical-align: middle;
+    margin: 0 2px;
+}
+
+.kg-sqrt-radical {
+    margin-right: 1px;
+}
+
+.kg-sqrt-content {
+    border-top: 1.5px solid currentColor;
+    padding: 0 3px;
+}
+
 /* Inline elements must not break container */
 .bot-message span,
 .bot-message strong,

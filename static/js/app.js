@@ -306,6 +306,137 @@ function updateAuthUI(user) {
 
 // ==================== WORKSPACE & CHAT FUNCTIONS ====================
 
+// BUG FIX (Bengali text broken inside math formulas): MathJax's SVG/CHTML
+// renderers do not run full complex-script text shaping on the content
+// they typeset - Bengali Unicode inside math mode (even inside \text{...})
+// ends up laid out as isolated per-character glyphs instead of one shaped
+// text run, which breaks conjunct formation and detaches vowel signs
+// (matras) from their base consonant. `mtextInheritFont: true` in
+// templates/index.html only fixes the font-family used; it cannot fix
+// this shaping problem, since MathJax never hands the string to the
+// browser's native text shaper in the first place.
+//
+// Fix: intercept math segments BEFORE MathJax ever sees them. Any
+// $...$ / $$...$$ segment that contains Bengali Unicode (U+0980-U+09FF)
+// is converted here into plain, real HTML text (with hand-built
+// fraction/superscript/subscript markup for the handful of LaTeX
+// constructs NCTB content actually uses), so the browser's native text
+// shaping engine renders the Bengali correctly - exactly like normal
+// prose. Segments with NO Bengali are left completely untouched and
+// still go through MathJax exactly as before (zero change to existing
+// math rendering).
+const BENGALI_UNICODE_RANGE = /[\u0980-\u09FF]/;
+
+// $$...$$ (display) is matched before $...$ (inline) in the same
+// alternation so a display block's own $ characters are never mistaken
+// for a pair of inline segments.
+const MATH_SEGMENT_REGEX = /\$\$([\s\S]+?)\$\$|\$([^\$\n]+?)\$/g;
+
+function escapeHtmlForMath(str) {
+    return str
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+
+// Ordered longest-command-first so e.g. "\leq" is matched before the
+// shorter "\le" would otherwise match a prefix of it and leave a
+// stray "q" behind.
+const BENGALI_MATH_SYMBOL_REPLACEMENTS = [
+    ["\\\\leq", "≤"], ["\\\\le", "≤"],
+    ["\\\\geq", "≥"], ["\\\\ge", "≥"],
+    ["\\\\neq", "≠"], ["\\\\ne", "≠"],
+    ["\\\\approx", "≈"],
+    ["\\\\times", "×"], ["\\\\div", "÷"], ["\\\\cdot", "·"], ["\\\\pm", "±"],
+    ["\\\\infty", "∞"], ["\\\\pi", "π"], ["\\\\Delta", "Δ"],
+    ["\\\\%", "%"]
+];
+
+// Renders one Bengali-containing math segment's raw LaTeX (delimiters
+// already stripped) as safe HTML. Scope is intentionally limited to the
+// LaTeX constructs Kognit's NCTB content actually produces (frac, sqrt,
+// sup/sub, common symbols) - this is NOT a general LaTeX parser.
+function renderBengaliMathSegment(rawLatex, isDisplay) {
+    // Escape FIRST, before any tag-building regex runs below, so nothing
+    // from the AI's output (even if it contained literal HTML) can ever
+    // become a real tag - every "<" / ">" a student's content might
+    // contain is inert text by the time we start inserting our own markup.
+    let text = escapeHtmlForMath(rawLatex.trim());
+
+    // \frac{A}{B} -> a real HTML fraction. Non-nested only (MVP scope):
+    // a \frac whose numerator/denominator itself contains another
+    // \frac/\sqrt is left as literal text rather than mis-rendered, which
+    // is a safer fallback than broken nested markup. The loop lets
+    // multiple, non-nested fractions in the same segment all convert.
+    let previous;
+    do {
+        previous = text;
+        text = text.replace(
+            /\\frac\{([^{}]*)\}\{([^{}]*)\}/g,
+            '<span class="kg-frac"><span class="kg-frac-num">$1</span><span class="kg-frac-den">$2</span></span>'
+        );
+    } while (text !== previous);
+
+    // \sqrt{A}
+    text = text.replace(
+        /\\sqrt\{([^{}]*)\}/g,
+        '<span class="kg-sqrt"><span class="kg-sqrt-radical">√</span><span class="kg-sqrt-content">$1</span></span>'
+    );
+
+    // Superscript / subscript: braced form first, then single-char form.
+    text = text.replace(/\^\{([^{}]*)\}/g, "<sup>$1</sup>");
+    text = text.replace(/\^([A-Za-z0-9])/g, "<sup>$1</sup>");
+    text = text.replace(/_\{([^{}]*)\}/g, "<sub>$1</sub>");
+    text = text.replace(/_([A-Za-z0-9])/g, "<sub>$1</sub>");
+
+    // Common LaTeX symbols used in NCTB math/science/business content.
+    for (const [pattern, replacement] of BENGALI_MATH_SYMBOL_REPLACEMENTS) {
+        text = text.replace(new RegExp(pattern, "g"), replacement);
+    }
+
+    // Graceful fallback: any LaTeX command we don't explicitly handle
+    // above just has its backslash dropped and the command name kept as
+    // plain text, rather than showing a raw "\command" to the student.
+    // Any stray braces left over from an unhandled construct are removed
+    // too, since they carry no visual meaning once the command is gone.
+    text = text.replace(/\\([a-zA-Z]+)/g, "$1");
+    text = text.replace(/[{}]/g, "");
+
+    const displayClass = isDisplay ? " kognit-bengali-formula--block" : "";
+    return `<span class="kognit-bengali-formula${displayClass}">${text}</span>`;
+}
+
+// Scans rawText for $...$/$$...$$ segments and replaces ONLY the ones
+// containing Bengali Unicode with safe HTML (see renderBengaliMathSegment
+// above). Segments with no Bengali are returned byte-for-byte unchanged,
+// so MathJax.typesetPromise() (called after marked.parse() further down
+// the pipeline) still typesets every non-Bengali formula exactly as
+// before - zero behavior change for pure math.
+function preprocessBengaliMath(rawText) {
+    if (!rawText) return rawText;
+
+    // Skip fenced code blocks entirely so a literal "$" inside a student's
+    // code sample is never mistaken for a math delimiter.
+    const parts = rawText.split(/(```[\s\S]*?```)/g);
+
+    return parts.map((chunk, idx) => {
+        const isCodeFence = idx % 2 === 1;
+        if (isCodeFence) return chunk;
+
+        return chunk.replace(MATH_SEGMENT_REGEX, (match, displayContent, inlineContent) => {
+            const isDisplay = displayContent !== undefined;
+            const content = isDisplay ? displayContent : inlineContent;
+
+            if (!BENGALI_UNICODE_RANGE.test(content)) {
+                return match; // No Bangla - leave untouched for MathJax.
+            }
+            return renderBengaliMathSegment(content, isDisplay);
+        });
+    }).join("");
+}
+
 // BUG FIX (can't copy formulas): MathJax renders every equation as an SVG
 // made of vector <path> shapes, not real text - the browser's native
 // select/copy has nothing to grab there (this is a side effect of MathJax
@@ -321,7 +452,11 @@ function createBotMessageElement(rawText) {
 
     const contentDiv = document.createElement("div");
     contentDiv.className = "bot-message-content";
-    contentDiv.innerHTML = marked.parse(rawText);
+    // Bengali-containing math segments are swapped for safe HTML BEFORE
+    // Markdown parsing (see preprocessBengaliMath above); everything else
+    // - including every non-Bengali formula - reaches marked.parse() and
+    // MathJax exactly as it always has.
+    contentDiv.innerHTML = marked.parse(preprocessBengaliMath(rawText));
     wrapper.appendChild(contentDiv);
 
     const copyBtn = document.createElement("button");
