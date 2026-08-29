@@ -8,7 +8,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from backend.ai_engine import generate_ai_response, generate_quiz_questions
+from backend.ai_engine import generate_ai_response, generate_quiz_questions, generate_chat_title
 from backend.rag_engine import extract_text_from_pdf, PDFExtractionError
 from typing import Optional
 
@@ -259,6 +259,30 @@ async def chat_endpoint(
             time.perf_counter() - t_request_start
         )
         return {"reply": "Sorry, something went wrong handling your request. Please try again."}
+
+@app.post("/api/chat/title")
+async def chat_title_endpoint(
+    history: str = Form("[]"),
+    board: str = Form("NCTB Bangla Medium"),
+    user_id: str = Depends(get_current_user_id)
+):
+    """
+    FEATURE 2: generates a short, context-aware title for a chat from its
+    recent message history. Requires auth like every other endpoint here,
+    but is intentionally NOT tied to active_pdf_contexts or any other
+    per-request state - it is a small, side-channel call the frontend makes
+    at most once per chat (see maybeGenerateAiTitle() in app.js), not part
+    of the main answer path. Reuses the exact same history validation as
+    /api/chat so this endpoint cannot be used to smuggle an oversized or
+    malformed payload past the caps enforced there.
+    """
+    conversation_history = parse_and_validate_history(history)
+    if not conversation_history:
+        return {"title": None}
+
+    title = await run_in_threadpool(generate_chat_title, history=conversation_history, board=board)
+    return {"title": title}
+
 
 @app.post("/api/quiz/generate")
 async def quiz_generate_endpoint(

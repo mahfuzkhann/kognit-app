@@ -41,6 +41,67 @@ let editingProjectId = null;
 let editingChatId = null;
 let searchQuery = "";
 
+// ==================== SIDEBAR IA: COLLAPSIBLE PROJECT FOLDERS ====================
+// FEATURE 1: which real projects are currently collapsed (chats hidden).
+// This is a pure UI/display preference, not student data, so it is kept in
+// localStorage only (not synced to Supabase) - same tier of persistence as
+// "which project was last active" already was before this feature existed.
+// A project not present in this set is EXPANDED by default (matches the
+// pre-existing behavior where a project's chats were always visible).
+const COLLAPSED_PROJECTS_STORAGE_KEY = "kognit_collapsed_projects";
+
+function loadCollapsedProjectIds() {
+    try {
+        const raw = localStorage.getItem(COLLAPSED_PROJECTS_STORAGE_KEY);
+        return new Set(raw ? JSON.parse(raw) : []);
+    } catch (e) {
+        return new Set();
+    }
+}
+
+let collapsedProjectIds = loadCollapsedProjectIds();
+
+function saveCollapsedProjectIds() {
+    localStorage.setItem(COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([...collapsedProjectIds]));
+}
+
+function toggleProjectCollapsed(projId) {
+    if (collapsedProjectIds.has(projId)) {
+        collapsedProjectIds.delete(projId);
+    } else {
+        collapsedProjectIds.add(projId);
+    }
+    saveCollapsedProjectIds();
+    renderHistoryList();
+}
+
+// A newly created project/chat should always be visibly expanded, even if
+// the user had previously collapsed that project id in an earlier session.
+function ensureProjectExpanded(projId) {
+    if (collapsedProjectIds.has(projId)) {
+        collapsedProjectIds.delete(projId);
+        saveCollapsedProjectIds();
+    }
+}
+
+// ==================== FEATURE 3: PIN CHAT (sort helper) ====================
+// Pinned chats float to the top of whichever list they belong to (a
+// project's nested chats, or the flat Recent Chats list), while preserving
+// the existing relative order of same-pinned-state chats. This is
+// DISPLAY-ONLY sorting - it never mutates the underlying chats array, so
+// the array's own order (newest-first via unshift on creation) stays intact
+// as the actual persisted storage order. Array.prototype.sort is stable per
+// spec (ES2019+), so ties keep their original relative order.
+function sortChatsForDisplay(chatsList) {
+    return [...(chatsList || [])].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
+}
+
+function togglePinChat(chat) {
+    chat.pinned = !chat.pinned;
+    saveProjectsToStorage();
+    renderHistoryList();
+}
+
 let selectedImageBase64 = null;
 let selectedImageFile = null;
 let isPDFLoaded = false;
@@ -525,7 +586,20 @@ function preprocessBengaliMath(rawText) {
 // held in memory as msg.text/replyText) straight to the clipboard - formulas
 // included, exactly as Gemini wrote them ($...$, $$...$$, etc.) - while the
 // on-screen MathJax rendering itself is completely untouched.
-function createBotMessageElement(rawText) {
+// ==================== FEATURE 4: AI ANSWER ACTION TOOLBAR ====================
+// Minimal inline SVG icons (currentColor-based, no external icon library in
+// this vanilla-JS project) - explicitly no emoji, per product spec.
+const TOOLBAR_ICONS = {
+    copy: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`,
+    check: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`,
+    speaker: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.5 8.5a5 5 0 0 1 0 7"></path></svg>`,
+    speakerOff: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line></svg>`,
+    thumbsUp: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3H14z"></path><path d="M7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"></path></svg>`,
+    thumbsDown: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3H10z"></path><path d="M17 2h3a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3"></path></svg>`,
+    regenerate: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>`
+};
+
+function createBotMessageElement(rawText, meta = {}) {
     const wrapper = document.createElement("div");
     wrapper.className = "bot-message";
 
@@ -538,15 +612,92 @@ function createBotMessageElement(rawText) {
     contentDiv.innerHTML = marked.parse(preprocessBengaliMath(rawText));
     wrapper.appendChild(contentDiv);
 
-    const copyBtn = document.createElement("button");
-    copyBtn.type = "button";
-    copyBtn.className = "copy-answer-btn";
-    copyBtn.title = "Copy full answer, including formulas";
-    copyBtn.textContent = "📋 Copy";
-    copyBtn.onclick = () => copyBotMessageText(rawText, copyBtn);
-    wrapper.appendChild(copyBtn);
+    wrapper.appendChild(buildBotToolbar(rawText, meta));
 
     return wrapper;
+}
+
+// Builds the subtle icon-only action row shown under every AI answer: Copy,
+// Read Aloud, Like, Dislike, Regenerate. `meta` identifies where this exact
+// message lives ({projId, chatId, msgIndex}) so Like/Dislike/Regenerate can
+// find and persist against the right message. meta is optional/best-effort
+// - if any id is missing (should not normally happen), the feedback and
+// regenerate buttons simply no-op rather than throwing.
+function buildBotToolbar(rawText, meta) {
+    const toolbar = document.createElement("div");
+    toolbar.className = "bot-toolbar";
+
+    // ---- Copy (pre-existing feature, restyled into the shared toolbar) ----
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "toolbar-btn";
+    copyBtn.title = "Copy full answer, including formulas";
+    copyBtn.innerHTML = `${TOOLBAR_ICONS.copy}<span>Copy</span>`;
+    copyBtn.onclick = () => copyBotMessageText(rawText, copyBtn);
+    toolbar.appendChild(copyBtn);
+
+    // ---- Read Aloud ----
+    // Uses the browser's native SpeechSynthesis API (no backend dependency).
+    // Bangla support depends entirely on the browser/OS's installed voices -
+    // if none is available, speechSynthesis silently falls back to a
+    // default voice rather than failing, which is acceptable MVP behavior.
+    const speakBtn = document.createElement("button");
+    speakBtn.type = "button";
+    speakBtn.className = "toolbar-btn";
+    speakBtn.title = "Read answer aloud";
+    speakBtn.innerHTML = `${TOOLBAR_ICONS.speaker}<span>Listen</span>`;
+    if (!("speechSynthesis" in window)) {
+        speakBtn.disabled = true;
+        speakBtn.title = "Read Aloud isn't supported in this browser";
+    } else {
+        speakBtn.onclick = () => toggleReadAloud(rawText, speakBtn);
+    }
+    toolbar.appendChild(speakBtn);
+
+    // ---- Like / Dislike ----
+    const likeBtn = document.createElement("button");
+    likeBtn.type = "button";
+    likeBtn.className = "toolbar-btn";
+    likeBtn.title = "Good answer";
+    likeBtn.innerHTML = TOOLBAR_ICONS.thumbsUp;
+
+    const dislikeBtn = document.createElement("button");
+    dislikeBtn.type = "button";
+    dislikeBtn.className = "toolbar-btn";
+    dislikeBtn.title = "Needs improvement";
+    dislikeBtn.innerHTML = TOOLBAR_ICONS.thumbsDown;
+
+    const canGiveFeedback = meta && meta.projId && meta.chatId && Number.isInteger(meta.msgIndex);
+    applyFeedbackVisualState(likeBtn, dislikeBtn, meta ? meta.feedback : null);
+    if (canGiveFeedback) {
+        likeBtn.onclick = () => setMessageFeedback(meta, "like", likeBtn, dislikeBtn);
+        dislikeBtn.onclick = () => setMessageFeedback(meta, "dislike", likeBtn, dislikeBtn);
+    } else {
+        likeBtn.disabled = true;
+        dislikeBtn.disabled = true;
+    }
+    toolbar.appendChild(likeBtn);
+    toolbar.appendChild(dislikeBtn);
+
+    // ---- Regenerate ----
+    const regenBtn = document.createElement("button");
+    regenBtn.type = "button";
+    regenBtn.className = "toolbar-btn";
+    regenBtn.title = "Regenerate this answer";
+    regenBtn.innerHTML = `${TOOLBAR_ICONS.regenerate}<span>Regenerate</span>`;
+    if (canGiveFeedback) {
+        regenBtn.onclick = () => regenerateBotMessage(meta, regenBtn);
+    } else {
+        regenBtn.disabled = true;
+    }
+    toolbar.appendChild(regenBtn);
+
+    return toolbar;
+}
+
+function applyFeedbackVisualState(likeBtn, dislikeBtn, feedback) {
+    likeBtn.classList.toggle("active-like", feedback === "like");
+    dislikeBtn.classList.toggle("active-dislike", feedback === "dislike");
 }
 
 function copyBotMessageText(rawText, btnEl) {
@@ -554,17 +705,145 @@ function copyBotMessageText(rawText, btnEl) {
         alert("Clipboard access isn't available in this browser.");
         return;
     }
+    const originalHtml = btnEl.innerHTML;
     navigator.clipboard.writeText(rawText).then(() => {
-        const originalLabel = btnEl.textContent;
-        btnEl.textContent = "✅ Copied";
+        btnEl.innerHTML = `${TOOLBAR_ICONS.check}<span>Copied</span>`;
         btnEl.disabled = true;
         setTimeout(() => {
-            btnEl.textContent = originalLabel;
+            btnEl.innerHTML = originalHtml;
             btnEl.disabled = false;
         }, 1500);
     }).catch(() => {
         alert("Couldn't copy to clipboard. Please try selecting the text manually.");
     });
+}
+
+// Strips Markdown/LaTeX punctuation that would otherwise be read aloud
+// literally ("hash", "dollar dollar", "star star", ...) by the speech
+// engine. This is a plain-text approximation, not a full LaTeX-to-speech
+// converter - acceptable for MVP read-aloud of prose answers.
+function stripMarkupForSpeech(rawText) {
+    return rawText
+        .replace(/\$\$?/g, " ")
+        .replace(/\\\[|\\\]|\\\(|\\\)/g, " ")
+        .replace(/[#*_`>~]+/g, " ")
+        .replace(/\[(.*?)\]\(.*?\)/g, "$1")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+function toggleReadAloud(rawText, btnEl) {
+    if (!("speechSynthesis" in window)) return;
+
+    // Acts as a play/stop toggle: clicking the active speaker again cancels
+    // playback instead of restarting it.
+    if (window.speechSynthesis.speaking) {
+        window.speechSynthesis.cancel();
+        return; // onend below resets the icon/label for whichever button was speaking
+    }
+
+    const utterance = new SpeechSynthesisUtterance(stripMarkupForSpeech(rawText));
+    btnEl.innerHTML = `${TOOLBAR_ICONS.speakerOff}<span>Stop</span>`;
+
+    const reset = () => { btnEl.innerHTML = `${TOOLBAR_ICONS.speaker}<span>Listen</span>`; };
+    utterance.onend = reset;
+    utterance.onerror = reset;
+
+    window.speechSynthesis.speak(utterance);
+}
+
+// FEATURE 4: Like/Dislike. Persists straight onto the message object inside
+// `projects` (proj.chats[].messages[].feedback), which already flows
+// through the exact same saveProjectsToStorage()/syncProjectToDatabase()
+// path as every other piece of chat data - no new schema, table, or
+// endpoint required. For a logged-in user this is genuinely durable
+// (Supabase, user-isolated via the existing RLS on user_projects); for a
+// guest it lives in localStorage only, same as the rest of their chat
+// history today.
+function setMessageFeedback(meta, feedback, likeBtn, dislikeBtn) {
+    const proj = projects.find(p => p.id === meta.projId);
+    const chat = proj ? proj.chats.find(c => c.id === meta.chatId) : null;
+    const msg = chat ? chat.messages[meta.msgIndex] : null;
+    if (!msg) return;
+
+    // Clicking the already-active choice clears it (toggle off).
+    msg.feedback = (msg.feedback === feedback) ? null : feedback;
+    meta.feedback = msg.feedback;
+    applyFeedbackVisualState(likeBtn, dislikeBtn, msg.feedback);
+    saveProjectsToStorage();
+}
+
+// FEATURE 4: Regenerate. Re-asks the ORIGINAL preceding user turn (with the
+// same conversation history that turn originally had) and replaces this bot
+// message's text in place, preserving its position in the chat so the
+// surrounding conversation order is untouched.
+//
+// Known MVP limitation: if the original user turn included an uploaded
+// image, we do not retain the raw image file (only its lightweight base64
+// preview for on-screen display) - regenerating a text-only re-ask would
+// silently drop the visual context the original answer was based on, which
+// could produce a misleading result. Regenerate is therefore disabled for
+// image-based turns rather than approximating an answer without the image.
+async function regenerateBotMessage(meta, btnEl) {
+    const proj = projects.find(p => p.id === meta.projId);
+    const chat = proj ? proj.chats.find(c => c.id === meta.chatId) : null;
+    if (!chat) return;
+
+    const userMsg = chat.messages[meta.msgIndex - 1];
+    if (!userMsg || userMsg.role !== "user") {
+        alert("Can't find the original question for this answer.");
+        return;
+    }
+    if (userMsg.image) {
+        alert("Regenerate isn't available for image-based questions yet.");
+        return;
+    }
+
+    const originalHtml = btnEl.innerHTML;
+    btnEl.disabled = true;
+    btnEl.innerHTML = `${TOOLBAR_ICONS.regenerate}<span>Working...</span>`;
+
+    // Same bounded-history construction as sendMessage(), but only up to
+    // (not including) the user turn being re-asked.
+    const priorMessages = chat.messages.slice(0, meta.msgIndex - 1);
+    const boundedHistory = priorMessages
+        .slice(-20)
+        .map(m => {
+            let text = (m.text || "").trim();
+            if (!text && m.image) text = "[Student uploaded an image]";
+            return { role: m.role, text: text };
+        });
+
+    const formData = new FormData();
+    formData.append("prompt", userMsg.text || "Analyze this document/image.");
+    formData.append("mode", currentMode);
+    formData.append("board", document.getElementById("board-select").value);
+    formData.append("user_class", document.getElementById("class-select").value);
+    formData.append("stream", document.getElementById("stream-select").value);
+    formData.append("history", JSON.stringify(boundedHistory));
+
+    try {
+        const headers = {};
+        const { data: { session } } = await supabaseClient.auth.getSession();
+        if (session) headers["Authorization"] = `Bearer ${session.access_token}`;
+
+        const response = await fetch("/api/chat", { method: "POST", headers, body: formData });
+        const data = await response.json();
+        const replyText = data.reply || "No response received.";
+
+        // Replace in place (same array index) - never insert a duplicate
+        // user or bot message, and never shift later messages' indices.
+        chat.messages[meta.msgIndex] = { role: "bot", text: replyText };
+        saveProjectsToStorage();
+
+        if (activeProjectId === meta.projId && activeChatId === meta.chatId) {
+            loadChat(meta.projId, meta.chatId);
+        }
+    } catch (e) {
+        alert("Couldn't regenerate this answer. Please try again.");
+        btnEl.disabled = false;
+        btnEl.innerHTML = originalHtml;
+    }
 }
 
 window.setMode = function(mode) {
@@ -599,6 +878,7 @@ window.createNewProject = function() {
     projects.unshift(newProj);
     activeProjectId = newProj.id;
     activeChatId = newProj.chats[0].id;
+    ensureProjectExpanded(newProj.id);
 
     saveProjectsToStorage();
     renderHistoryList();
@@ -625,6 +905,7 @@ window.createNewChat = function(projectId = null) {
     project.chats.unshift(newChat);
     activeProjectId = project.id;
     activeChatId = newChat.id;
+    ensureProjectExpanded(project.id);
 
     saveProjectsToStorage();
     renderHistoryList();
@@ -695,7 +976,7 @@ function loadChat(projId, chatId) {
     const chat = proj.chats.find(c => c.id === chatId);
     if (!chat) return;
 
-    chat.messages.forEach(msg => {
+    chat.messages.forEach((msg, index) => {
         if (msg.role === "user") {
             const div = document.createElement("div");
             div.className = "user-message";
@@ -712,7 +993,12 @@ function loadChat(projId, chatId) {
             }
             chatBox.appendChild(div);
         } else {
-            chatBox.appendChild(createBotMessageElement(msg.text));
+            chatBox.appendChild(createBotMessageElement(msg.text, {
+                projId: projId,
+                chatId: chatId,
+                msgIndex: index,
+                feedback: msg.feedback || null
+            }));
         }
     });
 
@@ -741,6 +1027,10 @@ function renderChatItem(proj, chat) {
         const saveChatTitle = () => {
             if (input.value.trim()) {
                 chat.title = input.value.trim();
+                // FEATURE 2: a manual rename always wins from now on - the
+                // background AI title generator (maybeGenerateAiTitle) must
+                // never overwrite a title the user deliberately chose.
+                chat.titleSource = "manual";
                 saveProjectsToStorage();
             }
             editingChatId = null;
@@ -757,11 +1047,21 @@ function renderChatItem(proj, chat) {
     } else {
         const titleText = document.createElement("span");
         titleText.className = "chat-title-text";
-        titleText.textContent = "💬 " + chat.title;
+        titleText.textContent = (chat.pinned ? "📌 " : "💬 ") + chat.title;
         titleText.onclick = () => loadChat(proj.id, chat.id);
 
         const chatActions = document.createElement("div");
         chatActions.className = "item-actions";
+
+        // FEATURE 3: pin/unpin toggle. Kept as a plain action-btn (same
+        // visual language as edit/delete) so it doesn't visually compete
+        // with the AI answer toolbar icons below, which are a separate
+        // feature (Feature 4) in a different part of the UI.
+        const pinBtn = document.createElement("button");
+        pinBtn.className = `action-btn pin-btn ${chat.pinned ? "pinned" : ""}`;
+        pinBtn.title = chat.pinned ? "Unpin Chat" : "Pin Chat";
+        pinBtn.innerHTML = `📌`;
+        pinBtn.onclick = (e) => { e.stopPropagation(); togglePinChat(chat); };
 
         const editChatBtn = document.createElement("button");
         editChatBtn.className = "action-btn";
@@ -775,6 +1075,7 @@ function renderChatItem(proj, chat) {
         delChatBtn.innerHTML = `🗑️`;
         delChatBtn.onclick = (e) => { e.stopPropagation(); deleteChat(proj.id, chat.id); };
 
+        chatActions.appendChild(pinBtn);
         chatActions.appendChild(editChatBtn);
         chatActions.appendChild(delChatBtn);
 
@@ -826,12 +1127,26 @@ function renderProjectCard(proj) {
         header.appendChild(input);
         setTimeout(() => input.focus(), 50);
     } else {
+        // FEATURE 1: collapsible folder. A search in progress always forces
+        // the project open (so search results are visible) regardless of
+        // the user's saved collapsed/expanded preference - collapsing a
+        // project that has a matching chat inside it would silently hide
+        // the very result the user just searched for.
+        const isSearching = searchQuery !== "";
+        const isCollapsed = !isSearching && collapsedProjectIds.has(proj.id);
+
         const wrapper = document.createElement("div");
         wrapper.className = "project-title-wrapper";
-        wrapper.innerHTML = `<span>📁</span><span class="project-title-text">${proj.title}</span>`;
+        wrapper.innerHTML =
+            `<span class="project-chevron ${isCollapsed ? "collapsed" : ""}">▾</span>` +
+            `<span>📁</span><span class="project-title-text">${proj.title}</span>`;
+        // Clicking the project row/title ONLY expands or collapses its
+        // chat list (per product spec) - it no longer also navigates into
+        // the first chat. Opening a specific chat is done by clicking that
+        // chat row directly, same as always.
         wrapper.onclick = () => {
-            activeProjectId = proj.id;
-            if (proj.chats.length > 0) loadChat(proj.id, proj.chats[0].id);
+            if (isSearching) return; // no-op while a search is forcing it open
+            toggleProjectCollapsed(proj.id);
         };
 
         const actions = document.createElement("div");
@@ -866,10 +1181,13 @@ function renderProjectCard(proj) {
     projCard.appendChild(header);
 
     const chatsList = document.createElement("div");
-    chatsList.className = "chats-list";
+    const isSearchingForList = searchQuery !== "";
+    const isCollapsedForList = !isSearchingForList && collapsedProjectIds.has(proj.id) && editingProjectId !== proj.id;
+    chatsList.className = `chats-list ${isCollapsedForList ? "collapsed" : ""}`;
 
     const chatsToDisplay = projTitleMatches && searchQuery !== "" ? proj.chats : (searchQuery !== "" ? matchingChats : proj.chats);
-    (chatsToDisplay || []).forEach(chat => {
+    // FEATURE 3: pinned chats render first within this project's folder.
+    sortChatsForDisplay(chatsToDisplay).forEach(chat => {
         chatsList.appendChild(renderChatItem(proj, chat));
     });
 
@@ -919,7 +1237,9 @@ function renderHistoryList() {
 
             const recentList = document.createElement("div");
             recentList.className = "recent-chats-list";
-            matchingRecentChats.forEach(chat => {
+            // FEATURE 3: pinned standalone chats float to the top of
+            // Recent Chats, same rule as pinned chats inside a project.
+            sortChatsForDisplay(matchingRecentChats).forEach(chat => {
                 recentList.appendChild(renderChatItem(defaultProject, chat));
             });
             historyList.appendChild(recentList);
@@ -944,6 +1264,14 @@ async function deleteProject(projId) {
     projects = projects.filter(p => p.id !== projId);
     await deleteProjectFromDatabase(projId);
     saveProjectsToStorage();
+
+    // Clean up the now-meaningless collapsed/expanded preference for this
+    // (deleted) project id, so localStorage doesn't accumulate stale ids
+    // forever across a user's account lifetime.
+    if (collapsedProjectIds.has(projId)) {
+        collapsedProjectIds.delete(projId);
+        saveCollapsedProjectIds();
+    }
 
     // SIDEBAR IA FIX: must check REAL projects here, not `projects` as a
     // whole. Before the Recent Chats bucket existed, `projects.length === 0`
@@ -1124,6 +1452,66 @@ function generateChatTitle(rawText) {
     return base.replace(/[.,;:!?]+$/, "") + "...";
 }
 
+// FEATURE 2, part 3: context-aware AI title generation.
+//
+// Runs AFTER the student already has their answer on screen - never on the
+// critical answer path, and never more than ONCE per chat (aiTitleGenerated
+// guards this), so it never spams the AI backend on every message. It only
+// fires once the chat has real context to summarize (>= 2 user turns
+// answered) - a single "Hey" has nothing meaningful to title yet, which is
+// exactly the case called out in the product spec.
+//
+// Silently does nothing (keeps the existing heuristic title) if:
+// - the chat was manually renamed (titleSource === "manual"),
+// - a title was already AI-generated for this chat,
+// - there isn't enough context yet,
+// - the backend call fails for any reason (network error, AI error, etc).
+async function maybeGenerateAiTitle(proj, chat) {
+    if (!chat || chat.titleSource === "manual" || chat.aiTitleGenerated) return;
+
+    const userTurns = chat.messages.filter(m => m.role === "user").length;
+    if (userTurns < 2) return;
+
+    // Guard against duplicate concurrent calls (e.g. two quick messages
+    // both crossing the >=2 threshold before the first request returns).
+    chat.aiTitleGenerated = true;
+
+    try {
+        const boundedHistory = chat.messages
+            .slice(-20)
+            .map(m => ({ role: m.role, text: (m.text || "").trim() || (m.image ? "[Student uploaded an image]" : "") }))
+            .filter(m => m.text);
+
+        const formData = new FormData();
+        formData.append("history", JSON.stringify(boundedHistory));
+        formData.append("board", document.getElementById("board-select").value);
+
+        const headers = {};
+        const { data: { session } } = await supabaseClient.auth.getSession();
+        if (session) headers["Authorization"] = `Bearer ${session.access_token}`;
+        if (!session) { chat.aiTitleGenerated = false; return; } // endpoint requires auth; quietly skip for guests
+
+        const res = await fetch("/api/chat/title", { method: "POST", headers, body: formData });
+        const data = await res.json();
+
+        // Re-check titleSource: the user may have manually renamed the
+        // chat in the time this request was in flight.
+        if (data.title && chat.titleSource !== "manual") {
+            chat.title = data.title;
+            chat.titleSource = "ai";
+            if (proj && proj.title === "New Project") proj.title = data.title;
+            saveProjectsToStorage();
+            renderHistoryList();
+        }
+    } catch (e) {
+        console.error("AI title generation failed (non-critical):", e);
+        // Leave aiTitleGenerated=true anyway - do not retry automatically;
+        // the heuristic title already in place remains a perfectly usable
+        // fallback, and retry-storms on a flaky connection are worse than
+        // one imperfect title.
+    }
+}
+
 window.sendMessage = async function() {
     const inputField = document.getElementById("user-input");
     const chatBox = document.getElementById("chat-box");
@@ -1147,7 +1535,16 @@ window.sendMessage = async function() {
     const requestChatId = activeChatId;
 
     if (currentChat.messages.filter(m => m.role === "user").length === 0 && currentChat.title === "New Chat") {
+        // Instant placeholder title (FEATURE 2, part 1): shown immediately
+        // so the user never waits on the AI for a title. titleSource
+        // starts as "heuristic" - maybeGenerateAiTitle() below is free to
+        // replace it later with a context-aware AI title once there is
+        // enough conversation to work with, UNLESS the user manually
+        // renames the chat first (which sets titleSource to "manual" and
+        // permanently opts this chat out of auto-retitling).
         currentChat.title = generateChatTitle(promptText || "PDF/Image Query");
+        currentChat.titleSource = "heuristic";
+        currentChat.aiTitleGenerated = false;
         if (proj.title === "New Project") proj.title = currentChat.title;
         renderHistoryList();
     }
@@ -1242,13 +1639,24 @@ window.sendMessage = async function() {
 
         const replyText = data.reply || "No response received.";
 
+        let newBotMsgIndex = -1;
         if (targetChat) {
             targetChat.messages.push({ role: "bot", text: replyText });
+            newBotMsgIndex = targetChat.messages.length - 1;
             saveProjectsToStorage();
+
+            // FEATURE 2, part 2: fire-and-forget, does not block the reply
+            // the student is already looking at (see comment on the
+            // function below for exactly when/how often this runs).
+            maybeGenerateAiTitle(targetProj, targetChat);
         }
 
         if (isStillViewingThisChat) {
-            const botDiv = createBotMessageElement(replyText);
+            const botDiv = createBotMessageElement(replyText, {
+                projId: requestProjectId,
+                chatId: requestChatId,
+                msgIndex: newBotMsgIndex
+            });
             chatBox.appendChild(botDiv);
 
             if (window.MathJax) {

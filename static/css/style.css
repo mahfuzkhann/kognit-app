@@ -157,6 +157,21 @@ body {
     flex: 1;
 }
 
+/* FEATURE 1: collapsible project folders - chevron indicator. Rotated via
+   the .collapsed modifier; the chats-list itself is hidden with
+   .chats-list.collapsed below. */
+.project-chevron {
+    display: inline-block;
+    font-size: 10px;
+    color: #777777;
+    transition: transform 0.15s ease;
+    flex-shrink: 0;
+}
+
+.project-chevron.collapsed {
+    transform: rotate(-90deg);
+}
+
 .project-title-text {
     white-space: nowrap;
     overflow: hidden;
@@ -170,6 +185,11 @@ body {
     padding-left: 12px;
     margin-top: 2px;
     border-left: 1px solid #222222;
+}
+
+/* FEATURE 1: collapsed project - its nested chats are fully hidden. */
+.chats-list.collapsed {
+    display: none;
 }
 
 /* Recent Chats (standalone chats with no project) - a flat list, visually
@@ -249,6 +269,16 @@ body {
 .action-btn.delete-btn:hover {
     color: #ff5555;
     background: #280000;
+}
+
+/* FEATURE 3: pin/unpin. The pin action button itself still only appears on
+   hover (same as edit/delete, via .item-actions above), but is tinted amber
+   while active so its state is clear once visible. The always-visible
+   "pinned" indicator (a 📌 prefix on the chat title itself, replacing the
+   default 💬) is what makes pinned state recognizable without hovering -
+   see renderChatItem() in app.js. */
+.pin-btn.pinned {
+    color: #fbbf24;
 }
 
 .rename-input {
@@ -1163,4 +1193,66 @@ body {
 .copy-answer-btn:disabled {
     cursor: default;
     opacity: 0.85;
+}
+
+/* ==========================================================
+   FEATURE 4: AI ANSWER ACTION TOOLBAR (Copy / Listen / Like /
+   Dislike / Regenerate). Deliberately small, icon-led, and
+   right-aligned under each answer - no large buttons, no emoji,
+   no text-heavy labels. Replaces the old standalone
+   .copy-answer-btn as the single row of actions under a bot
+   message; .copy-answer-btn rules above are left in place
+   unused rather than deleted, per the "preserve unrelated
+   behavior / minimal diff" rule, in case anything else
+   references that class.
+   ========================================================== */
+.bot-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    width: fit-content;
+    margin: 10px 0 0 auto;
+}
+
+.toolbar-btn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: #cccccc;
+    padding: 4px 8px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-family: inherit;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.toolbar-btn span {
+    white-space: nowrap;
+}
+
+.toolbar-btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.18);
+    color: #ffffff;
+}
+
+.toolbar-btn:disabled {
+    cursor: default;
+    opacity: 0.4;
+}
+
+.toolbar-btn.active-like {
+    color: #4ade80;
+    border-color: #4ade80;
+    background: rgba(74, 222, 128, 0.12);
+}
+
+.toolbar-btn.active-dislike {
+    color: #f87171;
+    border-color: #f87171;
+    background: rgba(248, 113, 113, 0.12);
 }

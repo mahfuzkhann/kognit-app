@@ -3,6 +3,7 @@ import io
 import json
 import logging
 import time
+from typing import Optional
 from PIL import Image
 import google.generativeai as genai
 from google.api_core.exceptions import (
@@ -289,4 +290,71 @@ def generate_quiz_questions(board: str, user_class: str, subject: str, topic: st
             "generate_quiz_questions failed (board=%s, user_class=%s, subject=%s, topic=%s)",
             board, user_class, subject, topic
         )
+        return []
+
+
+# ---------------------------------------------------------------------------
+# FEATURE 2: context-aware chat titles.
+#
+# Called at most once per chat (see maybeGenerateAiTitle() in static/js/
+# app.js, which owns that "only once" guard) once there is enough real
+# conversation to summarize. Deliberately a single short, non-retried call -
+# a title is a nice-to-have UX detail, not core answer quality, so it is not
+# worth the same retry budget as generate_ai_response. Any failure returns
+# None; the caller keeps the existing (heuristic, first-message-based) title
+# in that case rather than surfacing an error to the student.
+# ---------------------------------------------------------------------------
+MAX_CHAT_TITLE_CHARS = 45
+
+TITLE_SYSTEM_INSTRUCTION = (
+    "You generate short chat titles for an academic study assistant used by "
+    "Bangladeshi students (Bangla, English, or mixed/Banglish conversations).\n"
+    "Read the conversation and output ONLY a short, specific title (3-6 words) "
+    "summarizing the actual topic being discussed - not the app name, not a "
+    "greeting, not a generic phrase like 'Study Session'.\n"
+    "Match the dominant language of the conversation (Bangla in, Bangla title; "
+    "English in, English title).\n"
+    "Output the title text ONLY - no quotes, no punctuation at the end, no "
+    "markdown, no explanation, no prefix like 'Title:'."
+)
+
+
+def generate_chat_title(history: list, board: str = "NCTB") -> Optional[str]:
+    if not history:
+        return None
+
+    # Keep the prompt small and cheap - this call happens on the side of a
+    # real answer the student is already reading, it should be fast and low
+    # cost, not a second full-context AI call.
+    convo_lines = []
+    for entry in history[-10:]:
+        role = entry.get("role")
+        text = (entry.get("text") or "").strip()
+        if not text:
+            continue
+        speaker = "Student" if role == "user" else "Kognit"
+        convo_lines.append(f"{speaker}: {text[:300]}")
+    convo_text = "\n".join(convo_lines)
+    if not convo_text:
+        return None
+
+    try:
+        model = genai.GenerativeModel("gemini-3.6-flash", system_instruction=TITLE_SYSTEM_INSTRUCTION)
+        response = model.generate_content(
+            f"Conversation (board: {board}):\n{convo_text}\n\nTitle:",
+            request_options={"timeout": 10},
+        )
+        title = (response.text or "").strip()
+        # Defensive cleanup: strip accidental wrapping quotes/markdown the
+        # model might still add despite the instruction above.
+        title = title.strip('"\'` \n')
+        title = title.split("\n")[0].strip()
+        if not title:
+            return None
+        if len(title) > MAX_CHAT_TITLE_CHARS:
+            title = title[:MAX_CHAT_TITLE_CHARS].rsplit(" ", 1)[0].rstrip(".,;:!?") + "..."
+        return title
+    except Exception:
+        logger.exception("generate_chat_title failed (board=%s) - caller will keep the existing title", board)
+        return None
         return []
