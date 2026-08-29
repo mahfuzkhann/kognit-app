@@ -89,6 +89,10 @@ body {
     cursor: pointer;
     font-size: 13px;
     transition: 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
 }
 
 .btn-quiz:hover {
@@ -161,15 +165,41 @@ body {
    the .collapsed modifier; the chats-list itself is hidden with
    .chats-list.collapsed below. */
 .project-chevron {
-    display: inline-block;
-    font-size: 10px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     color: #777777;
     transition: transform 0.15s ease;
     flex-shrink: 0;
 }
 
+.project-chevron svg {
+    display: block;
+}
+
 .project-chevron.collapsed {
     transform: rotate(-90deg);
+}
+
+/* FEATURE 8: folder icon next to a project's title (replaces the old 📁
+   emoji), and the small pin/chat-bubble icon prefixed onto each chat row's
+   title (replaces the old 📌 / 💬 emoji prefix in renderChatItem). Both are
+   plain inline SVGs colored via currentColor, so they already inherit
+   .project-header's and .chat-item's text color/hover states for free. */
+.project-folder-icon {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    color: #888888;
+}
+
+.chat-item-icon {
+    display: inline-flex;
+    align-items: center;
+    margin-right: 6px;
+    flex-shrink: 0;
+    color: #777777;
+    vertical-align: -2px;
 }
 
 .project-title-text {
@@ -274,9 +304,10 @@ body {
 /* FEATURE 3: pin/unpin. The pin action button itself still only appears on
    hover (same as edit/delete, via .item-actions above), but is tinted amber
    while active so its state is clear once visible. The always-visible
-   "pinned" indicator (a 📌 prefix on the chat title itself, replacing the
-   default 💬) is what makes pinned state recognizable without hovering -
-   see renderChatItem() in app.js. */
+   "pinned" indicator (a pin SVG icon prefixed onto the chat title itself,
+   replacing the default chat-bubble icon - see .chat-item-icon above and
+   renderChatItem() in app.js) is what makes pinned state recognizable
+   without hovering. */
 .pin-btn.pinned {
     color: #fbbf24;
 }
@@ -659,9 +690,10 @@ body {
     border-radius: 50%;
     width: 18px;
     height: 18px;
-    font-size: 10px;
-    font-weight: bold;
     cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .preview-text {
@@ -780,14 +812,20 @@ body {
 .modal-header h2 {
     font-size: 18px;
     color: #ffffff;
+    display: flex;
+    align-items: center;
+    gap: 8px;
 }
 
 .close-modal-btn {
     background: transparent;
     border: none;
     color: #888888;
-    font-size: 18px;
     cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px;
 }
 
 .close-modal-btn:hover {
@@ -896,6 +934,13 @@ body {
     padding: 12px;
 }
 
+.result-summary h2 {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+}
+
 .score-text {
     font-size: 20px;
     font-weight: 700;
@@ -948,6 +993,9 @@ body {
     font-weight: 500;
     cursor: pointer;
     transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    gap: 6px;
 }
 
 .export-btn:hover {
@@ -971,9 +1019,30 @@ body {
     padding: 10px 15px 5px 15px;
 }
 
+/* FEATURE 8: the search icon used to be typed directly into the input's
+   placeholder text as an emoji character (so it disappeared the moment the
+   user started typing). It now lives as its own persistent SVG element,
+   absolutely positioned inside this wrapper, with the input's left padding
+   pushed over to make room for it - the icon stays visible regardless of
+   what's typed. */
+.search-input-wrapper {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.search-input-icon {
+    position: absolute;
+    left: 10px;
+    display: flex;
+    align-items: center;
+    color: #777777;
+    pointer-events: none;
+}
+
 #sidebar-search-input {
     width: 100%;
-    padding: 8px 12px;
+    padding: 8px 12px 8px 32px;
     background: rgba(255, 255, 255, 0.05);
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 8px;
@@ -1015,6 +1084,10 @@ body {
     font-weight: 600;
     cursor: pointer;
     transition: background 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
 }
 
 .btn-auth-login:hover {
@@ -1049,6 +1122,9 @@ body {
     padding: 4px 8px;
     cursor: pointer;
     transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .btn-auth-logout:hover {
@@ -1157,9 +1233,19 @@ body {
     border-radius: 50%;
     width: 20px;
     height: 20px;
-    font-size: 11px;
-    font-weight: bold;
     cursor: pointer;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* FEATURE 8: persistent file icon in the pdf-status-bar (replaces the old
+   emoji that was baked into #pdf-status-text's own textContent). */
+.pdf-status-icon {
+    display: flex;
+    align-items: center;
+    color: #cccccc;
     flex-shrink: 0;
 }
 

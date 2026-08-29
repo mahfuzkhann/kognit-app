@@ -308,19 +308,22 @@ window.closeAuthModal = function() {
 
 window.toggleAuthMode = function() {
     isSignUpMode = !isSignUpMode;
-    const title = document.getElementById("auth-modal-title");
+    // FEATURE 8: the modal header icon (lock, in the HTML markup) is fixed
+    // and no longer overwritten here - only the text span next to it
+    // changes between the two modes.
+    const titleText = document.getElementById("auth-modal-title-text");
     const submitBtn = document.getElementById("auth-submit-btn");
     const toggleDesc = document.getElementById("auth-toggle-desc");
     const toggleLink = document.getElementById("auth-toggle-link");
 
     if (isSignUpMode) {
-        title.textContent = "🚀 Create a Kognit Account";
+        titleText.textContent = "Create a Kognit Account";
         submitBtn.textContent = "Sign Up";
         toggleDesc.textContent = "Already have an account?";
         toggleLink.textContent = "Sign In";
         submitBtn.onclick = () => handleEmailAuth('signup');
     } else {
-        title.textContent = "🔐 Sign In to Kognit";
+        titleText.textContent = "Sign In to Kognit";
         submitBtn.textContent = "Sign In";
         toggleDesc.textContent = "Don't have an account?";
         toggleLink.textContent = "Sign Up";
@@ -592,11 +595,36 @@ function preprocessBengaliMath(rawText) {
 const TOOLBAR_ICONS = {
     copy: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`,
     check: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`,
-    speaker: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.5 8.5a5 5 0 0 1 0 7"></path></svg>`,
-    speakerOff: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line></svg>`,
     thumbsUp: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3H14z"></path><path d="M7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"></path></svg>`,
     thumbsDown: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3H10z"></path><path d="M17 2h3a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3"></path></svg>`,
     regenerate: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>`
+};
+
+// ==================== FEATURE 8: SHARED PRODUCT UI ICON SET ====================
+// One consistent, minimal inline-SVG icon system for every Kognit product
+// UI control (buttons, inputs, status labels). Same visual language as
+// TOOLBAR_ICONS above (currentColor stroke, no fill) so both sets look like
+// one system. Scope is strictly PRODUCT UI controls - emoji that are part
+// of AI-generated or hardcoded chat-bubble message TEXT (e.g. the welcome
+// message, PDF-loaded confirmation) are intentionally left untouched here;
+// they are message content, not interface controls.
+const UI_ICONS = {
+    search: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>`,
+    lock: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path></svg>`,
+    logout: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>`,
+    share: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.6" y1="10.5" x2="15.4" y2="6.5"></line><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"></line></svg>`,
+    file: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>`,
+    image: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>`,
+    close: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`,
+    pin: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"></line><path d="M5 17h14l-1.5-1.5a2 2 0 0 1-.6-1.4V8a5 5 0 0 0-10 0v6.1a2 2 0 0 1-.6 1.4L5 17z"></path></svg>`,
+    chat: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>`,
+    edit: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4z"></path></svg>`,
+    trash: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path></svg>`,
+    folder: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"></path></svg>`,
+    plus: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>`,
+    chevron: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`,
+    quiz: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><circle cx="12" cy="12" r="5"></circle><circle cx="12" cy="12" r="1"></circle></svg>`,
+    trophy: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 21h8"></path><path d="M12 17v4"></path><path d="M7 4h10v5a5 5 0 0 1-10 0V4z"></path><path d="M7 5H4a3 3 0 0 0 3 5"></path><path d="M17 5h3a3 3 0 0 1-3 5"></path></svg>`
 };
 
 function createBotMessageElement(rawText, meta = {}) {
@@ -618,7 +646,7 @@ function createBotMessageElement(rawText, meta = {}) {
 }
 
 // Builds the subtle icon-only action row shown under every AI answer: Copy,
-// Read Aloud, Like, Dislike, Regenerate. `meta` identifies where this exact
+// Like, Dislike, Regenerate. `meta` identifies where this exact
 // message lives ({projId, chatId, msgIndex}) so Like/Dislike/Regenerate can
 // find and persist against the right message. meta is optional/best-effort
 // - if any id is missing (should not normally happen), the feedback and
@@ -635,24 +663,6 @@ function buildBotToolbar(rawText, meta) {
     copyBtn.innerHTML = `${TOOLBAR_ICONS.copy}<span>Copy</span>`;
     copyBtn.onclick = () => copyBotMessageText(rawText, copyBtn);
     toolbar.appendChild(copyBtn);
-
-    // ---- Read Aloud ----
-    // Uses the browser's native SpeechSynthesis API (no backend dependency).
-    // Bangla support depends entirely on the browser/OS's installed voices -
-    // if none is available, speechSynthesis silently falls back to a
-    // default voice rather than failing, which is acceptable MVP behavior.
-    const speakBtn = document.createElement("button");
-    speakBtn.type = "button";
-    speakBtn.className = "toolbar-btn";
-    speakBtn.title = "Read answer aloud";
-    speakBtn.innerHTML = `${TOOLBAR_ICONS.speaker}<span>Listen</span>`;
-    if (!("speechSynthesis" in window)) {
-        speakBtn.disabled = true;
-        speakBtn.title = "Read Aloud isn't supported in this browser";
-    } else {
-        speakBtn.onclick = () => toggleReadAloud(rawText, speakBtn);
-    }
-    toolbar.appendChild(speakBtn);
 
     // ---- Like / Dislike ----
     const likeBtn = document.createElement("button");
@@ -716,40 +726,6 @@ function copyBotMessageText(rawText, btnEl) {
     }).catch(() => {
         alert("Couldn't copy to clipboard. Please try selecting the text manually.");
     });
-}
-
-// Strips Markdown/LaTeX punctuation that would otherwise be read aloud
-// literally ("hash", "dollar dollar", "star star", ...) by the speech
-// engine. This is a plain-text approximation, not a full LaTeX-to-speech
-// converter - acceptable for MVP read-aloud of prose answers.
-function stripMarkupForSpeech(rawText) {
-    return rawText
-        .replace(/\$\$?/g, " ")
-        .replace(/\\\[|\\\]|\\\(|\\\)/g, " ")
-        .replace(/[#*_`>~]+/g, " ")
-        .replace(/\[(.*?)\]\(.*?\)/g, "$1")
-        .replace(/\s+/g, " ")
-        .trim();
-}
-
-function toggleReadAloud(rawText, btnEl) {
-    if (!("speechSynthesis" in window)) return;
-
-    // Acts as a play/stop toggle: clicking the active speaker again cancels
-    // playback instead of restarting it.
-    if (window.speechSynthesis.speaking) {
-        window.speechSynthesis.cancel();
-        return; // onend below resets the icon/label for whichever button was speaking
-    }
-
-    const utterance = new SpeechSynthesisUtterance(stripMarkupForSpeech(rawText));
-    btnEl.innerHTML = `${TOOLBAR_ICONS.speakerOff}<span>Stop</span>`;
-
-    const reset = () => { btnEl.innerHTML = `${TOOLBAR_ICONS.speaker}<span>Listen</span>`; };
-    utterance.onend = reset;
-    utterance.onerror = reset;
-
-    window.speechSynthesis.speak(utterance);
 }
 
 // FEATURE 4: Like/Dislike. Persists straight onto the message object inside
@@ -1047,7 +1023,15 @@ function renderChatItem(proj, chat) {
     } else {
         const titleText = document.createElement("span");
         titleText.className = "chat-title-text";
-        titleText.textContent = (chat.pinned ? "📌 " : "💬 ") + chat.title;
+        // FEATURE 8: built as separate DOM nodes (icon span + text node)
+        // rather than one interpolated string, so chat.title always goes
+        // through a text node exactly as it did before - no change to how
+        // titles are escaped/rendered, only the emoji prefix becomes an SVG.
+        const titleIcon = document.createElement("span");
+        titleIcon.className = "chat-item-icon";
+        titleIcon.innerHTML = chat.pinned ? UI_ICONS.pin : UI_ICONS.chat;
+        titleText.appendChild(titleIcon);
+        titleText.appendChild(document.createTextNode(chat.title));
         titleText.onclick = () => loadChat(proj.id, chat.id);
 
         const chatActions = document.createElement("div");
@@ -1060,19 +1044,19 @@ function renderChatItem(proj, chat) {
         const pinBtn = document.createElement("button");
         pinBtn.className = `action-btn pin-btn ${chat.pinned ? "pinned" : ""}`;
         pinBtn.title = chat.pinned ? "Unpin Chat" : "Pin Chat";
-        pinBtn.innerHTML = `📌`;
+        pinBtn.innerHTML = UI_ICONS.pin;
         pinBtn.onclick = (e) => { e.stopPropagation(); togglePinChat(chat); };
 
         const editChatBtn = document.createElement("button");
         editChatBtn.className = "action-btn";
         editChatBtn.title = "Rename Chat";
-        editChatBtn.innerHTML = `✏️`;
+        editChatBtn.innerHTML = UI_ICONS.edit;
         editChatBtn.onclick = (e) => { e.stopPropagation(); editingChatId = chat.id; renderHistoryList(); };
 
         const delChatBtn = document.createElement("button");
         delChatBtn.className = "action-btn delete-btn";
         delChatBtn.title = "Delete Chat";
-        delChatBtn.innerHTML = `🗑️`;
+        delChatBtn.innerHTML = UI_ICONS.trash;
         delChatBtn.onclick = (e) => { e.stopPropagation(); deleteChat(proj.id, chat.id); };
 
         chatActions.appendChild(pinBtn);
@@ -1138,8 +1122,8 @@ function renderProjectCard(proj) {
         const wrapper = document.createElement("div");
         wrapper.className = "project-title-wrapper";
         wrapper.innerHTML =
-            `<span class="project-chevron ${isCollapsed ? "collapsed" : ""}">▾</span>` +
-            `<span>📁</span><span class="project-title-text">${proj.title}</span>`;
+            `<span class="project-chevron ${isCollapsed ? "collapsed" : ""}">${UI_ICONS.chevron}</span>` +
+            `<span class="project-folder-icon">${UI_ICONS.folder}</span><span class="project-title-text">${proj.title}</span>`;
         // Clicking the project row/title ONLY expands or collapses its
         // chat list (per product spec) - it no longer also navigates into
         // the first chat. Opening a specific chat is done by clicking that
@@ -1155,19 +1139,19 @@ function renderProjectCard(proj) {
         const addChatBtn = document.createElement("button");
         addChatBtn.className = "action-btn";
         addChatBtn.title = "Add Chat";
-        addChatBtn.innerHTML = `➕`;
+        addChatBtn.innerHTML = UI_ICONS.plus;
         addChatBtn.onclick = (e) => { e.stopPropagation(); createNewChat(proj.id); };
 
         const editBtn = document.createElement("button");
         editBtn.className = "action-btn";
         editBtn.title = "Rename Project";
-        editBtn.innerHTML = `✏️`;
+        editBtn.innerHTML = UI_ICONS.edit;
         editBtn.onclick = (e) => { e.stopPropagation(); editingProjectId = proj.id; renderHistoryList(); };
 
         const delBtn = document.createElement("button");
         delBtn.className = "action-btn delete-btn";
         delBtn.title = "Delete Project";
-        delBtn.innerHTML = `🗑️`;
+        delBtn.innerHTML = UI_ICONS.trash;
         delBtn.onclick = (e) => { e.stopPropagation(); deleteProject(proj.id); };
 
         actions.appendChild(addChatBtn);
@@ -1361,7 +1345,7 @@ window.handlePDFUpload = async function(event) {
         }
 
         isPDFLoaded = true;
-        document.getElementById("pdf-status-text").textContent = `📄 PDF Active: ${file.name}`;
+        document.getElementById("pdf-status-text").textContent = `PDF Active: ${file.name}`;
         document.getElementById("pdf-status-bar").classList.remove("hidden");
 
         const successDiv = document.createElement("div");
@@ -1687,7 +1671,7 @@ window.sendMessage = async function() {
 window.shareChatLink = function() {
     const shareableUrl = `${window.location.origin}/#project=${activeProjectId}&chat=${activeChatId}`;
     navigator.clipboard.writeText(shareableUrl).then(() => {
-        alert("🔗 Shareable link copied to clipboard!");
+        alert("Shareable link copied to clipboard!");
     }).catch(err => {
         alert("Failed to copy link.");
     });
