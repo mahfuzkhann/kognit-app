@@ -14,6 +14,29 @@ let projects = [];
 let activeProjectId = null;
 let activeChatId = null;
 
+// SIDEBAR IA FIX (Projects vs Recent Chats):
+//
+// Previously the global "+ New Chat" button called createNewChat() with no
+// project id, which defaulted to whatever project happened to be active -
+// so a "standalone" chat silently landed inside whatever project the user
+// was last looking at. There was also no concept of a chat existing outside
+// a project at all.
+//
+// Minimal, beta-safe fix (no database schema change, no migration): one
+// reserved project id acts as the "Recent Chats" bucket. It is a project
+// exactly like any other in the data model (same user_projects row shape:
+// id/title/chats) - the ONLY thing that makes it special is this constant
+// id, checked by every function below that needs to tell it apart from a
+// real, user-created project. This keeps it fully backward compatible with
+// existing accounts (nothing is migrated; the bucket is created lazily,
+// the first time a user actually creates a standalone chat) and with the
+// existing Supabase RLS/upsert path (it's just another row the owning user
+// already has full access to).
+//
+// This project is NEVER shown as a folder, is NEVER user-renamable, and can
+// NEVER be deleted via deleteProject() - see the guards below.
+const DEFAULT_PROJECT_ID = "proj_recent_default";
+
 let editingProjectId = null;
 let editingChatId = null;
 let searchQuery = "";
@@ -128,13 +151,26 @@ function loadProjectsFromLocalStorage() {
 }
 
 function initializeActiveProject() {
-    if (projects.length === 0) {
+    // SIDEBAR IA FIX: only consider REAL projects here, never the reserved
+    // Recent Chats bucket (DEFAULT_PROJECT_ID). Before the Projects/Recent
+    // Chats split, `projects` only ever contained real projects, so
+    // `projects[0]` was always a safe pick for "land the user somewhere on
+    // load." Now that the default bucket can also live in `projects` - and
+    // can even sort to the front after Supabase's updated_at ordering, if a
+    // standalone chat was the most recently touched thing - landing there
+    // by default would be a surprising place to open the app. On-load
+    // behavior stays exactly as before: always a real project, defaulting
+    // to a fresh chat inside it (BUG-1). Recent Chats remains something the
+    // user navigates to deliberately via the sidebar.
+    const realProjects = projects.filter(p => p.id !== DEFAULT_PROJECT_ID);
+
+    if (realProjects.length === 0) {
         createNewProject();
         return;
     }
 
-    activeProjectId = projects[0].id;
-    const mostRecentChat = (projects[0].chats && projects[0].chats.length > 0) ? projects[0].chats[0] : null;
+    activeProjectId = realProjects[0].id;
+    const mostRecentChat = (realProjects[0].chats && realProjects[0].chats.length > 0) ? realProjects[0].chats[0] : null;
     const mostRecentChatIsEmpty = mostRecentChat &&
         mostRecentChat.messages.filter(m => m.role === "user").length === 0;
 
@@ -369,12 +405,44 @@ const BENGALI_MATH_SYMBOL_REPLACEMENTS = [
 // already stripped) as safe HTML. Scope is intentionally limited to the
 // LaTeX constructs Kognit's NCTB content actually produces (frac, sqrt,
 // sup/sub, common symbols) - this is NOT a general LaTeX parser.
+// BUG FIX (raw "text"/"frac"/"sqrt" tokens leaking into answers, e.g.
+// "textমূল্য অনুপাত"): renderBengaliMathSegment only had explicit
+// handling for \frac and \sqrt. Any other LaTeX wrapper command -
+// most commonly \text{...} around a Bengali label - fell through to the
+// generic fallback further down, which drops the backslash but keeps
+// the command NAME as literal text before stripping braces:
+// "\text{মূল্য অনুপাত}" -> "text{মূল্য অনুপাত}" -> "textমূল্য অনুপাত".
+// Fix: unwrap these commands to their bare content BEFORE \frac/\sqrt
+// run, so (a) the command name never leaks and (b) a wrapper nested
+// inside a \frac argument (e.g. \frac{\text{কিছু}}{2}) no longer blocks
+// the frac regex below, which only matches brace-free arguments.
+const BENGALI_MATH_TEXT_WRAPPER_COMMANDS = [
+    "text", "mathrm", "textbf", "textit", "mathbf", "mathit", "emph", "bf", "rm"
+];
+
 function renderBengaliMathSegment(rawLatex, isDisplay) {
     // Escape FIRST, before any tag-building regex runs below, so nothing
     // from the AI's output (even if it contained literal HTML) can ever
     // become a real tag - every "<" / ">" a student's content might
     // contain is inert text by the time we start inserting our own markup.
     let text = escapeHtmlForMath(rawLatex.trim());
+
+    // Unwrap \text{...}/\mathrm{...}/etc to bare content. Looped (like the
+    // \frac loop below) so a wrapper nested inside another wrapper - e.g.
+    // \textbf{\text{কিছু}} - still fully resolves instead of stopping
+    // after one pass.
+    let previousWrapper;
+    do {
+        previousWrapper = text;
+        for (const cmd of BENGALI_MATH_TEXT_WRAPPER_COMMANDS) {
+            text = text.replace(new RegExp("\\\\" + cmd + "\\{([^{}]*)\\}", "g"), "$1");
+        }
+    } while (text !== previousWrapper);
+
+    // \left / \right are sizing directives with no standalone meaning
+    // once rendered as plain text - drop the command, keep whatever
+    // delimiter character follows it untouched (e.g. "\left(" -> "(").
+    text = text.replace(/\\left|\\right/g, "");
 
     // \frac{A}{B} -> a real HTML fraction. Non-nested only (MVP scope):
     // a \frac whose numerator/denominator itself contains another
@@ -563,6 +631,56 @@ window.createNewChat = function(projectId = null) {
     loadChat(activeProjectId, activeChatId);
 };
 
+// Returns the reserved "Recent Chats" project, creating it (in-memory,
+// then persisted via the normal saveProjectsToStorage path) the first time
+// it's actually needed. Never returns a second copy - callers can rely on
+// there being at most one project with id === DEFAULT_PROJECT_ID.
+function getOrCreateDefaultProject() {
+    let defaultProject = projects.find(p => p.id === DEFAULT_PROJECT_ID);
+    if (!defaultProject) {
+        defaultProject = {
+            id: DEFAULT_PROJECT_ID,
+            title: "Recent Chats",
+            chats: []
+        };
+        // Pushed, not unshifted: this bucket is filtered out of the normal
+        // project list everywhere below and rendered in its own section,
+        // so its position in the underlying array doesn't affect display
+        // order - unshift vs push makes no visible difference, push just
+        // avoids implying it's a "newest project."
+        projects.push(defaultProject);
+    }
+    return defaultProject;
+}
+
+// Global "+ New Chat" button handler - creates a standalone chat that
+// belongs to no project, so it appears only under "Recent Chats" and never
+// inside whatever project the user happened to have open. This is the fix
+// for chats incorrectly appearing inside projects: previously this button
+// called createNewChat() with no id, which silently used activeProjectId.
+window.createStandaloneChat = function() {
+    const defaultProject = getOrCreateDefaultProject();
+
+    const newChat = {
+        id: "chat_" + Date.now(),
+        title: "New Chat",
+        messages: [
+            {
+                role: "bot",
+                text: "👋 <b>Welcome to Kognit!</b> Start a fresh topic or practice problem in this chat."
+            }
+        ]
+    };
+
+    defaultProject.chats.unshift(newChat);
+    activeProjectId = defaultProject.id;
+    activeChatId = newChat.id;
+
+    saveProjectsToStorage();
+    renderHistoryList();
+    loadChat(activeProjectId, activeChatId);
+};
+
 function loadChat(projId, chatId) {
     activeProjectId = projId;
     activeChatId = chatId;
@@ -604,157 +722,209 @@ function loadChat(projId, chatId) {
     chatBox.scrollTop = chatBox.scrollHeight;
 }
 
+// Builds one chat row (.chat-item) - used both for chats nested inside a
+// project folder and for standalone chats in the flat "Recent Chats" list.
+// Identical behavior in both places (open/rename/delete), only the parent
+// project id passed in differs, so this is pulled out once rather than
+// duplicated for the two rendering contexts below.
+function renderChatItem(proj, chat) {
+    const chatItem = document.createElement("div");
+    chatItem.className = `chat-item ${chat.id === activeChatId ? "active" : ""}`;
+
+    if (editingChatId === chat.id) {
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "rename-input";
+        input.value = chat.title;
+        input.onclick = (e) => e.stopPropagation();
+
+        const saveChatTitle = () => {
+            if (input.value.trim()) {
+                chat.title = input.value.trim();
+                saveProjectsToStorage();
+            }
+            editingChatId = null;
+            renderHistoryList();
+        };
+
+        input.onkeydown = (e) => {
+            if (e.key === "Enter") saveChatTitle();
+            if (e.key === "Escape") { editingChatId = null; renderHistoryList(); }
+        };
+        input.onblur = saveChatTitle;
+        chatItem.appendChild(input);
+        setTimeout(() => input.focus(), 50);
+    } else {
+        const titleText = document.createElement("span");
+        titleText.className = "chat-title-text";
+        titleText.textContent = "💬 " + chat.title;
+        titleText.onclick = () => loadChat(proj.id, chat.id);
+
+        const chatActions = document.createElement("div");
+        chatActions.className = "item-actions";
+
+        const editChatBtn = document.createElement("button");
+        editChatBtn.className = "action-btn";
+        editChatBtn.title = "Rename Chat";
+        editChatBtn.innerHTML = `✏️`;
+        editChatBtn.onclick = (e) => { e.stopPropagation(); editingChatId = chat.id; renderHistoryList(); };
+
+        const delChatBtn = document.createElement("button");
+        delChatBtn.className = "action-btn delete-btn";
+        delChatBtn.title = "Delete Chat";
+        delChatBtn.innerHTML = `🗑️`;
+        delChatBtn.onclick = (e) => { e.stopPropagation(); deleteChat(proj.id, chat.id); };
+
+        chatActions.appendChild(editChatBtn);
+        chatActions.appendChild(delChatBtn);
+
+        chatItem.appendChild(titleText);
+        chatItem.appendChild(chatActions);
+    }
+
+    return chatItem;
+}
+
+// Renders one real (non-default) project as a folder card with its nested
+// chats - unchanged in behavior from before the Projects/Recent Chats
+// split, just extracted into its own function.
+function renderProjectCard(proj) {
+    const projTitleMatches = proj.title.toLowerCase().includes(searchQuery);
+    const matchingChats = (proj.chats || []).filter(chat =>
+        chat.title.toLowerCase().includes(searchQuery)
+    );
+
+    if (!(projTitleMatches || matchingChats.length > 0)) return null;
+
+    const projCard = document.createElement("div");
+    projCard.className = `project-card ${proj.id === activeProjectId ? "active-project" : ""}`;
+
+    const header = document.createElement("div");
+    header.className = "project-header";
+
+    if (editingProjectId === proj.id) {
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "rename-input";
+        input.value = proj.title;
+        input.onclick = (e) => e.stopPropagation();
+
+        const saveProjectTitle = () => {
+            if (input.value.trim()) {
+                proj.title = input.value.trim();
+                saveProjectsToStorage();
+            }
+            editingProjectId = null;
+            renderHistoryList();
+        };
+
+        input.onkeydown = (e) => {
+            if (e.key === "Enter") saveProjectTitle();
+            if (e.key === "Escape") { editingProjectId = null; renderHistoryList(); }
+        };
+        input.onblur = saveProjectTitle;
+        header.appendChild(input);
+        setTimeout(() => input.focus(), 50);
+    } else {
+        const wrapper = document.createElement("div");
+        wrapper.className = "project-title-wrapper";
+        wrapper.innerHTML = `<span>📁</span><span class="project-title-text">${proj.title}</span>`;
+        wrapper.onclick = () => {
+            activeProjectId = proj.id;
+            if (proj.chats.length > 0) loadChat(proj.id, proj.chats[0].id);
+        };
+
+        const actions = document.createElement("div");
+        actions.className = "item-actions";
+
+        const addChatBtn = document.createElement("button");
+        addChatBtn.className = "action-btn";
+        addChatBtn.title = "Add Chat";
+        addChatBtn.innerHTML = `➕`;
+        addChatBtn.onclick = (e) => { e.stopPropagation(); createNewChat(proj.id); };
+
+        const editBtn = document.createElement("button");
+        editBtn.className = "action-btn";
+        editBtn.title = "Rename Project";
+        editBtn.innerHTML = `✏️`;
+        editBtn.onclick = (e) => { e.stopPropagation(); editingProjectId = proj.id; renderHistoryList(); };
+
+        const delBtn = document.createElement("button");
+        delBtn.className = "action-btn delete-btn";
+        delBtn.title = "Delete Project";
+        delBtn.innerHTML = `🗑️`;
+        delBtn.onclick = (e) => { e.stopPropagation(); deleteProject(proj.id); };
+
+        actions.appendChild(addChatBtn);
+        actions.appendChild(editBtn);
+        actions.appendChild(delBtn);
+
+        header.appendChild(wrapper);
+        header.appendChild(actions);
+    }
+
+    projCard.appendChild(header);
+
+    const chatsList = document.createElement("div");
+    chatsList.className = "chats-list";
+
+    const chatsToDisplay = projTitleMatches && searchQuery !== "" ? proj.chats : (searchQuery !== "" ? matchingChats : proj.chats);
+    (chatsToDisplay || []).forEach(chat => {
+        chatsList.appendChild(renderChatItem(proj, chat));
+    });
+
+    projCard.appendChild(chatsList);
+    return projCard;
+}
+
 function renderHistoryList() {
     const historyList = document.getElementById("history-list");
     historyList.innerHTML = "";
 
     let hasMatch = false;
 
-    projects.forEach(proj => {
-        const projTitleMatches = proj.title.toLowerCase().includes(searchQuery);
-        const matchingChats = (proj.chats || []).filter(chat => 
+    // SIDEBAR IA FIX: real (user-created) projects are rendered as folder
+    // cards, exactly as before. The reserved DEFAULT_PROJECT_ID bucket is
+    // excluded here and rendered separately below as a flat "Recent Chats"
+    // list instead - this is what stops a standalone chat from ever
+    // appearing nested inside a project, and stops a project's chats from
+    // ever leaking into Recent Chats.
+    const realProjects = projects.filter(p => p.id !== DEFAULT_PROJECT_ID);
+    const defaultProject = projects.find(p => p.id === DEFAULT_PROJECT_ID);
+
+    realProjects.forEach(proj => {
+        const card = renderProjectCard(proj);
+        if (card) {
+            hasMatch = true;
+            historyList.appendChild(card);
+        }
+    });
+
+    if (defaultProject) {
+        const matchingRecentChats = (defaultProject.chats || []).filter(chat =>
             chat.title.toLowerCase().includes(searchQuery)
         );
 
-        if (projTitleMatches || matchingChats.length > 0) {
+        // Only render the "Recent Chats" heading/section at all if there is
+        // at least one standalone chat (or a search match among them) -
+        // an empty section for a bucket most users may never touch would
+        // just be sidebar clutter.
+        if (matchingRecentChats.length > 0) {
             hasMatch = true;
 
-            const projCard = document.createElement("div");
-            projCard.className = `project-card ${proj.id === activeProjectId ? "active-project" : ""}`;
+            const recentHeading = document.createElement("div");
+            recentHeading.className = "history-title recent-chats-heading";
+            recentHeading.textContent = "Recent Chats";
+            historyList.appendChild(recentHeading);
 
-            const header = document.createElement("div");
-            header.className = "project-header";
-
-            if (editingProjectId === proj.id) {
-                const input = document.createElement("input");
-                input.type = "text";
-                input.className = "rename-input";
-                input.value = proj.title;
-                input.onclick = (e) => e.stopPropagation();
-
-                const saveProjectTitle = () => {
-                    if (input.value.trim()) {
-                        proj.title = input.value.trim();
-                        saveProjectsToStorage();
-                    }
-                    editingProjectId = null;
-                    renderHistoryList();
-                };
-
-                input.onkeydown = (e) => {
-                    if (e.key === "Enter") saveProjectTitle();
-                    if (e.key === "Escape") { editingProjectId = null; renderHistoryList(); }
-                };
-                input.onblur = saveProjectTitle;
-                header.appendChild(input);
-                setTimeout(() => input.focus(), 50);
-            } else {
-                const wrapper = document.createElement("div");
-                wrapper.className = "project-title-wrapper";
-                wrapper.innerHTML = `<span>📁</span><span class="project-title-text">${proj.title}</span>`;
-                wrapper.onclick = () => {
-                    activeProjectId = proj.id;
-                    if (proj.chats.length > 0) loadChat(proj.id, proj.chats[0].id);
-                };
-
-                const actions = document.createElement("div");
-                actions.className = "item-actions";
-
-                const addChatBtn = document.createElement("button");
-                addChatBtn.className = "action-btn";
-                addChatBtn.title = "Add Chat";
-                addChatBtn.innerHTML = `➕`;
-                addChatBtn.onclick = (e) => { e.stopPropagation(); createNewChat(proj.id); };
-
-                const editBtn = document.createElement("button");
-                editBtn.className = "action-btn";
-                editBtn.title = "Rename Project";
-                editBtn.innerHTML = `✏️`;
-                editBtn.onclick = (e) => { e.stopPropagation(); editingProjectId = proj.id; renderHistoryList(); };
-
-                const delBtn = document.createElement("button");
-                delBtn.className = "action-btn delete-btn";
-                delBtn.title = "Delete Project";
-                delBtn.innerHTML = `🗑️`;
-                delBtn.onclick = (e) => { e.stopPropagation(); deleteProject(proj.id); };
-
-                actions.appendChild(addChatBtn);
-                actions.appendChild(editBtn);
-                actions.appendChild(delBtn);
-
-                header.appendChild(wrapper);
-                header.appendChild(actions);
-            }
-
-            projCard.appendChild(header);
-
-            const chatsList = document.createElement("div");
-            chatsList.className = "chats-list";
-
-            const chatsToDisplay = projTitleMatches && searchQuery !== "" ? proj.chats : (searchQuery !== "" ? matchingChats : proj.chats);
-
-            (chatsToDisplay || []).forEach(chat => {
-                const chatItem = document.createElement("div");
-                chatItem.className = `chat-item ${chat.id === activeChatId ? "active" : ""}`;
-
-                if (editingChatId === chat.id) {
-                    const input = document.createElement("input");
-                    input.type = "text";
-                    input.className = "rename-input";
-                    input.value = chat.title;
-                    input.onclick = (e) => e.stopPropagation();
-
-                    const saveChatTitle = () => {
-                        if (input.value.trim()) {
-                            chat.title = input.value.trim();
-                            saveProjectsToStorage();
-                        }
-                        editingChatId = null;
-                        renderHistoryList();
-                    };
-
-                    input.onkeydown = (e) => {
-                        if (e.key === "Enter") saveChatTitle();
-                        if (e.key === "Escape") { editingChatId = null; renderHistoryList(); }
-                    };
-                    input.onblur = saveChatTitle;
-                    chatItem.appendChild(input);
-                    setTimeout(() => input.focus(), 50);
-                } else {
-                    const titleText = document.createElement("span");
-                    titleText.className = "chat-title-text";
-                    titleText.textContent = "💬 " + chat.title;
-                    titleText.onclick = () => loadChat(proj.id, chat.id);
-
-                    const chatActions = document.createElement("div");
-                    chatActions.className = "item-actions";
-
-                    const editChatBtn = document.createElement("button");
-                    editChatBtn.className = "action-btn";
-                    editChatBtn.title = "Rename Chat";
-                    editChatBtn.innerHTML = `✏️`;
-                    editChatBtn.onclick = (e) => { e.stopPropagation(); editingChatId = chat.id; renderHistoryList(); };
-
-                    const delChatBtn = document.createElement("button");
-                    delChatBtn.className = "action-btn delete-btn";
-                    delChatBtn.title = "Delete Chat";
-                    delChatBtn.innerHTML = `🗑️`;
-                    delChatBtn.onclick = (e) => { e.stopPropagation(); deleteChat(proj.id, chat.id); };
-
-                    chatActions.appendChild(editChatBtn);
-                    chatActions.appendChild(delChatBtn);
-
-                    chatItem.appendChild(titleText);
-                    chatItem.appendChild(chatActions);
-                }
-
-                chatsList.appendChild(chatItem);
+            const recentList = document.createElement("div");
+            recentList.className = "recent-chats-list";
+            matchingRecentChats.forEach(chat => {
+                recentList.appendChild(renderChatItem(defaultProject, chat));
             });
-
-            projCard.appendChild(chatsList);
-            historyList.appendChild(projCard);
+            historyList.appendChild(recentList);
         }
-    });
+    }
 
     if (!hasMatch && searchQuery !== "") {
         historyList.innerHTML = `<div class="no-results">No projects or chats found matching "${searchQuery}"</div>`;
@@ -762,16 +932,32 @@ function renderHistoryList() {
 }
 
 async function deleteProject(projId) {
+    // Defensive guard: the Recent Chats bucket has no delete button in the
+    // UI (renderProjectCard is never called for it - see renderHistoryList),
+    // so this should be unreachable via normal use. Kept here anyway since
+    // deleteProject is attached to `window`-adjacent click handlers and
+    // this function must never be able to wipe out every standalone chat
+    // even if called some other way.
+    if (projId === DEFAULT_PROJECT_ID) return;
+
     if (!confirm("Delete this project?")) return;
     projects = projects.filter(p => p.id !== projId);
     await deleteProjectFromDatabase(projId);
     saveProjectsToStorage();
 
-    if (projects.length === 0) {
+    // SIDEBAR IA FIX: must check REAL projects here, not `projects` as a
+    // whole. Before the Recent Chats bucket existed, `projects.length === 0`
+    // correctly meant "the user has nothing left" and guaranteed a fresh
+    // project. Now `projects` can still contain the default bucket even
+    // after the user's last real project is deleted - checking
+    // `projects.length` there would silently skip creating a fresh project
+    // and could land the user on an empty/no-chat screen instead.
+    const realProjects = projects.filter(p => p.id !== DEFAULT_PROJECT_ID);
+    if (realProjects.length === 0) {
         createNewProject();
     } else {
-        activeProjectId = projects[0].id;
-        activeChatId = (projects[0].chats && projects[0].chats.length > 0) ? projects[0].chats[0].id : null;
+        activeProjectId = realProjects[0].id;
+        activeChatId = (realProjects[0].chats && realProjects[0].chats.length > 0) ? realProjects[0].chats[0].id : null;
         renderHistoryList();
         if (activeChatId) loadChat(activeProjectId, activeChatId);
     }

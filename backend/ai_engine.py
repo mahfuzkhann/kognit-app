@@ -48,6 +48,17 @@ BLOCKED_RESPONSE_ERROR = (
     "have been blocked by a content safety filter. Please try rephrasing your question."
 )
 
+# Shown when the uploaded image itself can't be decoded (corrupted file,
+# truncated upload, or a format PIL can't read despite passing the size
+# check in main.py, which does not validate image content). Distinct from
+# GENERIC_CHAT_ERROR so this failure mode is diagnosable in student reports
+# without needing server log access - "the photo didn't load" vs "the AI
+# didn't respond" are different problems with different fixes.
+IMAGE_DECODE_ERROR = (
+    "Kognit couldn't read the image you attached - it may be corrupted or in an "
+    "unsupported format. Please try uploading it again or use a different photo."
+)
+
 # How long to wait on a single Gemini call before giving up. This is passed
 # straight through to the SDK's own request_options timeout (seconds), which
 # is the documented/supported way to bound this call in the currently-used
@@ -124,7 +135,25 @@ def generate_ai_response(
         "NEVER put Bangla or English words, labels, or explanations inside math delimiters - "
         "this breaks Bangla text rendering. Write all Bangla/English labels, explanations, "
         "and descriptions as normal Markdown text OUTSIDE the $ ... $ / $$ ... $$ delimiters.\n"
-        "5. Tone must be encouraging, clear, precise, and aligned with the student's curriculum."
+        "5. Tone must be encouraging, clear, precise, and aligned with the student's curriculum.\n"
+        "6. LANGUAGE: Students write in Bangla, English, Banglish (Bangla typed in Latin "
+        "script), or a natural mix of these, sometimes with typos or informal phrasing. "
+        "Understand the question as intended without asking the student to rephrase it in a "
+        "'proper' language first. Respond primarily in whichever language the student's "
+        "message is dominantly in - if they write mostly Banglish or Bangla, reply in natural "
+        "Bangla; if they write mostly English, reply in English. Keep standard English "
+        "technical/subject terms (e.g. 'gross profit ratio', 'acceleration') as-is even inside "
+        "a Bangla reply where that is how the term is normally taught, rather than forcing an "
+        "awkward translation. If the student explicitly asks for a specific language, use it.\n"
+        "7. HANDLING UNCLEAR QUESTIONS: If a question is short, informal, or loosely phrased "
+        "but its academic intent is reasonably clear from context (subject, board, class, "
+        "prior chat history, or an attached PDF/image), answer it directly using the most "
+        "reasonable interpretation - do not refuse or ask for clarification merely because the "
+        "phrasing is casual, mixed-language, or contains minor typos. Only ask ONE short, "
+        "specific clarifying question when the request is genuinely ambiguous in a way that "
+        "would change the answer (e.g. it's unclear which chapter, which of two problems, or "
+        "which subject is meant). Never invent facts, textbook page numbers, or details you are "
+        "not given in order to avoid asking that clarifying question."
     )
     
     if pdf_context:
@@ -133,10 +162,29 @@ def generate_ai_response(
     if mode == "socratic":
         system_instruction += " DO NOT give direct answers immediately. Guide the student step-by-step using helpful questions!"
 
+    # LATENCY/RELIABILITY FIX: image decoding used to happen here, outside
+    # any try/except in this function. main.py's own broad except Exception
+    # around the whole call still caught a corrupted/unreadable image (so
+    # this was never a true "no response" bug), but it produced the same
+    # generic GENERIC_CHAT_ERROR-style message as an unrelated AI/network
+    # failure, made troubleshooting a "my answer failed" report ambiguous,
+    # and this step was never timed. Now it's wrapped, timed, and returns a
+    # distinct message so image-decode failures are diagnosable separately
+    # from AI-provider failures in the logs.
+    t_stage_start = time.perf_counter()
     contents = []
     if image_bytes:
-        img = Image.open(io.BytesIO(image_bytes))
+        try:
+            img = Image.open(io.BytesIO(image_bytes))
+            img.load()  # force decode now, not lazily inside the Gemini call
+        except Exception:
+            logger.exception(
+                "generate_ai_response: could not decode uploaded image (mode=%s, board=%s, user_class=%s)",
+                mode, board, user_class
+            )
+            return IMAGE_DECODE_ERROR
         contents.append(img)
+    logger.info("generate_ai_response timing: image_decode=%.3fs", time.perf_counter() - t_stage_start)
 
     contents.append(prompt if prompt else "Please analyze this request based on the context.")
 
@@ -144,6 +192,7 @@ def generate_ai_response(
     gemini_history = _build_gemini_history(history or [])
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
+        t_attempt_start = time.perf_counter()
         try:
             model = genai.GenerativeModel("gemini-3.6-flash", system_instruction=system_instruction)
 
@@ -159,7 +208,12 @@ def generate_ai_response(
                 contents,
                 request_options={"timeout": AI_REQUEST_TIMEOUT_SECONDS},
             )
-            return response.text
+            result_text = response.text
+            logger.info(
+                "generate_ai_response timing: gemini_call attempt=%d elapsed=%.3fs (mode=%s, has_image=%s, has_pdf=%s)",
+                attempt, time.perf_counter() - t_attempt_start, mode, bool(image_bytes), bool(pdf_context)
+            )
+            return result_text
         except ResourceExhausted:
             logger.exception(
                 "generate_ai_response quota exhausted (mode=%s, board=%s, user_class=%s)",
@@ -169,8 +223,8 @@ def generate_ai_response(
         except RETRYABLE_EXCEPTIONS as e:
             if attempt < MAX_ATTEMPTS:
                 logger.warning(
-                    "generate_ai_response transient error on attempt %d/%d (mode=%s, board=%s, user_class=%s): %s",
-                    attempt, MAX_ATTEMPTS, mode, board, user_class, type(e).__name__
+                    "generate_ai_response transient error on attempt %d/%d elapsed=%.3fs (mode=%s, board=%s, user_class=%s): %s",
+                    attempt, MAX_ATTEMPTS, time.perf_counter() - t_attempt_start, mode, board, user_class, type(e).__name__
                 )
                 time.sleep(RETRY_DELAY_SECONDS)
                 continue

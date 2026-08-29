@@ -172,6 +172,21 @@ body {
     border-left: 1px solid #222222;
 }
 
+/* Recent Chats (standalone chats with no project) - a flat list, visually
+   distinct from a project's nested .chats-list: no left border/indent,
+   since these chats don't belong to any folder. Reuses .chat-item for each
+   row so hover/active/rename/delete styling stays identical to a chat
+   nested inside a project. */
+.recent-chats-heading {
+    margin-top: 4px;
+}
+
+.recent-chats-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
 /* Nested Chat Item */
 .chat-item {
     display: flex;

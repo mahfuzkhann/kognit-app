@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 import httpx
 from fastapi import FastAPI, Request, Form, File, UploadFile, Header, HTTPException, Depends
 from fastapi.concurrency import run_in_threadpool
@@ -212,9 +213,19 @@ async def chat_endpoint(
             max_mb = MAX_IMAGE_UPLOAD_SIZE_BYTES // (1024 * 1024)
             raise HTTPException(status_code=413, detail=f"Image exceeds the {max_mb}MB limit.")
 
+    # LATENCY INSTRUMENTATION: request-side stages timed separately from the
+    # AI call itself (which ai_engine.py times internally in more detail -
+    # image decode vs the actual Gemini call). This does not change any
+    # behavior; it is server-side logging only, nothing is exposed to the
+    # client. Goal: distinguish "request handling is slow" from "Gemini is
+    # slow" from "the frontend is slow to render" (the last of those cannot
+    # be measured from the backend - it would need client-side timing, which
+    # is a separate, frontend-only change not made here).
+    t_request_start = time.perf_counter()
     try:
         pdf_context = active_pdf_contexts.get(user_id, "")
         conversation_history = parse_and_validate_history(history)
+        t_after_parsing = time.perf_counter()
 
         # generate_ai_response is a synchronous, blocking call (it calls the
         # Gemini SDK directly). Running it in FastAPI's threadpool keeps it
@@ -232,9 +243,21 @@ async def chat_endpoint(
             pdf_context=pdf_context,
             history=conversation_history
         )
+        t_after_ai = time.perf_counter()
+        logger.info(
+            "chat_endpoint timing: parse=%.3fs ai_total=%.3fs request_total=%.3fs "
+            "(mode=%s, has_image=%s, has_pdf=%s, history_len=%d)",
+            t_after_parsing - t_request_start,
+            t_after_ai - t_after_parsing,
+            t_after_ai - t_request_start,
+            mode, bool(image_bytes), bool(pdf_context), len(conversation_history)
+        )
         return {"reply": response}
     except Exception:
-        logger.exception("Unexpected error in /api/chat")
+        logger.exception(
+            "Unexpected error in /api/chat after %.3fs",
+            time.perf_counter() - t_request_start
+        )
         return {"reply": "Sorry, something went wrong handling your request. Please try again."}
 
 @app.post("/api/quiz/generate")
