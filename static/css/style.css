@@ -1342,3 +1342,81 @@ body {
     border-color: #f87171;
     background: rgba(248, 113, 113, 0.12);
 }
+
+/* ==========================================================
+   PHASE 2: USER MESSAGE ACTION TOOLBAR (Copy / Edit / Resend).
+   Reuses .toolbar-btn (defined above for the bot answer
+   toolbar) so both read as one consistent icon system - only
+   the row's own alignment differs, since a user message bubble
+   is right-aligned in the chat while a bot message is left-
+   aligned.
+   ========================================================== */
+.user-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.user-msg-text {
+    white-space: pre-wrap;
+}
+
+/* Inline edit form that replaces a user message bubble's normal content
+   while editing (see enterUserMessageEditMode in app.js). */
+.user-edit-textarea {
+    width: 100%;
+    min-height: 44px;
+    max-height: 240px;
+    background: #141414;
+    border: 1px solid #444444;
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: #ffffff;
+    font-size: 14px;
+    font-family: inherit;
+    resize: vertical;
+    outline: none;
+}
+
+.user-edit-textarea:focus {
+    border-color: #777777;
+}
+
+.user-edit-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.user-edit-btn {
+    border: none;
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: 0.15s ease;
+    font-family: inherit;
+}
+
+.user-edit-btn.save-btn {
+    background: #ffffff;
+    color: #000000;
+}
+
+.user-edit-btn.save-btn:hover {
+    background: #dddddd;
+}
+
+.user-edit-btn.cancel-btn {
+    background: rgba(255, 255, 255, 0.08);
+    color: #cccccc;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.user-edit-btn.cancel-btn:hover {
+    background: rgba(255, 255, 255, 0.18);
+    color: #ffffff;
+}

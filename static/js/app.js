@@ -749,17 +749,39 @@ function setMessageFeedback(meta, feedback, likeBtn, dislikeBtn) {
     saveProjectsToStorage();
 }
 
+// Reattaches a previously-attached image to a NEW /api/chat request. Kognit
+// only ever keeps the raw File object for the original upload (see
+// selectedImageFile in handleImageSelect/sendMessage) - once a message is
+// saved, only its lightweight base64 preview (msg.image, a data: URL) is
+// kept for on-screen display. Regenerate/Edit/Resend need to send that same
+// image data again, so this rebuilds a real, uploadable File from the
+// stored data URL. Lossless (exact original bytes), used by
+// regenerateBotMessage() and submitUserMessageAndAppendReply() below.
+function dataURLToFile(dataUrl, filename) {
+    const [header, base64Data] = dataUrl.split(",");
+    const mimeMatch = header.match(/data:(.*?);base64/);
+    const mime = mimeMatch ? mimeMatch[1] : "image/png";
+    const binary = atob(base64Data);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+    }
+    return new File([bytes], filename, { type: mime });
+}
+
 // FEATURE 4: Regenerate. Re-asks the ORIGINAL preceding user turn (with the
 // same conversation history that turn originally had) and replaces this bot
 // message's text in place, preserving its position in the chat so the
 // surrounding conversation order is untouched.
 //
-// Known MVP limitation: if the original user turn included an uploaded
-// image, we do not retain the raw image file (only its lightweight base64
-// preview for on-screen display) - regenerating a text-only re-ask would
-// silently drop the visual context the original answer was based on, which
-// could produce a misleading result. Regenerate is therefore disabled for
-// image-based turns rather than approximating an answer without the image.
+// PHASE 2 UPDATE: this previously refused to run for image-based turns,
+// because only the lightweight base64 preview (not the original File) was
+// available to resend. dataURLToFile() (above) now rebuilds a real,
+// uploadable File from that same preview, so image-based turns can be
+// regenerated too - this also backs the new per-user-message "Resend"
+// action added in Phase 2 (see resendUserMessage below), which delegates
+// here whenever the user message it's acting on already has a bot reply
+// immediately after it.
 async function regenerateBotMessage(meta, btnEl) {
     const proj = projects.find(p => p.id === meta.projId);
     const chat = proj ? proj.chats.find(c => c.id === meta.chatId) : null;
@@ -768,10 +790,6 @@ async function regenerateBotMessage(meta, btnEl) {
     const userMsg = chat.messages[meta.msgIndex - 1];
     if (!userMsg || userMsg.role !== "user") {
         alert("Can't find the original question for this answer.");
-        return;
-    }
-    if (userMsg.image) {
-        alert("Regenerate isn't available for image-based questions yet.");
         return;
     }
 
@@ -798,6 +816,18 @@ async function regenerateBotMessage(meta, btnEl) {
     formData.append("stream", document.getElementById("stream-select").value);
     formData.append("history", JSON.stringify(boundedHistory));
 
+    if (userMsg.image) {
+        try {
+            formData.append("image", dataURLToFile(userMsg.image, "attachment.png"));
+        } catch (e) {
+            console.error("Couldn't reattach image for regenerate:", e);
+            alert("Couldn't reattach the original image for regenerate. Please try again.");
+            btnEl.disabled = false;
+            btnEl.innerHTML = originalHtml;
+            return;
+        }
+    }
+
     try {
         const headers = {};
         const { data: { session } } = await supabaseClient.auth.getSession();
@@ -820,6 +850,308 @@ async function regenerateBotMessage(meta, btnEl) {
         btnEl.disabled = false;
         btnEl.innerHTML = originalHtml;
     }
+}
+
+// ==================== PHASE 2: USER MESSAGE ACTION TOOLBAR ====================
+// Mirrors buildBotToolbar/createBotMessageElement above: one shared element
+// builder (createUserMessageElement) used everywhere a user message is
+// rendered (loadChat's history replay AND sendMessage's optimistic
+// append), so the toolbar and its behavior are identical and defined once.
+// `meta` identifies where this exact message lives ({projId, chatId,
+// msgIndex}) so Edit/Resend can find and persist against the right message.
+function createUserMessageElement(msg, meta) {
+    const wrapper = document.createElement("div");
+    wrapper.className = "user-message";
+
+    const canAct = meta && meta.projId && meta.chatId && Number.isInteger(meta.msgIndex);
+    if (canAct) {
+        // Used by enterUserMessageEditMode() to find this exact DOM node
+        // again later (a plain index into chat.messages doesn't map 1:1 to
+        // a position in chatBox, which also contains bot messages).
+        wrapper.dataset.msgIndex = String(meta.msgIndex);
+    }
+
+    if (msg.image) {
+        const img = document.createElement("img");
+        img.src = msg.image;
+        img.className = "user-msg-image";
+        wrapper.appendChild(img);
+    }
+    if (msg.text) {
+        const span = document.createElement("span");
+        span.className = "user-msg-text";
+        span.textContent = msg.text;
+        wrapper.appendChild(span);
+    }
+
+    if (canAct) {
+        wrapper.appendChild(buildUserToolbar(msg, meta));
+    }
+
+    return wrapper;
+}
+
+function buildUserToolbar(msg, meta) {
+    const toolbar = document.createElement("div");
+    toolbar.className = "user-toolbar";
+
+    // ---- Copy ---- (copyBotMessageText is generic despite its name - it
+    // just copies whatever raw text string it's given - so it's reused
+    // as-is here rather than duplicated.)
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "toolbar-btn";
+    copyBtn.title = "Copy message";
+    copyBtn.innerHTML = `${TOOLBAR_ICONS.copy}<span>Copy</span>`;
+    if (msg.text) {
+        copyBtn.onclick = () => copyBotMessageText(msg.text, copyBtn);
+    } else {
+        copyBtn.disabled = true;
+    }
+    toolbar.appendChild(copyBtn);
+
+    // ---- Edit ----
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "toolbar-btn";
+    editBtn.title = "Edit and resend this message";
+    editBtn.innerHTML = `${UI_ICONS.edit}<span>Edit</span>`;
+    editBtn.onclick = () => enterUserMessageEditMode(meta);
+    toolbar.appendChild(editBtn);
+
+    // ---- Regenerate / Resend ----
+    const resendBtn = document.createElement("button");
+    resendBtn.type = "button";
+    resendBtn.className = "toolbar-btn";
+    resendBtn.title = "Resend this message";
+    resendBtn.innerHTML = `${TOOLBAR_ICONS.regenerate}<span>Resend</span>`;
+    resendBtn.onclick = () => resendUserMessage(meta, resendBtn);
+    toolbar.appendChild(resendBtn);
+
+    return toolbar;
+}
+
+// Swaps one user message bubble into an inline edit form (textarea + Save/
+// Cancel). Only acts on the chat currently on screen - the toolbar button
+// that calls this only exists on messages already rendered there.
+function enterUserMessageEditMode(meta) {
+    if (activeProjectId !== meta.projId || activeChatId !== meta.chatId) return;
+
+    const proj = projects.find(p => p.id === meta.projId);
+    const chat = proj ? proj.chats.find(c => c.id === meta.chatId) : null;
+    const msg = chat ? chat.messages[meta.msgIndex] : null;
+    if (!msg || msg.role !== "user") return;
+
+    const chatBox = document.getElementById("chat-box");
+    const wrapper = chatBox.querySelector(`.user-message[data-msg-index="${meta.msgIndex}"]`);
+    if (!wrapper) return;
+
+    wrapper.innerHTML = "";
+
+    // The attachment itself is shown but not editable in this MVP edit UI -
+    // only the text can change. The image is still resent as-is on Save
+    // (see submitUserMessageAndAppendReply -> dataURLToFile).
+    if (msg.image) {
+        const img = document.createElement("img");
+        img.src = msg.image;
+        img.className = "user-msg-image";
+        wrapper.appendChild(img);
+    }
+
+    const textarea = document.createElement("textarea");
+    textarea.className = "user-edit-textarea";
+    textarea.value = msg.text || "";
+    wrapper.appendChild(textarea);
+
+    const actions = document.createElement("div");
+    actions.className = "user-edit-actions";
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.className = "user-edit-btn cancel-btn";
+    cancelBtn.textContent = "Cancel";
+    // Cancel restores the ORIGINAL message unchanged: nothing was mutated
+    // in `projects` yet, so a plain re-render is enough to revert the view.
+    cancelBtn.onclick = () => loadChat(meta.projId, meta.chatId);
+
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.className = "user-edit-btn save-btn";
+    saveBtn.textContent = "Save";
+    saveBtn.onclick = () => {
+        const newText = textarea.value.trim();
+        if (!newText && !msg.image) {
+            alert("Message can't be empty.");
+            return;
+        }
+        submitUserMessageAndAppendReply(meta, newText);
+    };
+
+    actions.appendChild(cancelBtn);
+    actions.appendChild(saveBtn);
+    wrapper.appendChild(actions);
+
+    textarea.focus();
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+}
+
+// Shared submit path for BOTH:
+//  - Edit -> Save (textOverride is the new, edited text)
+//  - Resend, but only for the edge case where this user message has no bot
+//    reply immediately after it yet (see resendUserMessage below - the
+//    normal case, an existing reply, delegates to regenerateBotMessage
+//    instead and never reaches this function)
+//
+// Per the Phase 2 spec, Edit always removes every conversation turn after
+// the edited message (the old downstream answers were reasoning about
+// content that no longer exists) and re-submits to get a fresh reply. That
+// same truncate-then-append behavior is also exactly correct for the
+// resend-with-no-existing-reply case, since there is nothing meaningful
+// after this message to preserve there either.
+// BUG FIX (found via Phase 2 automated testing, deterministic repro): unlike
+// regenerateBotMessage - which disables its OWN button synchronously before
+// awaiting, so a rapid double-click on that exact button is a native no-op -
+// this function has no such protection, AND (unlike regenerateBotMessage) it
+// calls loadChat() synchronously up front, before the network request
+// resolves. That re-render creates a brand-new, fully enabled Resend/Save
+// button for the same still-reply-less message. A fast second click on that
+// freshly-rendered button (Resend's no-existing-reply fallback path, or a
+// second Edit->Save on the same message before the first finishes) used to
+// re-enter this function concurrently: both calls independently push() a bot
+// reply once their own request resolved, producing two duplicate bot
+// messages for one user question instead of one.
+//
+// Fix: a synchronous, key-based in-flight guard. The check-and-set below has
+// no `await` between them, so it is atomic on JS's single-threaded event
+// loop - no other call can interleave between the `has()` check and the
+// `add()` that immediately follows it, regardless of how many buttons the
+// user manages to click.
+const inFlightUserMessageKeys = new Set();
+
+async function submitUserMessageAndAppendReply(meta, textOverride) {
+    const requestKey = `${meta.projId}:${meta.chatId}:${meta.msgIndex}`;
+    if (inFlightUserMessageKeys.has(requestKey)) {
+        // A request for this exact message is already in flight (e.g. a
+        // fast double-click) - silently ignore the duplicate trigger rather
+        // than firing a second overlapping request.
+        return;
+    }
+
+    const proj = projects.find(p => p.id === meta.projId);
+    const chat = proj ? proj.chats.find(c => c.id === meta.chatId) : null;
+    if (!chat) return;
+
+    const msg = chat.messages[meta.msgIndex];
+    if (!msg || msg.role !== "user") return;
+
+    const finalText = (textOverride !== undefined ? textOverride : (msg.text || "")).trim();
+    if (!finalText && !msg.image) {
+        alert("Message can't be empty.");
+        return;
+    }
+
+    inFlightUserMessageKeys.add(requestKey);
+    try {
+        await submitUserMessageAndAppendReplyInner(meta, msg, finalText, chat, proj);
+    } finally {
+        inFlightUserMessageKeys.delete(requestKey);
+    }
+}
+
+async function submitUserMessageAndAppendReplyInner(meta, msg, finalText, chat, proj) {
+    msg.text = finalText;
+    chat.messages = chat.messages.slice(0, meta.msgIndex + 1);
+    saveProjectsToStorage();
+
+    // CHAT-05-style race protection: remember which chat this belongs to.
+    // If the user navigates away before the reply comes back, it is still
+    // saved into the correct chat's data - just not painted on screen.
+    const requestProjectId = meta.projId;
+    const requestChatId = meta.chatId;
+    const isStillViewingThisChat = () => activeProjectId === requestProjectId && activeChatId === requestChatId;
+
+    let chatBox = null;
+    if (isStillViewingThisChat()) {
+        loadChat(requestProjectId, requestChatId);
+        chatBox = document.getElementById("chat-box");
+    }
+
+    const priorMessages = chat.messages.slice(0, -1);
+    const boundedHistory = priorMessages
+        .slice(-20)
+        .map(m => {
+            let text = (m.text || "").trim();
+            if (!text && m.image) text = "[Student uploaded an image]";
+            return { role: m.role, text: text };
+        });
+
+    const formData = new FormData();
+    formData.append("prompt", finalText || "Analyze this document/image.");
+    formData.append("mode", currentMode);
+    formData.append("board", document.getElementById("board-select").value);
+    formData.append("user_class", document.getElementById("class-select").value);
+    formData.append("stream", document.getElementById("stream-select").value);
+    formData.append("history", JSON.stringify(boundedHistory));
+
+    if (msg.image) {
+        try {
+            formData.append("image", dataURLToFile(msg.image, "attachment.png"));
+        } catch (e) {
+            console.error("Couldn't reattach image for edit/resend:", e);
+        }
+    }
+
+    let loadingDiv = null;
+    if (chatBox) {
+        loadingDiv = document.createElement("div");
+        loadingDiv.className = "bot-message";
+        loadingDiv.textContent = "Kognit is searching through your book & notes...";
+        chatBox.appendChild(loadingDiv);
+        chatBox.scrollTop = chatBox.scrollHeight;
+    }
+
+    try {
+        const headers = {};
+        const { data: { session } } = await supabaseClient.auth.getSession();
+        if (session) headers["Authorization"] = `Bearer ${session.access_token}`;
+
+        const response = await fetch("/api/chat", { method: "POST", headers, body: formData });
+        const data = await response.json();
+        const replyText = data.reply || "No response received.";
+
+        chat.messages.push({ role: "bot", text: replyText });
+        saveProjectsToStorage();
+        maybeGenerateAiTitle(proj, chat);
+
+        if (isStillViewingThisChat()) {
+            loadChat(requestProjectId, requestChatId);
+        }
+    } catch (e) {
+        if (isStillViewingThisChat() && loadingDiv && document.getElementById("chat-box").contains(loadingDiv)) {
+            loadingDiv.textContent = "Error connecting to Kognit Engine.";
+        }
+    }
+}
+
+// Resend: re-sends a user message's existing prompt (unchanged text).
+//  - If this message already has a bot reply immediately after it (the
+//    normal case), reuse the exact same in-place-replace path as the bot
+//    toolbar's own Regenerate button, so there is exactly one Regenerate
+//    implementation, not two - and everything after that reply stays
+//    untouched.
+//  - Otherwise (e.g. a prior request errored out without saving a reply -
+//    see sendMessage's catch block), fall back to submitting fresh and
+//    appending a new reply.
+function resendUserMessage(meta, btnEl) {
+    const proj = projects.find(p => p.id === meta.projId);
+    const chat = proj ? proj.chats.find(c => c.id === meta.chatId) : null;
+    if (!chat) return;
+
+    const nextMsg = chat.messages[meta.msgIndex + 1];
+    if (nextMsg && nextMsg.role === "bot") {
+        return regenerateBotMessage({ projId: meta.projId, chatId: meta.chatId, msgIndex: meta.msgIndex + 1 }, btnEl);
+    }
+    return submitUserMessageAndAppendReply(meta, undefined);
 }
 
 window.setMode = function(mode) {
@@ -954,20 +1286,11 @@ function loadChat(projId, chatId) {
 
     chat.messages.forEach((msg, index) => {
         if (msg.role === "user") {
-            const div = document.createElement("div");
-            div.className = "user-message";
-            if (msg.image) {
-                const img = document.createElement("img");
-                img.src = msg.image;
-                img.className = "user-msg-image";
-                div.appendChild(img);
-            }
-            if (msg.text) {
-                const span = document.createElement("span");
-                span.textContent = msg.text;
-                div.appendChild(span);
-            }
-            chatBox.appendChild(div);
+            chatBox.appendChild(createUserMessageElement(msg, {
+                projId: projId,
+                chatId: chatId,
+                msgIndex: index
+            }));
         } else {
             chatBox.appendChild(createBotMessageElement(msg.text, {
                 projId: projId,
@@ -1535,21 +1858,14 @@ window.sendMessage = async function() {
 
     const userMsgObj = { role: "user", text: promptText, image: selectedImageBase64 };
     currentChat.messages.push(userMsgObj);
+    const newUserMsgIndex = currentChat.messages.length - 1;
     saveProjectsToStorage();
 
-    const userDiv = document.createElement("div");
-    userDiv.className = "user-message";
-    if (selectedImageBase64) {
-        const img = document.createElement("img");
-        img.src = selectedImageBase64;
-        img.className = "user-msg-image";
-        userDiv.appendChild(img);
-    }
-    if (promptText) {
-        const span = document.createElement("span");
-        span.textContent = promptText;
-        userDiv.appendChild(span);
-    }
+    const userDiv = createUserMessageElement(userMsgObj, {
+        projId: requestProjectId,
+        chatId: requestChatId,
+        msgIndex: newUserMsgIndex
+    });
     chatBox.appendChild(userDiv);
 
     // Bounded conversation history for same-chat context (CHAT-04 fix).
