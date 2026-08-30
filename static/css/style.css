@@ -25,21 +25,31 @@ body {
     width: 100vw;
 }
 
-/* Sidebar Styling */
+/* Sidebar Styling
+   PHASE 3 (minimal redesign): overall vertical rhythm tightened (16px ->
+   14px padding/gap) and the three header actions are laid out as a compact
+   2-column grid (New Project / New Chat) with Quiz as a slim full-width row
+   underneath, instead of three stacked full-height buttons. This is a pure
+   CSS layout change - the buttons themselves keep their existing ids/
+   onclick handlers, so no JS/HTML behavior changes. */
 .sidebar {
-    width: 280px;
+    width: 272px;
     background-color: #080808;
     border-right: 1px solid #1e1e1e;
     display: flex;
     flex-direction: column;
-    padding: 16px;
-    gap: 16px;
+    padding: 14px;
+    gap: 14px;
 }
 
 .sidebar-header {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+}
+
+.sidebar-header .btn-quiz {
+    grid-column: 1 / -1;
 }
 
 .btn-primary {
@@ -47,11 +57,11 @@ body {
     background: #ffffff;
     color: #000000;
     border: none;
-    padding: 10px;
-    border-radius: 8px;
+    padding: 9px 8px;
+    border-radius: 7px;
     font-weight: 600;
     cursor: pointer;
-    font-size: 13px;
+    font-size: 12.5px;
     transition: 0.2s ease;
 }
 
@@ -64,11 +74,11 @@ body {
     background: #121212;
     color: #cccccc;
     border: 1px solid #222222;
-    padding: 9px;
-    border-radius: 8px;
+    padding: 9px 8px;
+    border-radius: 7px;
     font-weight: 500;
     cursor: pointer;
-    font-size: 13px;
+    font-size: 12.5px;
     transition: 0.2s ease;
 }
 
@@ -80,14 +90,14 @@ body {
 
 .btn-quiz {
     width: 100%;
-    background: #1e1b4b;
+    background: transparent;
     color: #a5b4fc;
-    border: 1px solid #3730a3;
-    padding: 9px;
-    border-radius: 8px;
+    border: 1px solid #262247;
+    padding: 8px;
+    border-radius: 7px;
     font-weight: 600;
     cursor: pointer;
-    font-size: 13px;
+    font-size: 12.5px;
     transition: 0.2s ease;
     display: flex;
     align-items: center;
@@ -96,61 +106,65 @@ body {
 }
 
 .btn-quiz:hover {
-    background: #312e81;
+    background: #1e1b4b;
     color: #ffffff;
 }
 
 .history-section {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 8px;
     overflow-y: auto;
     flex: 1;
 }
 
 .history-title {
-    font-size: 11px;
+    font-size: 10.5px;
     text-transform: uppercase;
     letter-spacing: 0.8px;
-    color: #666666;
+    color: #5c5c5c;
     font-weight: 600;
+    padding: 0 4px;
 }
 
 .history-list {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 2px;
 }
 
-/* Project Container */
+/* Project Container
+   PHASE 3: projects no longer read as boxed "cards" (background fill +
+   full border). Grouping now comes from whitespace and the chats-list's
+   left indent guide below, matching a lighter, more modern AI-product
+   feel. Active-project no longer draws a border around the whole group;
+   instead .project-header.active-project gets a subtle accent tint (see
+   below) so the highlight sits on the row you actually interact with. */
 .project-card {
     display: flex;
     flex-direction: column;
-    background: #0d0d0d;
-    border: 1px solid #1a1a1a;
-    border-radius: 8px;
-    padding: 6px;
-    gap: 4px;
-}
-
-.project-card.active-project {
-    border-color: #333333;
+    gap: 1px;
 }
 
 .project-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 6px 8px;
+    padding: 7px 8px;
     border-radius: 6px;
     cursor: pointer;
     font-weight: 600;
-    font-size: 13px;
-    color: #e0e0e0;
+    font-size: 12.5px;
+    color: #d4d4d4;
 }
 
 .project-header:hover {
-    background: #161616;
+    background: #131313;
+}
+
+.project-card.active-project .project-header {
+    background: #141414;
+    color: #ffffff;
 }
 
 .project-title-wrapper {
@@ -211,10 +225,10 @@ body {
 .chats-list {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    padding-left: 12px;
-    margin-top: 2px;
-    border-left: 1px solid #222222;
+    gap: 1px;
+    padding-left: 11px;
+    margin: 2px 0 4px 9px;
+    border-left: 1px solid #1a1a1a;
 }
 
 /* FEATURE 1: collapsed project - its nested chats are fully hidden. */
@@ -242,13 +256,13 @@ body {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 6px 8px;
+    padding: 6px 7px;
     border-radius: 6px;
     cursor: pointer;
     font-size: 12px;
     color: #888888;
     transition: 0.15s;
-    min-height: 32px;
+    min-height: 30px;
 }
 
 .chat-item:hover, .chat-item.active {
@@ -1016,7 +1030,7 @@ body {
 
 /* Sidebar Search Bar Styling */
 .sidebar-search-container {
-    padding: 10px 15px 5px 15px;
+    padding: 2px 0 0 0;
 }
 
 /* FEATURE 8: the search icon used to be typed directly into the input's
@@ -1067,9 +1081,8 @@ body {
 
 /* Sidebar Auth Footer UI */
 .sidebar-footer {
-    padding: 12px 15px;
-    border-top: 1px solid rgba(255, 255, 255, 0.1);
-    background: rgba(0, 0, 0, 0.2);
+    padding: 12px 4px 2px 4px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
     margin-top: auto;
 }
 
@@ -1419,4 +1432,38 @@ body {
 .user-edit-btn.cancel-btn:hover {
     background: rgba(255, 255, 255, 0.18);
     color: #ffffff;
+}
+
+/* ============================================================
+   PHASE 3 ADDITION — responsive safety net (CSS-only).
+   No new toggle/hamburger behavior is introduced here (that needs new
+   HTML + JS state and is out of scope for this CSS-only redesign pass -
+   see handoff report). This only keeps the existing always-visible
+   sidebar from crushing the chat column on tablet/small-laptop widths.
+   ============================================================ */
+@media (max-width: 900px) {
+    .sidebar {
+        width: 220px;
+        padding: 10px;
+        gap: 10px;
+    }
+
+    .main-content {
+        padding: 12px;
+    }
+}
+
+@media (max-width: 640px) {
+    .sidebar {
+        width: 180px;
+        padding: 8px;
+    }
+
+    .sidebar-header {
+        gap: 4px;
+    }
+
+    .context-selector {
+        flex-wrap: wrap;
+    }
 }
