@@ -417,6 +417,96 @@ function updateAuthUI(user) {
 
 // ==================== WORKSPACE & CHAT FUNCTIONS ====================
 
+// ==================== SHARED MATHJAX RENDERING HELPER ====================
+// BUG FIX (raw "$$"/"\text{...}"/"_" visible to students instead of rendered
+// math): every call site used to do `if (window.MathJax) MathJax.typesetPromise(...)`.
+// That guard checks the wrong thing. `window.MathJax` is the plain
+// configuration OBJECT set in the inline <script> in templates/index.html -
+// it exists and is truthy from the very first moment the page starts
+// parsing, long before the async-loaded MathJax library
+// (<script id="MathJax-script" async src=".../tex-svg.js">, also in
+// templates/index.html) has actually finished downloading and initializing.
+// `typesetPromise` is a method the real library adds to that object later -
+// until then it simply does not exist. So the old guard passes even when
+// MathJax isn't ready, and `MathJax.typesetPromise([...])` throws
+// "TypeError: MathJax.typesetPromise is not a function" SYNCHRONOUSLY, before
+// the trailing `.catch()` can even attach - an uncaught exception that
+// silently leaves the raw LaTeX source on screen, permanently (nothing else
+// ever re-triggers typesetting for that message). This is most likely to be
+// hit on page load/reload (loadChat() runs inside the DOMContentLoaded
+// handler, often before the MathJax CDN bundle has finished fetching+
+// parsing), which is exactly the symptom reported: existing chat history
+// showing raw "$$6\text{CO}_2 ..." on open.
+//
+// This one helper replaces every direct MathJax.typesetPromise(...) call
+// site (loadChat() - covers initial page load, switching chats, and
+// regenerate, since regenerateBotMessage() re-renders via loadChat();
+// and the reply-append path inside submitUserMessageAndAppendReplyInner() -
+// covers new messages, resend, and edit/resubmit, since all of those funnel
+// through either loadChat() or that same reply-append code). There is
+// exactly one place that knows how to safely wait for MathJax:
+//   1. Already ready (`typesetPromise` exists) -> call it immediately.
+//   2. Script has started loading and exposed `MathJax.startup.promise`
+//      (the documented MathJax v3 mechanism for "resolve once it's safe to
+//      call typesetPromise") -> chain on that.
+//   3. Script hasn't even started executing yet (window.MathJax is still
+//      just the bare config object, no `startup` property at all) -> a
+//      short, BOUNDED poll. This state should be extremely brief in
+//      practice (the <script async> tag starts fetching immediately on
+//      page parse) but is handled explicitly rather than assumed away.
+// In every case, failure (MathJax never becomes ready within the bound, or
+// typesetPromise itself rejects) is caught and logged - it never throws an
+// uncaught exception and never blocks the rest of the chat UI. If MathJax
+// truly never loads (e.g. the CDN is blocked), the affected message's math
+// stays as raw text and a console warning is logged - the same degraded
+// outcome as today's bug, but explicit and non-crashing instead of an
+// uncaught exception, and every OTHER part of the UI keeps working.
+const MATHJAX_READY_POLL_INTERVAL_MS = 100;
+const MATHJAX_READY_MAX_WAIT_MS = 8000; // generous for a slow CDN fetch; bounded so a permanently-broken load doesn't poll forever.
+
+function typesetMathJax(elements) {
+    if (window.MathJax && typeof window.MathJax.typesetPromise === "function") {
+        return window.MathJax.typesetPromise(elements).catch((err) => {
+            console.error("MathJax typeset error:", err);
+        });
+    }
+
+    if (window.MathJax && window.MathJax.startup && window.MathJax.startup.promise) {
+        return window.MathJax.startup.promise
+            .then(() => {
+                if (typeof window.MathJax.typesetPromise === "function") {
+                    return window.MathJax.typesetPromise(elements);
+                }
+                console.warn("MathJax startup resolved but typesetPromise is still unavailable.");
+            })
+            .catch((err) => {
+                console.error("MathJax typeset error:", err);
+            });
+    }
+
+    // MathJax hasn't started executing at all yet. Poll briefly rather than
+    // giving up immediately (which would show raw math unnecessarily on a
+    // slightly slow connection) or polling forever (which would leak timers
+    // if MathJax genuinely never loads, e.g. the CDN is blocked/offline).
+    return new Promise((resolve) => {
+        const start = Date.now();
+        const poll = () => {
+            const ready = window.MathJax && (typeof window.MathJax.typesetPromise === "function" || (window.MathJax.startup && window.MathJax.startup.promise));
+            if (ready) {
+                resolve(typesetMathJax(elements));
+                return;
+            }
+            if (Date.now() - start >= MATHJAX_READY_MAX_WAIT_MS) {
+                console.warn("MathJax did not become available within the wait period; formulas on this message may show as raw text until the page is reloaded.");
+                resolve();
+                return;
+            }
+            setTimeout(poll, MATHJAX_READY_POLL_INTERVAL_MS);
+        };
+        poll();
+    });
+}
+
 // BUG FIX (Bengali text broken inside math formulas): MathJax's SVG/CHTML
 // renderers do not run full complex-script text shaping on the content
 // they typeset - Bengali Unicode inside math mode (even inside \text{...})
@@ -551,20 +641,69 @@ function renderBengaliMathSegment(rawLatex, isDisplay) {
     return `<span class="kognit-bengali-formula${displayClass}">${text}</span>`;
 }
 
-// Scans rawText for $...$/$$...$$ segments and replaces ONLY the ones
-// containing Bengali Unicode with safe HTML (see renderBengaliMathSegment
-// above). Segments with no Bengali are returned byte-for-byte unchanged,
-// so MathJax.typesetPromise() (called after marked.parse() further down
-// the pipeline) still typesets every non-Bengali formula exactly as
-// before - zero behavior change for pure math.
-function preprocessBengaliMath(rawText) {
-    if (!rawText) return rawText;
+// BUG FIX (marked.js corrupting valid LaTeX before MathJax ever sees it):
+// the function that used to live here (preprocessBengaliMath) only protected
+// $...$/$$...$$ segments that contained Bengali Unicode - every OTHER math
+// segment (i.e. every pure chemistry/math formula) was returned completely
+// untouched, on the assumption that MathJax would see it exactly as written.
+// That assumption is false: the untouched segment still gets run through
+// marked.parse() (see createBotMessageElement below) BEFORE MathJax ever
+// runs, and marked applies ordinary Markdown emphasis rules to it. Verified
+// directly: marked.parse("\\text{C}_6\\text{H}_{12}") produces
+// "\\text{C}<em>6\\text{H}</em>{12}" - the underscores are silently consumed
+// as italic-emphasis delimiters and the LaTeX is corrupted before MathJax
+// ever gets a chance to typeset it. (This specifically happens when a
+// command like \text{...} sits immediately before the underscore, since
+// that makes the underscore NOT "intraword" by Markdown's rules - a bare
+// "CO_2" with no \text{} wrapper is NOT affected, which is why this bug is
+// intermittent-looking rather than affecting every formula.)
+//
+// Fix: extend the same "intercept before marked.parse(), restore after"
+// strategy already used for Bengali segments to EVERY math segment, Bengali
+// or not:
+//   - Bengali segments: unchanged behavior - rendered immediately to safe,
+//     already-escaped HTML via renderBengaliMathSegment (marked.js passes
+//     raw inline HTML through untouched by default, which is what already
+//     made this work).
+//   - Every other (non-Bengali) segment: swapped for an inert placeholder
+//     token that contains no Markdown-significant characters, so marked.js
+//     cannot possibly reinterpret it. After marked.parse() runs, the
+//     placeholder is swapped back for the ORIGINAL raw segment text -
+//     delimiters, backslashes, underscores, braces, all byte-for-byte
+//     unchanged - via restoreProtectedMathSegments(), so MathJax then
+//     typesets the pristine original source exactly as if marked had never
+//     touched it. The restored text is passed through the same
+//     escapeHtmlForMath() used for Bengali segments (escapes only
+//     & < > " ' - never touches $, \, _, {, }) as defensive-in-depth
+//     hardening against the pathological case of literal "<"/">" characters
+//     inside a math segment ending up interpreted as real HTML tags; for
+//     every realistic LaTeX/chemistry formula this is a no-op since none of
+//     those characters normally appear there.
+//
+// Each placeholder replaces the segment's FULL match (delimiters included)
+// as a single token with no embedded newlines, which also means a
+// multi-line display-math block can no longer be split across separate
+// Markdown paragraphs by marked - a secondary robustness improvement, not
+// just a workaround for the emphasis bug.
+const MATH_PLACEHOLDER_PREFIX = "\uE000KGMATH";
+const MATH_PLACEHOLDER_SUFFIX = "\uE001";
+
+// Scans rawText for $...$/$$...$$ segments. Bengali-containing segments are
+// rendered to safe HTML immediately (unchanged existing behavior); every
+// other segment is replaced with a placeholder token and its original raw
+// text is collected in `segments` for restoreProtectedMathSegments() to
+// swap back in after marked.parse() runs. Returns both the placeholder-
+// bearing text and the segments array (restoration needs both).
+function protectMathSegments(rawText) {
+    if (!rawText) return { text: rawText, segments: [] };
+
+    const segments = [];
 
     // Skip fenced code blocks entirely so a literal "$" inside a student's
     // code sample is never mistaken for a math delimiter.
     const parts = rawText.split(/(```[\s\S]*?```)/g);
 
-    return parts.map((chunk, idx) => {
+    const text = parts.map((chunk, idx) => {
         const isCodeFence = idx % 2 === 1;
         if (isCodeFence) return chunk;
 
@@ -572,12 +711,34 @@ function preprocessBengaliMath(rawText) {
             const isDisplay = displayContent !== undefined;
             const content = isDisplay ? displayContent : inlineContent;
 
-            if (!BENGALI_UNICODE_RANGE.test(content)) {
-                return match; // No Bangla - leave untouched for MathJax.
+            if (BENGALI_UNICODE_RANGE.test(content)) {
+                return renderBengaliMathSegment(content, isDisplay);
             }
-            return renderBengaliMathSegment(content, isDisplay);
+
+            const index = segments.length;
+            segments.push(match); // full match, delimiters included, untouched
+            return MATH_PLACEHOLDER_PREFIX + index + MATH_PLACEHOLDER_SUFFIX;
         });
     }).join("");
+
+    return { text, segments };
+}
+
+// Swaps every placeholder token in marked.parse()'s HTML output back for its
+// original raw math text (HTML-escaped defensively - see comment above).
+// Must be called on the HTML string AFTER marked.parse(), before it is
+// assigned to any element's innerHTML.
+function restoreProtectedMathSegments(html, segments) {
+    if (!segments.length) return html;
+    const placeholderRegex = new RegExp(MATH_PLACEHOLDER_PREFIX + "(\\d+)" + MATH_PLACEHOLDER_SUFFIX, "g");
+    return html.replace(placeholderRegex, (fullMatch, indexStr) => {
+        const segment = segments[Number(indexStr)];
+        // Defensive fallback: should never happen (every placeholder this
+        // module creates has a corresponding entry), but never let a lookup
+        // miss leave a raw sentinel character visible to the student.
+        if (segment === undefined) return "";
+        return escapeHtmlForMath(segment);
+    });
 }
 
 // BUG FIX (can't copy formulas): MathJax renders every equation as an SVG
@@ -637,11 +798,13 @@ function createBotMessageElement(rawText, meta = {}) {
 
     const contentDiv = document.createElement("div");
     contentDiv.className = "bot-message-content";
-    // Bengali-containing math segments are swapped for safe HTML BEFORE
-    // Markdown parsing (see preprocessBengaliMath above); everything else
-    // - including every non-Bengali formula - reaches marked.parse() and
-    // MathJax exactly as it always has.
-    contentDiv.innerHTML = marked.parse(preprocessBengaliMath(rawText));
+    // ALL math segments (Bengali or not) are protected before marked.parse()
+    // runs, and non-Bengali ones are restored to their original, untouched
+    // raw text afterwards - see protectMathSegments/restoreProtectedMathSegments
+    // above for why this is necessary (marked.js can otherwise corrupt valid
+    // LaTeX underscores as Markdown emphasis).
+    const { text: protectedText, segments } = protectMathSegments(rawText);
+    contentDiv.innerHTML = restoreProtectedMathSegments(marked.parse(protectedText), segments);
     wrapper.appendChild(contentDiv);
 
     wrapper.appendChild(buildBotToolbar(rawText, meta));
@@ -1353,9 +1516,7 @@ function loadChat(projId, chatId) {
         });
     }
 
-    if (window.MathJax) {
-        MathJax.typesetPromise([chatBox]).catch((err) => console.error(err));
-    }
+    typesetMathJax([chatBox]);
     chatBox.scrollTop = chatBox.scrollHeight;
 }
 
@@ -2101,9 +2262,7 @@ window.sendMessage = async function() {
             });
             chatBox.appendChild(botDiv);
 
-            if (window.MathJax) {
-                MathJax.typesetPromise([botDiv]).catch((err) => console.error(err));
-            }
+            typesetMathJax([botDiv]);
         }
         // If the user switched chats before the response arrived, it's
         // still correctly saved above - it will simply be there the next
