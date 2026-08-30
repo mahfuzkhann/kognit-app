@@ -478,7 +478,14 @@ body {
     border-left: 3px solid #ffffff;
     padding: 14px 18px;
     border-radius: 8px;
-    max-width: 90%;
+    /* PHASE 6: readability cap. The old flat 90% let a single line of text
+       stretch to ~800px+ inside a wide .main-content, which is well past a
+       comfortable reading line length (roughly 60-90 characters) for long
+       Bangla/English answers. min(90%, 720px) keeps the existing 90%
+       responsive behavior on narrow viewports (it still shrinks with the
+       container) while capping the absolute width once there's room to
+       spare, without touching .main-content itself or any other layout. */
+    max-width: min(90%, 720px);
     min-width: 0;
     align-self: flex-start;
     line-height: 1.6;
@@ -488,12 +495,80 @@ body {
     overflow-wrap: break-word;
 }
 
+/* PHASE 6: markdown vertical rhythm inside AI answers.
+   OBSERVED ISSUE: the global `* { margin: 0; }` reset at the top of this
+   file zeroes the margin on every element marked.parse() produces inside
+   .bot-message-content (p, h1-h6, ul/ol, li, blockquote, table, hr), and
+   no replacement spacing was ever added for them - only the word-wrap/
+   overflow rules below existed. The practical effect: a long structured
+   AI answer (multiple paragraphs, a list, a sub-heading) rendered as one
+   unbroken wall of text with zero gap between blocks, which is the
+   opposite of "long AI answers ... comfortably readable" from a chat
+   product perspective, and gets worse the longer/more structured the
+   answer is. This adds back sane spacing scoped ONLY to
+   .bot-message-content's children, so nothing outside AI answers is
+   touched. The `:last-child` rule prevents a trailing block from adding
+   extra space before .bot-toolbar, which already carries its own
+   margin-top. */
+.bot-message-content > *:last-child {
+    margin-bottom: 0 !important;
+}
+
+.bot-message p {
+    margin: 0 0 10px 0;
+}
+
+.bot-message h1,
+.bot-message h2,
+.bot-message h3,
+.bot-message h4,
+.bot-message h5,
+.bot-message h6 {
+    margin: 14px 0 8px 0;
+    line-height: 1.35;
+}
+
+.bot-message ul,
+.bot-message ol {
+    margin: 0 0 10px 0;
+}
+
+.bot-message li {
+    margin-bottom: 4px;
+}
+
+.bot-message li:last-child {
+    margin-bottom: 0;
+}
+
+/* Blockquotes previously had no visual treatment at all beyond width/wrap
+   rules - a quoted line rendered identically to a normal paragraph, with
+   no cue that it was being quoted. A quiet left rule + muted tone is
+   enough to read as a quote without introducing a new card/box. */
+.bot-message blockquote {
+    margin: 0 0 10px 0;
+    padding: 2px 0 2px 12px;
+    border-left: 2px solid #333333;
+    color: #aaaaaa;
+}
+
+.bot-message table {
+    margin: 4px 0 12px 0;
+}
+
+.bot-message hr {
+    margin: 14px 0;
+    border: none;
+    border-top: 1px solid #262626;
+}
+
 /* Code blocks and pre-formatted text must wrap long lines */
 .bot-message pre {
     max-width: 100%;
     word-break: break-word;
     overflow-wrap: break-word;
     overflow-x: auto;
+    margin: 0 0 10px 0;
 }
 
 /* Inline code */
@@ -678,7 +753,10 @@ body {
     background: #1e1e1e;
     padding: 12px 18px;
     border-radius: 8px;
-    max-width: 80%;
+    /* PHASE 6: same reasoning as .bot-message's cap above - keeps the
+       existing 80%-of-container responsive behavior, just bounds the
+       absolute width on wide viewports. */
+    max-width: min(80%, 620px);
     align-self: flex-end;
     color: #ffffff;
     font-size: 14px;
@@ -1595,6 +1673,31 @@ body {
    see handoff report). This only keeps the existing always-visible
    sidebar from crushing the chat column on tablet/small-laptop widths.
    ============================================================ */
+/* PHASE 6: intermediate laptop-tier breakpoint.
+   OBSERVED GAP: the app previously jumped straight from full desktop
+   (272px sidebar, 20px .main-content padding, unwrapped 3-dropdown
+   .context-selector) to the 900px tier below. In the roughly 901-1024px
+   range - a common small-laptop/half-split-screen width - the sidebar's
+   fixed 272px plus the navbar's brand + 3 selectors + share button in one
+   space-between row left very little breathing room for the chat column
+   and could crowd the selectors against the share button. This tier only
+   trims that specific gap; it does not touch anything the 900px/640px
+   tiers below already handle. */
+@media (max-width: 1024px) {
+    .sidebar {
+        width: 240px;
+    }
+
+    .main-content {
+        padding: 16px;
+    }
+
+    .context-selector {
+        flex-wrap: wrap;
+        justify-content: flex-end;
+    }
+}
+
 @media (max-width: 900px) {
     .sidebar {
         width: 220px;
