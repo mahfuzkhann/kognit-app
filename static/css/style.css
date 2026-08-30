@@ -743,6 +743,128 @@ body {
     background: #141414;
 }
 
+/* ==========================================================
+   PHASE 4: UNIFIED "+" COMPOSER ACTION MENU.
+   Replaces the two separate PDF/Image .icon-btn labels that used
+   to sit directly in .input-container. The old .icon-btn rules
+   above are left in place (unused) rather than deleted, per the
+   "preserve unrelated code / minimal diff" rule, in case anything
+   else still references that class.
+   ========================================================== */
+
+/* Positioning context for the popup menu below - the menu is
+   absolutely positioned relative to this wrapper, not the whole
+   .input-container, so it stays anchored to the "+" button
+   regardless of how wide the textarea grows. */
+.composer-attach-wrapper {
+    position: relative;
+    flex-shrink: 0;
+}
+
+.composer-plus-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #0d0d0d;
+    border: 1px solid #222222;
+    color: #aaaaaa;
+    width: 44px;
+    height: 44px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: 0.2s;
+    flex-shrink: 0;
+}
+
+.composer-plus-btn:hover {
+    color: #ffffff;
+    border-color: #555555;
+    background: #141414;
+}
+
+/* Rotate the "+" into an "x"-ish cross when the menu is open, as a
+   lightweight visual acknowledgement of state - no extra icon swap
+   needed since a 45deg-rotated plus already reads as a close glyph. */
+.composer-plus-btn[aria-expanded="true"] {
+    color: #ffffff;
+    border-color: #555555;
+    background: #1a1a1a;
+    transform: rotate(45deg);
+}
+
+/* Opens UPWARD, above the composer, so it can never be clipped by
+   .chat-box's own overflow rules below it, and never collides with
+   the sidebar (menu width is bounded and anchored to the left edge
+   of the composer, well clear of the 280px sidebar on any viewport
+   this app supports). Neither .main-content nor .app-layout sets
+   overflow:hidden, so an absolutely positioned child here is never
+   clipped by an ancestor. */
+.composer-menu {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 0;
+    min-width: 210px;
+    background: #111111;
+    border: 1px solid #262626;
+    border-radius: 10px;
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.55);
+    z-index: 50;
+}
+
+.composer-menu.hidden {
+    display: none;
+}
+
+.composer-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    background: transparent;
+    border: none;
+    color: #e0e0e0;
+    padding: 9px 10px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.composer-menu-item svg {
+    flex-shrink: 0;
+    color: #999999;
+}
+
+.composer-menu-item:hover:not(:disabled) {
+    background: #1e1e1e;
+    color: #ffffff;
+}
+
+.composer-menu-item:hover:not(:disabled) svg {
+    color: #ffffff;
+}
+
+.composer-menu-item:disabled {
+    cursor: default;
+    opacity: 0.45;
+}
+
+.composer-menu-badge {
+    margin-left: auto;
+    font-size: 10px;
+    color: #777777;
+    border: 1px solid #333333;
+    border-radius: 999px;
+    padding: 2px 7px;
+    white-space: nowrap;
+}
+
 #user-input {
     flex: 1;
     background: #0d0d0d;

@@ -1617,6 +1617,79 @@ function deleteChat(projId, chatId) {
 // NEW BUG 2 FIX: Replace onkeypress with onkeydown to handle Shift+Enter.
 // Textarea now supports multi-line input. Enter sends message, Shift+Enter
 // inserts newline. Auto-grows up to max-height 200px, then becomes scrollable.
+// ==================== PHASE 4: COMPOSER "+" ACTION MENU ====================
+// Replaces the previous two separate PDF/Image icon buttons with a single
+// unified menu. This section ONLY controls menu open/close state and
+// forwards clicks to the existing, unchanged upload inputs/handlers
+// (#pdf-input -> handlePDFUpload, #image-input -> handleImageSelect) - no
+// new upload pipeline is introduced here.
+function isComposerMenuOpen() {
+    const menu = document.getElementById("composer-menu");
+    return !!menu && !menu.classList.contains("hidden");
+}
+
+function closeComposerMenu() {
+    const menu = document.getElementById("composer-menu");
+    const btn = document.getElementById("composer-plus-btn");
+    if (menu) menu.classList.add("hidden");
+    if (btn) btn.setAttribute("aria-expanded", "false");
+}
+
+function openComposerMenu() {
+    const menu = document.getElementById("composer-menu");
+    const btn = document.getElementById("composer-plus-btn");
+    if (menu) menu.classList.remove("hidden");
+    if (btn) btn.setAttribute("aria-expanded", "true");
+}
+
+window.toggleComposerMenu = function(event) {
+    // Stop propagation so the document-level "click outside closes the
+    // menu" listener below doesn't immediately re-close the menu this
+    // same click just opened.
+    if (event) event.stopPropagation();
+    if (isComposerMenuOpen()) {
+        closeComposerMenu();
+    } else {
+        openComposerMenu();
+    }
+};
+
+// Menu item handlers - close the menu, then delegate to the SAME hidden
+// <input type="file"> elements and onchange handlers that existed before
+// this phase (handlePDFUpload / handleImageSelect in this file are
+// completely unchanged).
+window.triggerComposerPDFUpload = function() {
+    closeComposerMenu();
+    const input = document.getElementById("pdf-input");
+    if (input) input.click();
+};
+
+window.triggerComposerImageUpload = function() {
+    closeComposerMenu();
+    const input = document.getElementById("image-input");
+    if (input) input.click();
+};
+
+// Outside click closes the menu. Attached once at script load (this
+// script tag runs after the composer markup, at the end of <body>, so
+// these elements already exist). Guards on isComposerMenuOpen() first so
+// this is a no-op on every ordinary click elsewhere in the app.
+document.addEventListener("click", (event) => {
+    if (!isComposerMenuOpen()) return;
+    const wrapper = document.querySelector(".composer-attach-wrapper");
+    if (wrapper && !wrapper.contains(event.target)) {
+        closeComposerMenu();
+    }
+});
+
+// Escape closes the menu, matching the existing Escape-to-cancel pattern
+// already used for project/chat rename inputs elsewhere in this file.
+document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && isComposerMenuOpen()) {
+        closeComposerMenu();
+    }
+});
+
 window.handleKeyDown = function(event) {
     const textarea = document.getElementById("user-input");
     
