@@ -624,7 +624,11 @@ const UI_ICONS = {
     plus: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>`,
     chevron: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`,
     quiz: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><circle cx="12" cy="12" r="5"></circle><circle cx="12" cy="12" r="1"></circle></svg>`,
-    trophy: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 21h8"></path><path d="M12 17v4"></path><path d="M7 4h10v5a5 5 0 0 1-10 0V4z"></path><path d="M7 5H4a3 3 0 0 0 3 5"></path><path d="M17 5h3a3 3 0 0 1-3 5"></path></svg>`
+    trophy: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 21h8"></path><path d="M12 17v4"></path><path d="M7 4h10v5a5 5 0 0 1-10 0V4z"></path><path d="M7 5H4a3 3 0 0 0 3 5"></path><path d="M17 5h3a3 3 0 0 1-3 5"></path></svg>`,
+    // PHASE 5: used only by the empty-chat greeting (see
+    // renderEmptyChatGreeting below). Same stroke-based visual language as
+    // the rest of this icon set - a plain four-point spark, not an emoji.
+    spark: `<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 5.4L19 10l-5.4 1.6L12 17l-1.6-5.4L5 10l5.4-1.6L12 3z"></path></svg>`
 };
 
 function createBotMessageElement(rawText, meta = {}) {
@@ -1165,6 +1169,55 @@ window.handleSidebarSearch = function(event) {
     renderHistoryList();
 };
 
+// ==================== PHASE 5: DYNAMIC EMPTY-CHAT GREETING ====================
+// Replaces the old hardcoded "👋 Welcome to Kognit!" bot message that used
+// to be pushed into chat.messages[0] at creation time (see the removed
+// `messages: [{ role: "bot", text: "👋 ..." }]` blocks previously in
+// createNewProject/createNewChat/createStandaloneChat below).
+//
+// This is intentionally a pure frontend EMPTY-STATE UI element, not a chat
+// message:
+//   - It is never written into chat.messages, so it is never part of the
+//     "history" sent to /api/chat (see boundedHistory in sendMessage),
+//     never synced to Supabase (syncProjectToDatabase serializes
+//     chat.messages as-is), and never cached into
+//     localStorage["kognit_projects"].
+//   - Because it doesn't exist in chat.messages, there is nothing to strip
+//     out on send - loadChat() simply never puts it there in the first
+//     place for a chat that already has messages, and sendMessage() below
+//     removes the on-screen greeting element (not a message) the moment
+//     the first real message is sent.
+//   - New chats now start with messages: [] (empty). A brand-new chat and
+//     a previously-used-then-emptied chat are visually identical - both
+//     just have zero messages - so one code path (loadChat) covers both.
+const EMPTY_CHAT_GREETINGS = [
+    "What would you like to learn today?",
+    "What can I help you understand?",
+    "Ready to explore something new?",
+    "What are we studying today?",
+    "Ask me anything about your coursework.",
+    "Let's work through a problem together.",
+    "Where should we start today?"
+];
+
+function getRandomGreeting() {
+    return EMPTY_CHAT_GREETINGS[Math.floor(Math.random() * EMPTY_CHAT_GREETINGS.length)];
+}
+
+// Renders the empty-state greeting into an already-emptied #chat-box.
+// Deliberately NOT styled like `.bot-message` (no bubble, no border, no
+// toolbar) so it reads as an empty-conversation placeholder rather than a
+// stored AI reply - see `.empty-chat-greeting` in style.css.
+function renderEmptyChatGreeting(chatBox) {
+    const greetingDiv = document.createElement("div");
+    greetingDiv.className = "empty-chat-greeting";
+    greetingDiv.innerHTML = `
+        <span class="empty-chat-greeting-icon">${UI_ICONS.spark}</span>
+        <p class="empty-chat-greeting-text">${getRandomGreeting()}</p>
+    `;
+    chatBox.appendChild(greetingDiv);
+}
+
 window.createNewProject = function() {
     const newProj = {
         id: "proj_" + Date.now(),
@@ -1173,12 +1226,11 @@ window.createNewProject = function() {
             {
                 id: "chat_" + Date.now(),
                 title: "New Chat",
-                messages: [
-                    {
-                        role: "bot",
-                        text: "👋 <b>Welcome to Kognit!</b> Your board and syllabus context are active. Ask any question or upload a chapter PDF!"
-                    }
-                ]
+                // PHASE 5: no more hardcoded welcome message here - an
+                // empty chat now gets its greeting from
+                // renderEmptyChatGreeting() at render time (loadChat),
+                // purely as UI, not as stored chat data.
+                messages: []
             }
         ]
     };
@@ -1202,12 +1254,8 @@ window.createNewChat = function(projectId = null) {
     const newChat = {
         id: "chat_" + Date.now(),
         title: "New Chat",
-        messages: [
-            {
-                role: "bot",
-                text: "👋 <b>Welcome to Kognit!</b> Start a fresh topic or practice problem in this chat."
-            }
-        ]
+        // PHASE 5: see comment above createNewProject.
+        messages: []
     };
 
     project.chats.unshift(newChat);
@@ -1253,12 +1301,8 @@ window.createStandaloneChat = function() {
     const newChat = {
         id: "chat_" + Date.now(),
         title: "New Chat",
-        messages: [
-            {
-                role: "bot",
-                text: "👋 <b>Welcome to Kognit!</b> Start a fresh topic or practice problem in this chat."
-            }
-        ]
+        // PHASE 5: see comment above createNewProject.
+        messages: []
     };
 
     defaultProject.chats.unshift(newChat);
@@ -1284,22 +1328,30 @@ function loadChat(projId, chatId) {
     const chat = proj.chats.find(c => c.id === chatId);
     if (!chat) return;
 
-    chat.messages.forEach((msg, index) => {
-        if (msg.role === "user") {
-            chatBox.appendChild(createUserMessageElement(msg, {
-                projId: projId,
-                chatId: chatId,
-                msgIndex: index
-            }));
-        } else {
-            chatBox.appendChild(createBotMessageElement(msg.text, {
-                projId: projId,
-                chatId: chatId,
-                msgIndex: index,
-                feedback: msg.feedback || null
-            }));
-        }
-    });
+    // PHASE 5: an empty chat (brand-new, or an existing chat that simply
+    // has no messages yet) shows the dynamic greeting instead of iterating
+    // zero messages. Chats with at least one message render exactly as
+    // before - the greeting never appears once real conversation exists.
+    if (!chat.messages || chat.messages.length === 0) {
+        renderEmptyChatGreeting(chatBox);
+    } else {
+        chat.messages.forEach((msg, index) => {
+            if (msg.role === "user") {
+                chatBox.appendChild(createUserMessageElement(msg, {
+                    projId: projId,
+                    chatId: chatId,
+                    msgIndex: index
+                }));
+            } else {
+                chatBox.appendChild(createBotMessageElement(msg.text, {
+                    projId: projId,
+                    chatId: chatId,
+                    msgIndex: index,
+                    feedback: msg.feedback || null
+                }));
+            }
+        });
+    }
 
     if (window.MathJax) {
         MathJax.typesetPromise([chatBox]).catch((err) => console.error(err));
@@ -1712,6 +1764,14 @@ window.handlePDFUpload = async function(event) {
     formData.append("file", file);
 
     const chatBox = document.getElementById("chat-box");
+
+    // PHASE 5: same reasoning as in sendMessage() - a PDF can be uploaded
+    // before the student types anything, while the empty-chat greeting is
+    // still showing. Clear it so the upload status text doesn't render
+    // alongside it.
+    const existingGreeting = chatBox.querySelector(".empty-chat-greeting");
+    if (existingGreeting) existingGreeting.remove();
+
     const loadingMsg = document.createElement("div");
     loadingMsg.className = "bot-message";
     loadingMsg.textContent = "📖 Reading and indexing PDF: " + file.name + "...";
@@ -1928,6 +1988,15 @@ window.sendMessage = async function() {
         if (proj.title === "New Project") proj.title = currentChat.title;
         renderHistoryList();
     }
+
+    // PHASE 5: the greeting (if shown) is a DOM-only empty-state element,
+    // never part of currentChat.messages - remove it here, before the
+    // first real message renders, so it never lingers alongside actual
+    // conversation content. No-op (querySelector returns null) for a chat
+    // that already had messages, since loadChat() never rendered a
+    // greeting into it in the first place.
+    const existingGreeting = chatBox.querySelector(".empty-chat-greeting");
+    if (existingGreeting) existingGreeting.remove();
 
     const userMsgObj = { role: "user", text: promptText, image: selectedImageBase64 };
     currentChat.messages.push(userMsgObj);

@@ -438,6 +438,38 @@ body {
     gap: 16px;
 }
 
+/* PHASE 5: empty-chat greeting.
+   Deliberately NOT a .bot-message - no bubble background, no border, no
+   toolbar - so it reads as an empty-conversation placeholder rather than a
+   stored AI reply. .chat-box is a column flex container (see above); this
+   is always its only child when shown, and flex:1 + centered content lets
+   it fill and center within the available chat area, the same way a
+   ChatGPT/Claude/Gemini-style empty state does. No animation, no card,
+   no shadow - kept intentionally quiet. */
+.empty-chat-greeting {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    text-align: center;
+    padding: 20px;
+}
+
+.empty-chat-greeting-icon {
+    color: #333333;
+    display: flex;
+}
+
+.empty-chat-greeting-text {
+    font-size: 15px;
+    font-weight: 500;
+    color: #888888;
+    max-width: 380px;
+    line-height: 1.5;
+}
+
 /* ========== OVERFLOW FIX: .bot-message and children ========== */
 
 .bot-message {
