@@ -2,6 +2,7 @@ import os
 import io
 import json
 import logging
+import random
 import time
 from typing import Optional
 from PIL import Image
@@ -67,6 +68,28 @@ IMAGE_DECODE_ERROR = (
 # single constant used in exactly two places below.
 AI_REQUEST_TIMEOUT_SECONDS = 30
 
+# P1 RELIABILITY FIX: timeout used for the retry attempt only (attempt 2+),
+# distinct from AI_REQUEST_TIMEOUT_SECONDS which governs attempt 1.
+#
+# Rationale: with both attempts previously getting a full 30s budget, a
+# worst-case failure made the student wait ~30 + RETRY_DELAY + 30 =~ 61.5s
+# before seeing any response. Attempt 1 keeps the full 30s because a real
+# incident log showed a legitimate ~27s response time on a request that then
+# failed right at the 30s mark - shortening attempt 1 risks turning genuinely
+# slow-but-successful answers into new failures. Attempt 2 is specifically a
+# "fail fast" recovery try for a transient blip, not a full second attempt at
+# a hard question, so a shorter budget there is an intentional trade: less
+# recovery headroom in exchange for a materially lower worst-case wait
+# (~30 + jitter + 15 =~ 47s instead of ~61.5s).
+#
+# NOT a proven-optimal number - there is no measured Gemini latency
+# distribution behind this yet, only the one incident's timing. Treat as a
+# starting value to revisit once the elapsed= timing already logged below
+# gives real P50/P95 data. Kept as its own named constant (not env-driven
+# yet, same as AI_REQUEST_TIMEOUT_SECONDS) specifically so it's easy to find
+# and retune without hunting through the retry loop.
+RETRY_REQUEST_TIMEOUT_SECONDS = 15
+
 # BUG FIX (intermittent "Sorry, Kognit couldn't process..." errors): a single
 # Gemini call can transiently fail even when the service is fine overall - a
 # timeout under load, a momentary 503/500 from Google's side, etc. Previously
@@ -77,11 +100,21 @@ AI_REQUEST_TIMEOUT_SECONDS = 30
 # google.api_core.exceptions (504/503/500/409). Retrying once after a short
 # pause resolves the large majority of these without the student ever seeing
 # an error. Deliberately NOT applied to ResourceExhausted (quota exhaustion
-# will not clear in 1.5s) or to the blocked-response case below (retrying an
-# identical request that got safety-blocked just wastes another API call).
+# will not clear in a couple seconds) or to the blocked-response case below
+# (retrying an identical request that got safety-blocked just wastes another
+# API call).
 RETRYABLE_EXCEPTIONS = (DeadlineExceeded, ServiceUnavailable, InternalServerError, Aborted)
 MAX_ATTEMPTS = 2  # 1 initial attempt + 1 retry
-RETRY_DELAY_SECONDS = 1.5
+
+# P1 RELIABILITY FIX: retry delay is now a jittered range instead of a fixed
+# sleep. A fixed delay means that if Gemini has a real transient outage
+# affecting several concurrent Kognit requests at once, every one of them
+# retries at exactly the same moment - a small thundering-herd risk at even
+# modest concurrency. RETRY_DELAY_BASE_SECONDS keeps the original center
+# point (1.5s); RETRY_DELAY_JITTER_SECONDS spreads actual retries uniformly
+# across [base - jitter, base + jitter] = [1.0s, 2.0s].
+RETRY_DELAY_BASE_SECONDS = 1.5
+RETRY_DELAY_JITTER_SECONDS = 0.5
 
 # Kognit's internal message roles -> the Gemini SDK's expected chat-history
 # roles. Gemini's start_chat(history=...) requires "user"/"model"; Kognit
@@ -194,6 +227,10 @@ def generate_ai_response(
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         t_attempt_start = time.perf_counter()
+        # P1 RELIABILITY FIX: attempt-dependent timeout - see
+        # RETRY_REQUEST_TIMEOUT_SECONDS comment above for why attempt 1 keeps
+        # the full budget and later attempts get a shorter one.
+        attempt_timeout = AI_REQUEST_TIMEOUT_SECONDS if attempt == 1 else RETRY_REQUEST_TIMEOUT_SECONDS
         try:
             model = genai.GenerativeModel("gemini-3.6-flash", system_instruction=system_instruction)
 
@@ -207,12 +244,22 @@ def generate_ai_response(
             chat_session = model.start_chat(history=gemini_history)
             response = chat_session.send_message(
                 contents,
-                request_options={"timeout": AI_REQUEST_TIMEOUT_SECONDS},
+                # P1 RELIABILITY FIX: "retry": None explicitly disables the
+                # Gemini SDK's own hidden default retry (google-ai-
+                # generativelanguage wraps generate_content with a retry that
+                # sub-retries ServiceUnavailable internally unless a "retry"
+                # key is passed - confirmed by reading the pinned SDK's
+                # transport source, not assumed). Without this, that SDK-level
+                # retry stacks underneath Kognit's own retry loop below:
+                # invisible to these logs, and redundant with the explicit,
+                # observable retry policy this function already implements.
+                # Kognit's own loop is now the single retry authority.
+                request_options={"timeout": attempt_timeout, "retry": None},
             )
             result_text = response.text
             logger.info(
-                "generate_ai_response timing: gemini_call attempt=%d elapsed=%.3fs (mode=%s, has_image=%s, has_pdf=%s)",
-                attempt, time.perf_counter() - t_attempt_start, mode, bool(image_bytes), bool(pdf_context)
+                "generate_ai_response timing: gemini_call attempt=%d timeout=%ds elapsed=%.3fs (mode=%s, has_image=%s, has_pdf=%s)",
+                attempt, attempt_timeout, time.perf_counter() - t_attempt_start, mode, bool(image_bytes), bool(pdf_context)
             )
             return result_text
         except ResourceExhausted:
@@ -223,11 +270,20 @@ def generate_ai_response(
             return QUOTA_EXHAUSTED_ERROR
         except RETRYABLE_EXCEPTIONS as e:
             if attempt < MAX_ATTEMPTS:
-                logger.warning(
-                    "generate_ai_response transient error on attempt %d/%d elapsed=%.3fs (mode=%s, board=%s, user_class=%s): %s",
-                    attempt, MAX_ATTEMPTS, time.perf_counter() - t_attempt_start, mode, board, user_class, type(e).__name__
+                # P1 RELIABILITY FIX: jittered delay - see
+                # RETRY_DELAY_BASE_SECONDS/RETRY_DELAY_JITTER_SECONDS comment
+                # above.
+                retry_delay = random.uniform(
+                    RETRY_DELAY_BASE_SECONDS - RETRY_DELAY_JITTER_SECONDS,
+                    RETRY_DELAY_BASE_SECONDS + RETRY_DELAY_JITTER_SECONDS,
                 )
-                time.sleep(RETRY_DELAY_SECONDS)
+                logger.warning(
+                    "generate_ai_response transient error on attempt %d/%d timeout=%ds elapsed=%.3fs "
+                    "(mode=%s, board=%s, user_class=%s): %s - retrying in %.2fs",
+                    attempt, MAX_ATTEMPTS, attempt_timeout, time.perf_counter() - t_attempt_start,
+                    mode, board, user_class, type(e).__name__, retry_delay
+                )
+                time.sleep(retry_delay)
                 continue
             logger.exception(
                 "generate_ai_response failed after %d attempts (mode=%s, board=%s, user_class=%s)",
@@ -357,4 +413,3 @@ def generate_chat_title(history: list, board: str = "NCTB") -> Optional[str]:
     except Exception:
         logger.exception("generate_chat_title failed (board=%s) - caller will keep the existing title", board)
         return None
-        return []
