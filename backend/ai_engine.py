@@ -5,22 +5,41 @@ import logging
 import random
 import time
 from typing import Optional
+
+import httpx
 from PIL import Image
-import google.generativeai as genai
-from google.api_core.exceptions import (
-    ResourceExhausted,
-    DeadlineExceeded,
-    ServiceUnavailable,
-    InternalServerError,
-    Aborted,
-)
+from google import genai
+from google.genai import types
+from google.genai import errors as genai_errors
 from dotenv import load_dotenv
 
 load_dotenv()
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-
 logger = logging.getLogger("kognit.ai_engine")
+
+# ---------------------------------------------------------------------------
+# SDK MIGRATION (google-generativeai -> google-genai), see investigation
+# report for the full root-cause writeup. Short version:
+#
+# gemini-3.6-flash is a dynamic-thinking ("reasoning") model. By default it
+# decides its own internal reasoning effort per request (Google's own model
+# card documents this and explicitly warns of "occasional slowness or
+# timeout issues"). The previously-pinned google-generativeai==0.8.3 SDK is
+# the pre-Gemini-3 legacy client - its GenerationConfig protobuf has no
+# thinking_config/thinking_level/thinking_budget field at all (confirmed by
+# inspecting the installed protobuf schema directly, not assumed), so there
+# was no way to bound this. That is why an "ordinary" image question could
+# intermittently take ~29s and then fail: the model was genuinely still
+# thinking when Kognit's own client-side timeout fired.
+#
+# google-genai (the current official SDK) exposes thinking_level, which
+# Google's own documentation names as the explicit recommendation for
+# "real-time chat" and other latency-critical interactive use cases - see
+# CHAT_THINKING_LEVEL below.
+# ---------------------------------------------------------------------------
+_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+MODEL_NAME = "gemini-3.6-flash"
 
 # User-facing fallback messages. Never expose str(exception) to the client -
 # that can leak internal details (stack traces, provider error text, etc).
@@ -30,7 +49,7 @@ GENERIC_CHAT_ERROR = (
 )
 
 # Shown specifically when the Gemini API rejects a request due to quota
-# exhaustion (google.api_core.exceptions.ResourceExhausted / HTTP 429).
+# exhaustion (google.genai.errors.ClientError, HTTP 429 / RESOURCE_EXHAUSTED).
 # Never interpolate str(exception) into this - the raw error contains
 # provider-internal details (quota metric names, limits, status codes)
 # that must not reach the client. See GENERIC_CHAT_ERROR comment above.
@@ -41,10 +60,12 @@ QUOTA_EXHAUSTED_ERROR = (
 
 # Shown when Gemini returns a response with no usable content - almost
 # always because its safety filters blocked the prompt or the generated
-# candidate (finish_reason != STOP), which raises ValueError when we read
-# response.text. This is NOT a network/provider failure, so retrying would
-# not help - kept as a distinct, non-retried message so it's diagnosable
-# from a student's report without needing server log access.
+# candidate (finish_reason != STOP). In google-genai, response.text simply
+# returns None in this case (it does NOT raise, unlike the old SDK - see
+# the ValueError handling this replaces, below). This is NOT a network/
+# provider failure, so retrying would not help - kept as a distinct,
+# non-retried message so it's diagnosable from a student's report without
+# needing server log access.
 BLOCKED_RESPONSE_ERROR = (
     "Kognit couldn't generate a response for this specific question - it may "
     "have been blocked by a content safety filter. Please try rephrasing your question."
@@ -61,73 +82,155 @@ IMAGE_DECODE_ERROR = (
     "unsupported format. Please try uploading it again or use a different photo."
 )
 
-# How long to wait on a single Gemini call before giving up. This is passed
-# straight through to the SDK's own request_options timeout (seconds), which
-# is the documented/supported way to bound this call in the currently-used
-# google-generativeai SDK. MVP-tunable; not env-driven yet since it's a
-# single constant used in exactly two places below.
+# ---------------------------------------------------------------------------
+# THINKING LEVEL CONFIGURATION
+#
+# gemini-3.6-flash defaults to dynamic ("medium") thinking if left
+# unconfigured. Kognit's primary chat path is an interactive, turn-based
+# student conversation - Google's own guidance names thinking_level="low"
+# as the explicit recommendation for exactly this use case ("real-time
+# chat"), trading some reasoning depth for materially lower and more
+# predictable latency.
+#
+# This is intentionally a single named constant, not a per-request
+# complexity classifier - building automatic difficulty detection now would
+# be premature (we do not yet have measured latency/quality data to justify
+# it). If measured data later shows "low" is hurting answer quality on
+# multi-step academic problems, this is the one place to change - swap the
+# value (LOW / MEDIUM / HIGH) and nothing else in the integration needs to
+# change.
+#
+# Kept as three separate named constants (chat / title / quiz) rather than
+# one shared constant because they are different product surfaces with
+# different quality-vs-latency tradeoffs:
+#   - CHAT_THINKING_LEVEL:  the actual student-facing answer. Latency-
+#     critical (this is the bug being fixed). Set to LOW.
+#   - TITLE_THINKING_LEVEL: a trivial side task (see generate_chat_title
+#     docstring) that should always be fast. Set to LOW.
+#   - QUIZ_THINKING_LEVEL:  left at the model default (None = do not send
+#     thinking_config at all) for now. Quiz generation is not a "the
+#     student is staring at a spinner" moment in the same way chat is, and
+#     MCQ/answer-key correctness benefits more from reasoning than it costs
+#     in perceived latency. Not tuned yet - revisit once we have real
+#     quiz-generation latency numbers.
+# ---------------------------------------------------------------------------
+CHAT_THINKING_LEVEL = types.ThinkingLevel.LOW
+TITLE_THINKING_LEVEL = types.ThinkingLevel.LOW
+QUIZ_THINKING_LEVEL = None
+
+# How long to wait on a single Gemini call before giving up. HttpOptions.timeout
+# is documented in milliseconds by the SDK, so this is converted with
+# _seconds_to_ms() everywhere it's used below - keep the constant itself in
+# seconds for readability/consistency with the rest of this file.
 AI_REQUEST_TIMEOUT_SECONDS = 30
 
-# P1 RELIABILITY FIX: timeout used for the retry attempt only (attempt 2+),
-# distinct from AI_REQUEST_TIMEOUT_SECONDS which governs attempt 1.
+# RETRY POLICY REDESIGN.
 #
-# Rationale: with both attempts previously getting a full 30s budget, a
-# worst-case failure made the student wait ~30 + RETRY_DELAY + 30 =~ 61.5s
-# before seeing any response. Attempt 1 keeps the full 30s because a real
-# incident log showed a legitimate ~27s response time on a request that then
-# failed right at the 30s mark - shortening attempt 1 risks turning genuinely
-# slow-but-successful answers into new failures. Attempt 2 is specifically a
-# "fail fast" recovery try for a transient blip, not a full second attempt at
-# a hard question, so a shorter budget there is an intentional trade: less
-# recovery headroom in exchange for a materially lower worst-case wait
-# (~30 + jitter + 15 =~ 47s instead of ~61.5s).
+# The previous policy gave attempt 1 a full 30s budget and attempt 2 only
+# 15s, and retried on DeadlineExceeded (i.e. our OWN client-side timeout
+# firing) as if it were a generic transient blip. The incident that
+# triggered this investigation shows exactly why that is wrong: attempt 1
+# took 29.4s (Gemini was still "thinking", not stuck), got killed by our own
+# deadline, and attempt 2 - with a SHORTER budget - failed the same way
+# almost immediately after, for a total ~46.7s wait before the student saw
+# an error. Retrying with a shorter timeout after a real-work-in-progress
+# timeout is not "failing faster and more gracefully", it is "guaranteeing
+# the retry fails too, but only after making the student wait more".
 #
-# NOT a proven-optimal number - there is no measured Gemini latency
-# distribution behind this yet, only the one incident's timing. Treat as a
-# starting value to revisit once the elapsed= timing already logged below
-# gives real P50/P95 data. Kept as its own named constant (not env-driven
-# yet, same as AI_REQUEST_TIMEOUT_SECONDS) specifically so it's easy to find
-# and retune without hunting through the retry loop.
-RETRY_REQUEST_TIMEOUT_SECONDS = 15
+# The redesigned policy explicitly distinguishes WHY a call failed and only
+# retries the failure types where a second attempt is actually likely to
+# help:
+#
+#   A. Client/request deadline exceeded (httpx.TimeoutException /
+#      httpx.ConnectError - i.e. OUR OWN configured timeout fired, or we
+#      could not even connect): NOT retried by default. With
+#      CHAT_THINKING_LEVEL=LOW, hitting this ceiling should now be rare -
+#      when it happens, the model was doing real (if slow) work, and
+#      immediately repeating the same expensive call is not proven to help.
+#      RETRY_ON_CLIENT_TIMEOUT below is the single toggle to revisit this
+#      once we have real elapsed= timing data post-fix.
+#
+#   B. Genuine transient provider failures - google.genai.errors.ServerError
+#      (any 5xx: 500/502/503/504) or ClientError with an HTTP 409 ("Aborted"
+#      - a genuinely transient conflict per Google's own error semantics,
+#      not a client mistake): these return from Google FAST (an error
+#      response, not a slow success), so retrying with a full timeout budget
+#      does not meaningfully raise the worst case the way shortening did.
+#      Retried once, after a short jittered delay.
+#
+#   C. Quota exhaustion - ClientError with HTTP 429 (RESOURCE_EXHAUSTED):
+#      never retried, quota will not clear in a few seconds.
+#
+#   D. Blocked/empty response (response.text is falsy despite a successful
+#      call - almost always a safety-filter block): never retried, an
+#      identical request would just get blocked again.
+#
+#   E. Anything else (programming errors, unexpected SDK/response shapes):
+#      never retried, logged, generic error returned.
+#
+# MAX_ATTEMPTS and the retry delay only apply to bucket B above.
+MAX_ATTEMPTS = 2  # 1 initial attempt + 1 retry, bucket B only
 
-# BUG FIX (intermittent "Sorry, Kognit couldn't process..." errors): a single
-# Gemini call can transiently fail even when the service is fine overall - a
-# timeout under load, a momentary 503/500 from Google's side, etc. Previously
-# ANY exception other than ResourceExhausted fell straight through to
-# GENERIC_CHAT_ERROR with zero retry, so a one-off blip looked identical to a
-# real failure to the student on their very first question. These four are
-# the documented transient/retryable exception types in
-# google.api_core.exceptions (504/503/500/409). Retrying once after a short
-# pause resolves the large majority of these without the student ever seeing
-# an error. Deliberately NOT applied to ResourceExhausted (quota exhaustion
-# will not clear in a couple seconds) or to the blocked-response case below
-# (retrying an identical request that got safety-blocked just wastes another
-# API call).
-RETRYABLE_EXCEPTIONS = (DeadlineExceeded, ServiceUnavailable, InternalServerError, Aborted)
-MAX_ATTEMPTS = 2  # 1 initial attempt + 1 retry
+# Bucket B gets the SAME timeout budget on the retry as attempt 1 - not a
+# shorter one. This is deliberate: a 5xx/409 response comes back quickly (it
+# is an error, not a slow success), so giving the retry a full budget does
+# not meaningfully increase worst-case wait time versus a short one, and it
+# gives the retry an honest chance instead of one that is set up to fail.
+RETRY_REQUEST_TIMEOUT_SECONDS = AI_REQUEST_TIMEOUT_SECONDS
 
-# P1 RELIABILITY FIX: retry delay is now a jittered range instead of a fixed
-# sleep. A fixed delay means that if Gemini has a real transient outage
-# affecting several concurrent Kognit requests at once, every one of them
-# retries at exactly the same moment - a small thundering-herd risk at even
-# modest concurrency. RETRY_DELAY_BASE_SECONDS keeps the original center
-# point (1.5s); RETRY_DELAY_JITTER_SECONDS spreads actual retries uniformly
-# across [base - jitter, base + jitter] = [1.0s, 2.0s].
+# Kept as an explicit, named, OFF-by-default switch rather than silently
+# never retrying bucket A. If real post-fix latency data shows client
+# timeouts are still common enough to be worth one bounded retry, flip this
+# - do not change the retry loop's structure to do it.
+RETRY_ON_CLIENT_TIMEOUT = False
+
+# HTTP status codes, other than 5xx, that are treated as bucket B (genuine
+# transient failures) rather than bucket E (unexpected/programming errors).
+# 409 = Aborted/conflict, which Google's own client libraries have
+# historically classified as retryable.
+TRANSIENT_RETRYABLE_CLIENT_HTTP_CODES = (409,)
+
+# Jittered retry delay (bucket B only) - a fixed delay means that if Gemini
+# has a real transient outage affecting several concurrent Kognit requests
+# at once, every one of them retries at exactly the same moment (a small
+# thundering-herd risk at even modest concurrency). Spreads actual retries
+# uniformly across [base - jitter, base + jitter] = [1.0s, 2.0s].
 RETRY_DELAY_BASE_SECONDS = 1.5
 RETRY_DELAY_JITTER_SECONDS = 0.5
 
+# ---------------------------------------------------------------------------
+# SINGLE RETRY AUTHORITY.
+#
+# google-genai's own HTTP layer will ONLY retry a request if HttpOptions.
+# retry_options is set (confirmed by reading the installed SDK's
+# _api_client.py: retry_args(None) returns tenacity.stop_after_attempt(1),
+# i.e. exactly one HTTP attempt, whenever retry_options is left unset). This
+# file never sets retry_options anywhere - neither on the module-level
+# Client nor on any per-call GenerateContentConfig.http_options - so every
+# call below makes exactly one HTTP attempt, and the retry loops in this
+# file (bucket B above) are the ONLY retry authority. There is no
+# SDK-level retry to accidentally stack underneath them.
+# ---------------------------------------------------------------------------
+
 # Kognit's internal message roles -> the Gemini SDK's expected chat-history
-# roles. Gemini's start_chat(history=...) requires "user"/"model"; Kognit
+# roles. Gemini's chats.create(history=...) requires "user"/"model"; Kognit
 # stores assistant turns as "bot". This mapping must stay in sync with
 # whatever role strings the frontend sends in the "history" field.
 _KOGNIT_ROLE_TO_GEMINI_ROLE = {"user": "user", "bot": "model"}
 
 
+def _seconds_to_ms(seconds: float) -> int:
+    """google-genai's HttpOptions.timeout is documented in milliseconds."""
+    return int(seconds * 1000)
+
+
 def _build_gemini_history(history: list) -> list:
     """
     Convert Kognit's validated [{"role": "user"|"bot", "text": str}, ...]
-    history into the Gemini SDK's expected
-    [{"role": "user"|"model", "parts": [str]}, ...] shape.
+    history into the google-genai SDK's expected
+    [{"role": "user"|"model", "parts": [{"text": str}]}, ...] shape (a plain
+    dict list - google-genai validates this against its Content/Part models
+    itself, no need to construct typed objects here).
 
     Any entry with an unrecognized role is skipped defensively (should not
     happen if main.py's validation ran first, but this function does not
@@ -143,15 +246,37 @@ def _build_gemini_history(history: list) -> list:
         gemini_role = _KOGNIT_ROLE_TO_GEMINI_ROLE.get(role)
         if gemini_role is None or not text:
             continue
-        gemini_history.append({"role": gemini_role, "parts": [text]})
+        gemini_history.append({"role": gemini_role, "parts": [{"text": text}]})
     return gemini_history
 
 
+def _log_usage(usage, attempt: int, elapsed: float, mode: str, image: bool, pdf: bool) -> None:
+    """
+    Best-effort observability log for a successful call. usage_metadata's
+    thoughts_token_count in particular is the direct, measurable signal for
+    the root cause this migration addresses - how many tokens the model
+    spent "thinking" versus answering - so future latency investigations
+    have real data instead of a single incident's log lines.
+    """
+    prompt_tokens = getattr(usage, "prompt_token_count", None) if usage else None
+    thought_tokens = getattr(usage, "thoughts_token_count", None) if usage else None
+    output_tokens = getattr(usage, "candidates_token_count", None) if usage else None
+    total_tokens = getattr(usage, "total_token_count", None) if usage else None
+    logger.info(
+        "generate_ai_response success attempt=%d/%d model=%s thinking_level=%s elapsed=%.3fs "
+        "prompt_tokens=%s thought_tokens=%s output_tokens=%s total_tokens=%s "
+        "(mode=%s, has_image=%s, has_pdf=%s)",
+        attempt, MAX_ATTEMPTS, MODEL_NAME, CHAT_THINKING_LEVEL.value, elapsed,
+        prompt_tokens, thought_tokens, output_tokens, total_tokens,
+        mode, image, pdf,
+    )
+
+
 def generate_ai_response(
-    prompt: str, 
-    mode: str = "direct", 
-    board: str = "NCTB", 
-    user_class: str = "SSC", 
+    prompt: str,
+    mode: str = "direct",
+    board: str = "NCTB",
+    user_class: str = "SSC",
     stream: str = "Science",
     image_bytes: bytes = None,
     pdf_context: str = "",
@@ -189,22 +314,16 @@ def generate_ai_response(
         "which subject is meant). Never invent facts, textbook page numbers, or details you are "
         "not given in order to avoid asking that clarifying question."
     )
-    
+
     if pdf_context:
         system_instruction += f"\n\n[UPLOADED PDF DOCUMENT CONTENT CONTEXT]:\n{pdf_context[:10000]}" # Truncate if too long for safety
 
     if mode == "socratic":
         system_instruction += " DO NOT give direct answers immediately. Guide the student step-by-step using helpful questions!"
 
-    # LATENCY/RELIABILITY FIX: image decoding used to happen here, outside
-    # any try/except in this function. main.py's own broad except Exception
-    # around the whole call still caught a corrupted/unreadable image (so
-    # this was never a true "no response" bug), but it produced the same
-    # generic GENERIC_CHAT_ERROR-style message as an unrelated AI/network
-    # failure, made troubleshooting a "my answer failed" report ambiguous,
-    # and this step was never timed. Now it's wrapped, timed, and returns a
-    # distinct message so image-decode failures are diagnosable separately
-    # from AI-provider failures in the logs.
+    # Image decoding: unaffected by the SDK migration. PIL Images are
+    # accepted directly as a message part by google-genai's chat.send_message
+    # the same way they were accepted by the old SDK's generate_content.
     t_stage_start = time.perf_counter()
     contents = []
     if image_bytes:
@@ -227,83 +346,124 @@ def generate_ai_response(
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         t_attempt_start = time.perf_counter()
-        # P1 RELIABILITY FIX: attempt-dependent timeout - see
-        # RETRY_REQUEST_TIMEOUT_SECONDS comment above for why attempt 1 keeps
-        # the full budget and later attempts get a shorter one.
         attempt_timeout = AI_REQUEST_TIMEOUT_SECONDS if attempt == 1 else RETRY_REQUEST_TIMEOUT_SECONDS
-        try:
-            model = genai.GenerativeModel("gemini-3.6-flash", system_instruction=system_instruction)
 
-            # CHAT-04 fix: use the SDK's multi-turn chat session instead of a
-            # stateless single-shot generate_content call, so prior turns in
-            # THIS chat are actually part of the request Gemini sees. history
-            # is empty on a chat's first message, which is equivalent to the
-            # old behavior. system_instruction (board/class/stream/PDF context/
-            # mode) is unchanged - it's baked into the model above and applies
-            # across the whole chat session automatically.
-            chat_session = model.start_chat(history=gemini_history)
-            response = chat_session.send_message(
-                contents,
-                # P1 RELIABILITY FIX: "retry": None explicitly disables the
-                # Gemini SDK's own hidden default retry (google-ai-
-                # generativelanguage wraps generate_content with a retry that
-                # sub-retries ServiceUnavailable internally unless a "retry"
-                # key is passed - confirmed by reading the pinned SDK's
-                # transport source, not assumed). Without this, that SDK-level
-                # retry stacks underneath Kognit's own retry loop below:
-                # invisible to these logs, and redundant with the explicit,
-                # observable retry policy this function already implements.
-                # Kognit's own loop is now the single retry authority.
-                request_options={"timeout": attempt_timeout, "retry": None},
+        # Built fresh each attempt (cheap, local - no network call) so the
+        # per-attempt timeout below is always the one actually in effect.
+        # retry_options is deliberately never set - see "SINGLE RETRY
+        # AUTHORITY" comment above.
+        config = types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            thinking_config=types.ThinkingConfig(thinking_level=CHAT_THINKING_LEVEL),
+            http_options=types.HttpOptions(timeout=_seconds_to_ms(attempt_timeout)),
+        )
+
+        try:
+            # CHAT-04: multi-turn chat session so prior turns in THIS chat
+            # are actually part of the request Gemini sees. history is empty
+            # on a chat's first message, equivalent to the old behavior.
+            chat_session = _client.chats.create(
+                model=MODEL_NAME,
+                config=config,
+                history=gemini_history,
             )
+            response = chat_session.send_message(contents)
+            elapsed = time.perf_counter() - t_attempt_start
+
             result_text = response.text
-            logger.info(
-                "generate_ai_response timing: gemini_call attempt=%d timeout=%ds elapsed=%.3fs (mode=%s, has_image=%s, has_pdf=%s)",
-                attempt, attempt_timeout, time.perf_counter() - t_attempt_start, mode, bool(image_bytes), bool(pdf_context)
-            )
+            if not result_text:
+                # google-genai returns None here instead of raising (unlike
+                # the old SDK's ValueError) - almost always a safety-filter
+                # block. Not retried: an identical request would just get
+                # blocked again.
+                logger.warning(
+                    "generate_ai_response got a blocked/empty response attempt=%d/%d elapsed=%.3fs "
+                    "(mode=%s, board=%s, user_class=%s)",
+                    attempt, MAX_ATTEMPTS, elapsed, mode, board, user_class
+                )
+                return BLOCKED_RESPONSE_ERROR
+
+            _log_usage(response.usage_metadata, attempt, elapsed, mode, bool(image_bytes), bool(pdf_context))
             return result_text
-        except ResourceExhausted:
-            logger.exception(
-                "generate_ai_response quota exhausted (mode=%s, board=%s, user_class=%s)",
-                mode, board, user_class
-            )
-            return QUOTA_EXHAUSTED_ERROR
-        except RETRYABLE_EXCEPTIONS as e:
-            if attempt < MAX_ATTEMPTS:
-                # P1 RELIABILITY FIX: jittered delay - see
-                # RETRY_DELAY_BASE_SECONDS/RETRY_DELAY_JITTER_SECONDS comment
-                # above.
+
+        except genai_errors.ClientError as e:
+            elapsed = time.perf_counter() - t_attempt_start
+            if e.code == 429:
+                # Bucket C: quota exhaustion. Never retried.
+                logger.exception(
+                    "generate_ai_response quota exhausted attempt=%d elapsed=%.3fs (mode=%s, board=%s, user_class=%s)",
+                    attempt, elapsed, mode, board, user_class
+                )
+                return QUOTA_EXHAUSTED_ERROR
+            if e.code in TRANSIENT_RETRYABLE_CLIENT_HTTP_CODES and attempt < MAX_ATTEMPTS:
+                # Bucket B (409 Aborted-equivalent).
                 retry_delay = random.uniform(
                     RETRY_DELAY_BASE_SECONDS - RETRY_DELAY_JITTER_SECONDS,
                     RETRY_DELAY_BASE_SECONDS + RETRY_DELAY_JITTER_SECONDS,
                 )
                 logger.warning(
-                    "generate_ai_response transient error on attempt %d/%d timeout=%ds elapsed=%.3fs "
-                    "(mode=%s, board=%s, user_class=%s): %s - retrying in %.2fs",
-                    attempt, MAX_ATTEMPTS, attempt_timeout, time.perf_counter() - t_attempt_start,
-                    mode, board, user_class, type(e).__name__, retry_delay
+                    "generate_ai_response transient provider error code=%s attempt=%d/%d timeout=%ds "
+                    "elapsed=%.3fs (mode=%s, board=%s, user_class=%s): %s - retrying in %.2fs",
+                    e.code, attempt, MAX_ATTEMPTS, attempt_timeout, elapsed,
+                    mode, board, user_class, e.status, retry_delay
+                )
+                time.sleep(retry_delay)
+                continue
+            # Bucket E: any other 4xx (bad request, permission denied, etc.)
+            # is a programming/config error, not something a retry fixes.
+            logger.exception(
+                "generate_ai_response client error code=%s attempt=%d/%d elapsed=%.3fs (mode=%s, board=%s, user_class=%s)",
+                e.code, attempt, MAX_ATTEMPTS, elapsed, mode, board, user_class
+            )
+            return GENERIC_CHAT_ERROR
+
+        except genai_errors.ServerError as e:
+            # Bucket B: genuine transient provider failure (5xx).
+            elapsed = time.perf_counter() - t_attempt_start
+            if attempt < MAX_ATTEMPTS:
+                retry_delay = random.uniform(
+                    RETRY_DELAY_BASE_SECONDS - RETRY_DELAY_JITTER_SECONDS,
+                    RETRY_DELAY_BASE_SECONDS + RETRY_DELAY_JITTER_SECONDS,
+                )
+                logger.warning(
+                    "generate_ai_response transient provider error code=%s attempt=%d/%d timeout=%ds "
+                    "elapsed=%.3fs (mode=%s, board=%s, user_class=%s): %s - retrying in %.2fs",
+                    e.code, attempt, MAX_ATTEMPTS, attempt_timeout, elapsed,
+                    mode, board, user_class, e.status, retry_delay
                 )
                 time.sleep(retry_delay)
                 continue
             logger.exception(
-                "generate_ai_response failed after %d attempts (mode=%s, board=%s, user_class=%s)",
-                MAX_ATTEMPTS, mode, board, user_class
+                "generate_ai_response failed after %d attempts with server error code=%s (mode=%s, board=%s, user_class=%s)",
+                MAX_ATTEMPTS, e.code, mode, board, user_class
             )
             return GENERIC_CHAT_ERROR
-        except ValueError:
-            # response.text raises ValueError when Gemini returns no usable
-            # candidate/part - almost always a safety-filter block, not a
-            # transient failure. Not retried: an identical request would
-            # just get blocked again.
+
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
+            # Bucket A: OUR OWN client-side deadline fired (or we could not
+            # connect). NOT retried by default - see RETRY_ON_CLIENT_TIMEOUT
+            # comment above for why, and how to change this.
+            elapsed = time.perf_counter() - t_attempt_start
+            if RETRY_ON_CLIENT_TIMEOUT and attempt < MAX_ATTEMPTS:
+                logger.warning(
+                    "generate_ai_response client deadline exceeded attempt=%d/%d timeout=%ds elapsed=%.3fs "
+                    "(mode=%s, board=%s, user_class=%s): %s - retrying (RETRY_ON_CLIENT_TIMEOUT=True)",
+                    attempt, MAX_ATTEMPTS, attempt_timeout, elapsed, mode, board, user_class, type(e).__name__
+                )
+                continue
             logger.exception(
-                "generate_ai_response got a blocked/empty response (mode=%s, board=%s, user_class=%s)",
-                mode, board, user_class
+                "generate_ai_response client deadline exceeded attempt=%d/%d timeout=%ds elapsed=%.3fs "
+                "(mode=%s, board=%s, user_class=%s) - not retried by design (RETRY_ON_CLIENT_TIMEOUT=False)",
+                attempt, MAX_ATTEMPTS, attempt_timeout, elapsed, mode, board, user_class
             )
-            return BLOCKED_RESPONSE_ERROR
+            return GENERIC_CHAT_ERROR
+
         except Exception:
+            # Bucket E: unexpected/programming error.
+            elapsed = time.perf_counter() - t_attempt_start
             logger.exception(
-                "generate_ai_response failed (mode=%s, board=%s, user_class=%s)",
-                mode, board, user_class
+                "generate_ai_response failed unexpectedly attempt=%d elapsed=%.3fs (mode=%s, board=%s, user_class=%s)",
+                attempt, elapsed, mode, board, user_class
             )
             return GENERIC_CHAT_ERROR
 
@@ -328,18 +488,25 @@ def generate_quiz_questions(board: str, user_class: str, subject: str, topic: st
     )
 
     try:
-        model = genai.GenerativeModel("gemini-3.6-flash", system_instruction=system_instruction)
-        response = model.generate_content(
-            f"Create {count} MCQ questions on {topic}.",
-            request_options={"timeout": AI_REQUEST_TIMEOUT_SECONDS},
+        config_kwargs = dict(
+            system_instruction=system_instruction,
+            http_options=types.HttpOptions(timeout=_seconds_to_ms(AI_REQUEST_TIMEOUT_SECONDS)),
         )
-        
-        raw_text = response.text.strip()
+        if QUIZ_THINKING_LEVEL is not None:
+            config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=QUIZ_THINKING_LEVEL)
+
+        response = _client.models.generate_content(
+            model=MODEL_NAME,
+            contents=f"Create {count} MCQ questions on {topic}.",
+            config=types.GenerateContentConfig(**config_kwargs),
+        )
+
+        raw_text = (response.text or "").strip()
         if "```json" in raw_text:
             raw_text = raw_text.split("```json")[1].split("```")[0].strip()
         elif "```" in raw_text:
             raw_text = raw_text.split("```")[1].split("```")[0].strip()
-            
+
         return json.loads(raw_text)
     except Exception:
         logger.exception(
@@ -361,6 +528,7 @@ def generate_quiz_questions(board: str, user_class: str, subject: str, topic: st
 # in that case rather than surfacing an error to the student.
 # ---------------------------------------------------------------------------
 MAX_CHAT_TITLE_CHARS = 45
+CHAT_TITLE_TIMEOUT_SECONDS = 10
 
 TITLE_SYSTEM_INSTRUCTION = (
     "You generate short chat titles for an academic study assistant used by "
@@ -395,10 +563,14 @@ def generate_chat_title(history: list, board: str = "NCTB") -> Optional[str]:
         return None
 
     try:
-        model = genai.GenerativeModel("gemini-3.6-flash", system_instruction=TITLE_SYSTEM_INSTRUCTION)
-        response = model.generate_content(
-            f"Conversation (board: {board}):\n{convo_text}\n\nTitle:",
-            request_options={"timeout": 10},
+        response = _client.models.generate_content(
+            model=MODEL_NAME,
+            contents=f"Conversation (board: {board}):\n{convo_text}\n\nTitle:",
+            config=types.GenerateContentConfig(
+                system_instruction=TITLE_SYSTEM_INSTRUCTION,
+                thinking_config=types.ThinkingConfig(thinking_level=TITLE_THINKING_LEVEL),
+                http_options=types.HttpOptions(timeout=_seconds_to_ms(CHAT_TITLE_TIMEOUT_SECONDS)),
+            ),
         )
         title = (response.text or "").strip()
         # Defensive cleanup: strip accidental wrapping quotes/markdown the
