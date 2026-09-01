@@ -430,6 +430,30 @@ function updateAuthUI(user) {
     }
 }
 
+// ==================== BUG 1 FIX: LOGIN-REQUIRED UX ====================
+// Login is mandatory for every protected action (chat, quiz, PDF upload) -
+// the backend already enforces this (see get_current_user_id in
+// backend/main.py). Previously, a logged-out user's protected request
+// still got sent, the backend correctly rejected it with 401, but the
+// caller (sendMessage/generateAndStartQuiz) never checked response status
+// before reading the JSON body, so the student saw a misleading generic
+// message ("No response received." / "Failed to generate quiz.") instead
+// of being told to log in.
+//
+// This reuses the EXISTING login/signup modal as-is (openAuthModal,
+// toggleAuthMode, handleEmailAuth, handleGoogleSignIn are all completely
+// unchanged) - it only opens that modal and reuses its existing
+// #auth-error-msg slot to show a short explanatory message. No new UI,
+// no new authentication system.
+function promptLoginRequired() {
+    openAuthModal();
+    const errorMsg = document.getElementById("auth-error-msg");
+    if (errorMsg) {
+        errorMsg.textContent = "Please log in or create an account to continue using Kognit.";
+        errorMsg.classList.remove("hidden");
+    }
+}
+
 // ==================== WORKSPACE & CHAT FUNCTIONS ====================
 
 // ==================== SHARED MATHJAX RENDERING HELPER ====================
@@ -1016,6 +1040,21 @@ async function regenerateBotMessage(meta, btnEl) {
         if (session) headers["Authorization"] = `Bearer ${session.access_token}`;
 
         const response = await fetch("/api/chat", { method: "POST", headers, body: formData });
+
+        // BUG 1 FIX: a 401 here means the session was lost/expired between
+        // page load and this request reaching the backend - handle it as
+        // an authentication failure (shared login prompt), not as a
+        // generic regenerate failure. Restore the button first so it isn't
+        // left stuck disabled in its "Working..." state. Every other
+        // response (200 with any reply text, including Gemini timeout/
+        // quota/safety-block strings) is unaffected by this check.
+        if (response.status === 401) {
+            btnEl.disabled = false;
+            btnEl.innerHTML = originalHtml;
+            promptLoginRequired();
+            return;
+        }
+
         const data = await response.json();
         const replyText = data.reply || "No response received.";
 
@@ -1298,6 +1337,21 @@ async function submitUserMessageAndAppendReplyInner(meta, msg, finalText, chat, 
         if (session) headers["Authorization"] = `Bearer ${session.access_token}`;
 
         const response = await fetch("/api/chat", { method: "POST", headers, body: formData });
+
+        // BUG 1 FIX: a 401 here means the session was lost/expired between
+        // page load and this request reaching the backend - handle it as
+        // an authentication failure (shared login prompt), not as the
+        // generic "Error connecting to Kognit Engine." text. Every other
+        // response (200 with any reply text, including Gemini timeout/
+        // quota/safety-block strings) is unaffected by this check.
+        if (response.status === 401) {
+            if (isStillViewingThisChat() && loadingDiv && document.getElementById("chat-box").contains(loadingDiv)) {
+                loadingDiv.remove();
+            }
+            promptLoginRequired();
+            return;
+        }
+
         const data = await response.json();
         const replyText = data.reply || "No response received.";
 
@@ -1936,6 +1990,14 @@ window.handlePDFUpload = async function(event) {
     const file = event.target.files[0];
     if (!file) return;
 
+    // BUG 1 FIX: /api/pdf/upload is a protected endpoint (login is
+    // mandatory) - see sendMessage() for the matching guard/401-handling
+    // pattern. Checked before any upload UI/state is touched.
+    if (!currentUser) {
+        promptLoginRequired();
+        return;
+    }
+
     const formData = new FormData();
     formData.append("file", file);
 
@@ -1969,9 +2031,15 @@ window.handlePDFUpload = async function(event) {
             // Covers 401 (not logged in / expired session) as well as any
             // other upload failure - never show the "loaded successfully"
             // message for a non-2xx response.
-            alert(response.status === 401
-                ? "Please log in to upload a PDF."
-                : "Failed to upload and parse PDF.");
+            // BUG 1 FIX: a 401 here means the session was lost/expired
+            // between the currentUser check above and this request
+            // reaching the backend - use the same login prompt as every
+            // other protected action instead of a plain alert.
+            if (response.status === 401) {
+                promptLoginRequired();
+            } else {
+                alert("Failed to upload and parse PDF.");
+            }
             chatBox.scrollTop = chatBox.scrollHeight;
             return;
         }
@@ -2135,6 +2203,16 @@ window.sendMessage = async function() {
 
     if (!promptText && !selectedImageFile) return;
 
+    // BUG 1 FIX: /api/chat is a protected endpoint (login is mandatory) -
+    // if the frontend already knows there's no authenticated user, don't
+    // silently send the request just to have it rejected with a 401 that
+    // then shows up as a misleading "No response received." Prompt login
+    // instead, before any chat/message state is touched.
+    if (!currentUser) {
+        promptLoginRequired();
+        return;
+    }
+
     const proj = projects.find(p => p.id === activeProjectId);
     if (!proj) return;
     const currentChat = proj.chats.find(c => c.id === activeChatId);
@@ -2237,7 +2315,6 @@ window.sendMessage = async function() {
 
     try {
         const response = await fetch("/api/chat", { method: "POST", headers: headers, body: formData });
-        const data = await response.json();
 
         // Re-resolve the target project/chat by the ID captured before the
         // request started, rather than trusting the `proj`/`currentChat`
@@ -2255,6 +2332,24 @@ window.sendMessage = async function() {
             chatBox.removeChild(loadingDiv);
         }
 
+        // BUG 1 FIX: a 401 here means the session was lost/expired between
+        // the frontend's own currentUser check above and this request
+        // actually reaching the backend - handle it explicitly as an
+        // authentication failure (login prompt), never as a generic
+        // AI/provider error. This is distinct from every other failure
+        // mode (Gemini timeout/quota/safety-block), which all still come
+        // back as a normal 200 response with an explanatory "reply" string
+        // from backend/ai_engine.py and are completely unaffected by this
+        // check. The already-sent user message is left in place (it did
+        // send - only the reply failed), matching how the existing catch
+        // block below already leaves the sent user message untouched on
+        // a network failure.
+        if (response.status === 401) {
+            promptLoginRequired();
+            return;
+        }
+
+        const data = await response.json();
         const replyText = data.reply || "No response received.";
 
         let newBotMsgIndex = -1;
@@ -2329,6 +2424,14 @@ function resetQuizModal() {
 }
 
 window.generateAndStartQuiz = async function() {
+    // BUG 1 FIX: /api/quiz/generate is a protected endpoint (login is
+    // mandatory) - see sendMessage() for the matching guard/401-handling
+    // pattern. Checked before touching the quiz UI at all.
+    if (!currentUser) {
+        promptLoginRequired();
+        return;
+    }
+
     const topic = document.getElementById("quiz-topic-input").value.trim() || "General Practice";
     const count = document.getElementById("quiz-count-select").value;
 
@@ -2351,6 +2454,16 @@ window.generateAndStartQuiz = async function() {
 
     try {
         const res = await fetch("/api/quiz/generate", { method: "POST", headers: headers, body: formData });
+
+        // BUG 1 FIX: a 401 here means the session was lost/expired between
+        // the currentUser check above and this request reaching the
+        // backend - show the login prompt instead of the generic
+        // "Failed to generate quiz." message.
+        if (res.status === 401) {
+            promptLoginRequired();
+            return;
+        }
+
         const data = await res.json();
 
         if (data.questions && data.questions.length > 0) {
