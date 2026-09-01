@@ -216,13 +216,8 @@ function initializeActiveProject() {
     // Recent Chats bucket (DEFAULT_PROJECT_ID). Before the Projects/Recent
     // Chats split, `projects` only ever contained real projects, so
     // `projects[0]` was always a safe pick for "land the user somewhere on
-    // load." Now that the default bucket can also live in `projects` - and
-    // can even sort to the front after Supabase's updated_at ordering, if a
-    // standalone chat was the most recently touched thing - landing there
-    // by default would be a surprising place to open the app. On-load
-    // behavior stays exactly as before: always a real project, defaulting
-    // to a fresh chat inside it (BUG-1). Recent Chats remains something the
-    // user navigates to deliberately via the sidebar.
+    // load." This branch is untouched - a brand-new account with zero real
+    // projects still gets a starter project, exactly as before.
     const realProjects = projects.filter(p => p.id !== DEFAULT_PROJECT_ID);
 
     if (realProjects.length === 0) {
@@ -230,24 +225,44 @@ function initializeActiveProject() {
         return;
     }
 
-    activeProjectId = realProjects[0].id;
-    const mostRecentChat = (realProjects[0].chats && realProjects[0].chats.length > 0) ? realProjects[0].chats[0] : null;
+    // STARTUP CHAT LOCATION FIX: the chat that opens automatically when
+    // Kognit launches must always be a standalone Recent Chats chat - the
+    // exact same bucket/type window.createStandaloneChat() (the global
+    // "+ New Chat" button) creates - never a chat inside a real project.
+    //
+    // Previously this set activeProjectId = realProjects[0].id and either
+    // reused or created the startup chat there (see the former BUG-1 fix
+    // comment this replaces), so every fresh app open silently landed - or
+    // added a new chat - inside whichever real project happened to be
+    // first. Real projects and every chat already inside them are
+    // completely untouched by this change: they are simply no longer where
+    // the startup chat lives. The user still opens any real project and
+    // its chats normally via the sidebar.
+    const defaultProject = getOrCreateDefaultProject();
+    const mostRecentChat = defaultProject.chats.length > 0 ? defaultProject.chats[0] : null;
     const mostRecentChatIsEmpty = mostRecentChat &&
         mostRecentChat.messages.filter(m => m.role === "user").length === 0;
 
     if (mostRecentChatIsEmpty) {
-        // The most recent chat has no user messages yet (e.g. it was just
-        // created and never used) - reuse it rather than piling up empty
-        // "New Chat" entries every time the app is opened.
+        // The most recent Recent Chats entry has no user messages yet (e.g.
+        // it was just created and never used) - reuse it rather than piling
+        // up empty "New Chat" entries in Recent Chats every time the app is
+        // opened. Same rule that previously applied to the first real
+        // project, now applied to Recent Chats instead.
+        activeProjectId = defaultProject.id;
         activeChatId = mostRecentChat.id;
         renderHistoryList();
         loadChat(activeProjectId, activeChatId);
     } else {
-        // BUG-1 fix: start on a genuinely fresh chat instead of silently
-        // resuming whatever conversation was last active. No existing
-        // chat is deleted - all of them remain listed in the sidebar and
-        // can still be reopened manually at any time.
-        createNewChat(activeProjectId);
+        // BUG-1 fix (preserved): start on a genuinely fresh chat instead of
+        // silently resuming whatever conversation was last active. No
+        // existing chat is deleted - every chat in every real project, and
+        // every existing Recent Chats entry, remains listed in the sidebar
+        // and can still be reopened manually. Goes through the exact same
+        // createStandaloneChat() the global "+ New Chat" button uses, so
+        // the startup chat is identical in type/location to one created by
+        // that button.
+        createStandaloneChat();
     }
 }
 
