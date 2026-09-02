@@ -1021,6 +1021,10 @@ async function regenerateBotMessage(meta, btnEl) {
     formData.append("user_class", document.getElementById("class-select").value);
     formData.append("stream", document.getElementById("stream-select").value);
     formData.append("history", JSON.stringify(boundedHistory));
+    // BUG 2 FIX: scopes PDF context lookup to the chat that owns this
+    // regenerate request - meta.chatId is already the correct, existing
+    // race-safe identifier used elsewhere in this function.
+    formData.append("chat_id", meta.chatId);
 
     if (userMsg.image) {
         try {
@@ -1313,6 +1317,10 @@ async function submitUserMessageAndAppendReplyInner(meta, msg, finalText, chat, 
     formData.append("user_class", document.getElementById("class-select").value);
     formData.append("stream", document.getElementById("stream-select").value);
     formData.append("history", JSON.stringify(boundedHistory));
+    // BUG 2 FIX: requestChatId is the same CHAT-05-style race-safe id
+    // already captured above for this request - reused here rather than
+    // re-reading activeChatId, which could have changed by now.
+    formData.append("chat_id", requestChatId);
 
     if (msg.image) {
         try {
@@ -1585,8 +1593,33 @@ function loadChat(projId, chatId) {
         });
     }
 
+    // BUG 2 FIX: the PDF status bar must always reflect the chat being
+    // switched INTO, never whatever the previously open chat left behind.
+    // chat.pdf is set by handlePDFUpload()/clearPDFContext() below; a chat
+    // that never had a PDF (or an older chat created before this fix)
+    // simply has no `pdf` field, which correctly falls through to "hide".
+    applyPDFStatusUI(chat);
+
     typesetMathJax([chatBox]);
     chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+// BUG 2 FIX: single place that syncs the #pdf-status-bar UI + isPDFLoaded
+// to a given chat's stored `pdf` metadata. Used by loadChat() (switching
+// chats) and by handlePDFUpload()/clearPDFContext() (after those actions
+// change that metadata for the currently open chat).
+function applyPDFStatusUI(chat) {
+    const statusBar = document.getElementById("pdf-status-bar");
+    const statusText = document.getElementById("pdf-status-text");
+
+    if (chat && chat.pdf && chat.pdf.active) {
+        isPDFLoaded = true;
+        statusText.textContent = `PDF Active: ${chat.pdf.filename || "document.pdf"}`;
+        statusBar.classList.remove("hidden");
+    } else {
+        isPDFLoaded = false;
+        statusBar.classList.add("hidden");
+    }
 }
 
 // Builds one chat row (.chat-item) - used both for chats nested inside a
@@ -1998,23 +2031,41 @@ window.handlePDFUpload = async function(event) {
         return;
     }
 
+    // BUG 2 FIX: resolve and lock in which chat this upload belongs to
+    // BEFORE the await below, same CHAT-05-style race protection already
+    // used by sendMessage()/submitUserMessageAndAppendReplyInner(). If the
+    // student switches chats while the upload is still in flight, the PDF
+    // must still attach to the chat that was active when they picked the
+    // file - not whatever chat happens to be open when the response comes
+    // back.
+    const requestProjectId = activeProjectId;
+    const requestChatId = activeChatId;
+    const proj = projects.find(p => p.id === requestProjectId);
+    const chat = proj ? proj.chats.find(c => c.id === requestChatId) : null;
+    if (!chat) return;
+
     const formData = new FormData();
     formData.append("file", file);
+    formData.append("chat_id", requestChatId);
 
     const chatBox = document.getElementById("chat-box");
+    const isStillViewingThisChat = () => activeProjectId === requestProjectId && activeChatId === requestChatId;
 
     // PHASE 5: same reasoning as in sendMessage() - a PDF can be uploaded
     // before the student types anything, while the empty-chat greeting is
     // still showing. Clear it so the upload status text doesn't render
-    // alongside it.
-    const existingGreeting = chatBox.querySelector(".empty-chat-greeting");
-    if (existingGreeting) existingGreeting.remove();
+    // alongside it. Only touch the DOM if this chat is still on screen.
+    let loadingMsg = null;
+    if (isStillViewingThisChat()) {
+        const existingGreeting = chatBox.querySelector(".empty-chat-greeting");
+        if (existingGreeting) existingGreeting.remove();
 
-    const loadingMsg = document.createElement("div");
-    loadingMsg.className = "bot-message";
-    loadingMsg.textContent = "📖 Reading and indexing PDF: " + file.name + "...";
-    chatBox.appendChild(loadingMsg);
-    chatBox.scrollTop = chatBox.scrollHeight;
+        loadingMsg = document.createElement("div");
+        loadingMsg.className = "bot-message";
+        loadingMsg.textContent = "📖 Reading and indexing PDF: " + file.name + "...";
+        chatBox.appendChild(loadingMsg);
+        chatBox.scrollTop = chatBox.scrollHeight;
+    }
 
     const headers = {};
     const { data: { session } } = await supabaseClient.auth.getSession();
@@ -2025,7 +2076,7 @@ window.handlePDFUpload = async function(event) {
     try {
         const response = await fetch("/api/pdf/upload", { method: "POST", headers: headers, body: formData });
         await response.json();
-        chatBox.removeChild(loadingMsg);
+        if (loadingMsg && chatBox.contains(loadingMsg)) chatBox.removeChild(loadingMsg);
 
         if (!response.ok) {
             // Covers 401 (not logged in / expired session) as well as any
@@ -2040,29 +2091,80 @@ window.handlePDFUpload = async function(event) {
             } else {
                 alert("Failed to upload and parse PDF.");
             }
-            chatBox.scrollTop = chatBox.scrollHeight;
+            if (isStillViewingThisChat()) chatBox.scrollTop = chatBox.scrollHeight;
             return;
         }
 
-        isPDFLoaded = true;
-        document.getElementById("pdf-status-text").textContent = `PDF Active: ${file.name}`;
-        document.getElementById("pdf-status-bar").classList.remove("hidden");
+        // BUG 2 FIX: PDF metadata is stored on the chat it belongs to, not
+        // in a global variable - this is what makes loadChat() able to
+        // correctly restore/hide the status bar per chat later. Only a
+        // boolean + filename + timestamp are kept; the extracted PDF text
+        // itself never leaves the backend's in-memory store.
+        chat.pdf = {
+            active: true,
+            filename: file.name,
+            uploadedAt: new Date().toISOString()
+        };
+        saveProjectsToStorage();
 
-        const successDiv = document.createElement("div");
-        successDiv.className = "bot-message";
-        successDiv.innerHTML = `✅ <b>PDF Loaded Successfully!</b> You can now ask questions directly from <i>${file.name}</i>.`;
-        chatBox.appendChild(successDiv);
+        if (isStillViewingThisChat()) {
+            applyPDFStatusUI(chat);
+
+            const successDiv = document.createElement("div");
+            successDiv.className = "bot-message";
+            successDiv.innerHTML = `✅ <b>PDF Loaded Successfully!</b> You can now ask questions directly from <i>${file.name}</i>.`;
+            chatBox.appendChild(successDiv);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
     } catch (e) {
-        if (chatBox.contains(loadingMsg)) chatBox.removeChild(loadingMsg);
+        if (loadingMsg && chatBox.contains(loadingMsg)) chatBox.removeChild(loadingMsg);
         alert("Failed to upload and parse PDF.");
     }
-    chatBox.scrollTop = chatBox.scrollHeight;
 };
 
-window.clearPDFContext = function() {
-    isPDFLoaded = false;
+window.clearPDFContext = async function() {
+    // BUG 2 FIX: previously this only hid the UI and reset a global flag -
+    // the server-side PDF context for the chat kept answering questions
+    // from the "removed" PDF. Now it (1) tells the backend to drop this
+    // specific chat's context, then (2) updates only this chat's own
+    // metadata, so Chat B's PDF (if any) is never touched.
+    const proj = projects.find(p => p.id === activeProjectId);
+    const chat = proj ? proj.chats.find(c => c.id === activeChatId) : null;
+
     document.getElementById("pdf-input").value = "";
-    document.getElementById("pdf-status-bar").classList.add("hidden");
+
+    if (chat && currentUser) {
+        const headers = {};
+        const { data: { session } } = await supabaseClient.auth.getSession();
+        if (session) {
+            headers["Authorization"] = `Bearer ${session.access_token}`;
+        }
+
+        try {
+            const formData = new FormData();
+            formData.append("chat_id", chat.id);
+            await fetch("/api/pdf/clear", { method: "POST", headers: headers, body: formData });
+        } catch (e) {
+            console.error("Failed to clear server-side PDF context:", e);
+            // Fall through and clear the local/UI state anyway - the
+            // in-memory backend context will still be replaced the next
+            // time this chat_id is used for an upload, and worst case
+            // here is a transient network hiccup, not silent data leakage
+            // to another chat.
+        }
+    }
+
+    if (chat) {
+        chat.pdf = { active: false };
+        saveProjectsToStorage();
+    }
+
+    if (chat && activeChatId === chat.id) {
+        applyPDFStatusUI(chat);
+    } else {
+        isPDFLoaded = false;
+        document.getElementById("pdf-status-bar").classList.add("hidden");
+    }
 };
 
 window.handleImageSelect = function(event) {
@@ -2293,6 +2395,10 @@ window.sendMessage = async function() {
     formData.append("user_class", document.getElementById("class-select").value);
     formData.append("stream", document.getElementById("stream-select").value);
     formData.append("history", JSON.stringify(boundedHistory));
+    // BUG 2 FIX: requestChatId (captured above, before this async flow
+    // continues) is the chat that actually owns this message - reused
+    // here for the same CHAT-05 race-safety reason it exists at all.
+    formData.append("chat_id", requestChatId);
 
     if (selectedImageFile) formData.append("image", selectedImageFile);
 

@@ -59,12 +59,27 @@ SUPABASE_AUTH_TIMEOUT_SECONDS = 10
 # ---------------------------------------------------------------------------
 # PDF context store.
 #
-# Keyed by the verified authenticated Supabase user id (see
-# get_current_user_id below) - NOT by an anonymous browser/session cookie.
-# The previous anonymous-cookie design has been removed now that every
-# endpoint that reads/writes this dict requires authentication. Do not key
-# this dict by anything other than the verified user_id without updating
-# both call sites below (upload_pdf, chat_endpoint).
+# BUG 2 FIX: previously keyed only by the verified authenticated Supabase
+# user id, which meant every chat belonging to one account shared a single
+# PDF context - uploading a PDF in Chat A made it visible to Chat B, C, etc.
+# for that same user. Now keyed by BOTH the verified user id AND the
+# client-supplied chat_id:
+#
+#   active_pdf_contexts = {
+#       user_id: {
+#           chat_id: pdf_text,
+#           ...
+#       },
+#       ...
+#   }
+#
+# The outer key (user_id) always comes from get_current_user_id (the
+# verified JWT) - never from a client-supplied value. The inner key
+# (chat_id) is client-supplied, but since it only ever selects a bucket
+# INSIDE that user's own dict, a client can never use chat_id to read or
+# clear another user's context - it can only address its own chats. Do not
+# key this dict differently without updating all three call sites below
+# (upload_pdf, chat_endpoint, clear_pdf_endpoint).
 # ---------------------------------------------------------------------------
 active_pdf_contexts = {}
 
@@ -123,7 +138,17 @@ async def read_root(request: Request):
     return templates.TemplateResponse(request=request, name="index.html")
 
 @app.post("/api/pdf/upload")
-async def upload_pdf(file: UploadFile = File(...), user_id: str = Depends(get_current_user_id)):
+async def upload_pdf(
+    file: UploadFile = File(...),
+    chat_id: str = Form(...),
+    user_id: str = Depends(get_current_user_id)
+):
+    # BUG 2 FIX: chat_id is required here specifically (unlike the softer
+    # handling in chat_endpoint below) because an upload with no chat to
+    # attach it to is meaningless - there is nothing safe to fall back to.
+    if not chat_id or not chat_id.strip():
+        raise HTTPException(status_code=400, detail="chat_id is required to upload a PDF.")
+
     is_pdf_content_type = file.content_type in ALLOWED_PDF_CONTENT_TYPES
     is_pdf_extension = (file.filename or "").lower().endswith(".pdf")
     if not (is_pdf_content_type or is_pdf_extension):
@@ -142,8 +167,32 @@ async def upload_pdf(file: UploadFile = File(...), user_id: str = Depends(get_cu
         logger.exception("Unexpected error extracting PDF %s", file.filename)
         raise HTTPException(status_code=500, detail="Could not process this PDF right now.")
 
-    active_pdf_contexts[user_id] = pdf_text
+    # BUG 2 FIX: stored under this user's own chat_id bucket only - never
+    # overwrites or is visible to any other chat_id, for this user or any
+    # other.
+    active_pdf_contexts.setdefault(user_id, {})[chat_id] = pdf_text
     return {"status": "success", "filename": file.filename, "length": len(pdf_text)}
+
+
+@app.post("/api/pdf/clear")
+async def clear_pdf_endpoint(
+    chat_id: str = Form(...),
+    user_id: str = Depends(get_current_user_id)
+):
+    """
+    BUG 2 FIX: previously there was no server-side clear at all - the
+    frontend's clearPDFContext() only hid the UI, so a "removed" PDF kept
+    answering questions for that chat until the process restarted. This
+    endpoint actually drops that chat's entry from the authenticated user's
+    own bucket. Safe/no-op if no PDF context exists for that chat_id (e.g.
+    double-clicking clear, or clearing a chat that never had a PDF) - never
+    raises for that case.
+    """
+    if not chat_id or not chat_id.strip():
+        raise HTTPException(status_code=400, detail="chat_id is required to clear a PDF.")
+
+    active_pdf_contexts.get(user_id, {}).pop(chat_id, None)
+    return {"status": "success"}
 
 def parse_and_validate_history(raw_history: str) -> list:
     """
@@ -200,6 +249,15 @@ async def chat_endpoint(
     stream: str = Form("Science"),
     image: Optional[UploadFile] = File(None),
     history: str = Form("[]"),
+    # BUG 2 FIX: identifies which chat this message belongs to, so PDF
+    # context can be looked up per-chat instead of per-user. Deliberately
+    # NOT required (default "") rather than Form(...) - a normal text/image
+    # chat message must keep working even if chat_id is ever missing (e.g.
+    # a stale cached frontend mid-rollout); it just won't be able to pull
+    # any PDF context in that case, which fails safe rather than failing
+    # the whole request. PDF upload/clear below DO require it, since those
+    # actions are meaningless without a chat to attach to.
+    chat_id: str = Form(""),
     user_id: str = Depends(get_current_user_id)
 ):
     # Read and validate the image BEFORE the try/except below. HTTPException
@@ -223,7 +281,9 @@ async def chat_endpoint(
     # is a separate, frontend-only change not made here).
     t_request_start = time.perf_counter()
     try:
-        pdf_context = active_pdf_contexts.get(user_id, "")
+        if not chat_id:
+            logger.warning("chat_endpoint: request received with no chat_id - proceeding without PDF context")
+        pdf_context = active_pdf_contexts.get(user_id, {}).get(chat_id, "") if chat_id else ""
         conversation_history = parse_and_validate_history(history)
         t_after_parsing = time.perf_counter()
 
@@ -246,11 +306,11 @@ async def chat_endpoint(
         t_after_ai = time.perf_counter()
         logger.info(
             "chat_endpoint timing: parse=%.3fs ai_total=%.3fs request_total=%.3fs "
-            "(mode=%s, has_image=%s, has_pdf=%s, history_len=%d)",
+            "(mode=%s, has_image=%s, has_pdf=%s, history_len=%d, chat_id=%s)",
             t_after_parsing - t_request_start,
             t_after_ai - t_after_parsing,
             t_after_ai - t_request_start,
-            mode, bool(image_bytes), bool(pdf_context), len(conversation_history)
+            mode, bool(image_bytes), bool(pdf_context), len(conversation_history), chat_id or "(none)"
         )
         return {"reply": response}
     except Exception:
