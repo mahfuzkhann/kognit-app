@@ -212,19 +212,23 @@ function loadProjectsFromLocalStorage() {
 }
 
 function initializeActiveProject() {
-    // SIDEBAR IA FIX: only consider REAL projects here, never the reserved
-    // Recent Chats bucket (DEFAULT_PROJECT_ID). Before the Projects/Recent
-    // Chats split, `projects` only ever contained real projects, so
-    // `projects[0]` was always a safe pick for "land the user somewhere on
-    // load." This branch is untouched - a brand-new account with zero real
-    // projects still gets a starter project, exactly as before.
-    const realProjects = projects.filter(p => p.id !== DEFAULT_PROJECT_ID);
-
-    if (realProjects.length === 0) {
-        createNewProject();
-        return;
-    }
-
+    // BUG 4 FIX (startup/re-login regression): this used to short-circuit
+    // here with `if (realProjects.length === 0) { createNewProject(); return; }`,
+    // which unconditionally created a new empty real Project on every app
+    // load/reload/re-login whenever the user had zero real Projects - even
+    // when they still had usable Recent Chats (e.g. immediately after
+    // deleting their last real Project via deleteProject(), which already
+    // correctly leaves the user in Recent Chats without creating a new
+    // Project). Reloading the page or logging back in then silently
+    // recreated the exact unwanted empty Project deleteProject() had just
+    // avoided, since this function never checked whether Recent Chats
+    // already had somewhere usable to land.
+    //
+    // The truly-brand-new-account case (empty database, no rows at all) is
+    // handled separately and earlier, in loadProjectsFromDatabase()
+    // (`projects = []; createNewProject(); return;` before this function is
+    // even called) - that path is untouched by this fix.
+    //
     // STARTUP CHAT LOCATION FIX: the chat that opens automatically when
     // Kognit launches must always be a standalone Recent Chats chat - the
     // exact same bucket/type window.createStandaloneChat() (the global
