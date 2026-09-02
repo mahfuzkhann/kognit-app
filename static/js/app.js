@@ -1398,10 +1398,84 @@ function resendUserMessage(meta, btnEl) {
     return submitUserMessageAndAppendReply(meta, undefined);
 }
 
+// ==================== BUG 3 FIX: PER-CHAT BOARD/CLASS/STREAM/MODE ====================
+// Board, Class, Stream, and Direct/Socratic mode used to live only in the
+// #board-select/#class-select/#stream-select DOM elements and the global
+// `currentMode` variable - genuinely global state shared across every chat.
+// Switching chats never touched them, so whatever was last selected in
+// Chat A silently carried over into Chat B, even though the student might
+// reasonably believe Chat B has its own curriculum/mode context.
+//
+// Fix mirrors the existing per-chat PDF isolation pattern (chat.pdf +
+// applyPDFStatusUI, see BUG 2 FIX above): each chat object now carries its
+// own optional `settings` field ({ board, user_class, stream, mode }).
+// DOM/`currentMode` remain the single live "what's currently on screen"
+// source of truth (every existing formData.append(...) read site for these
+// values is intentionally left untouched) - they are just now kept in sync
+// with the active chat on every switch (applyChatSettingsUI, called from
+// loadChat) and written back into the active chat the moment the student
+// changes one (saveActiveChatSetting, called from setMode/handleContextSettingChange).
+
+// Matches the default selected <option> in each dropdown and the default
+// active mode button in templates/index.html, so a chat that has never had
+// its own settings explicitly set behaves exactly as it did before this fix.
+const DEFAULT_CHAT_SETTINGS = {
+    board: "BD NCTB (Bangla)",
+    user_class: "Class 9-10 (SSC)",
+    stream: "Science (বিজ্ঞান)",
+    mode: "direct"
+};
+
+// Always returns a COMPLETE settings object for a chat, filling in any
+// missing key from DEFAULT_CHAT_SETTINGS - covers brand-new chats
+// (chat.settings is undefined) and any pre-existing chat created before
+// this fix shipped (same situation, same fallback).
+function getEffectiveChatSettings(chat) {
+    return Object.assign({}, DEFAULT_CHAT_SETTINGS, (chat && chat.settings) || {});
+}
+
+// Syncs the on-screen Board/Class/Stream dropdowns and Direct/Socratic mode
+// buttons + `currentMode` to the chat being switched INTO. Called by
+// loadChat() so every chat switch restores that chat's own settings instead
+// of leaving whatever the previously open chat had selected on screen.
+function applyChatSettingsUI(chat) {
+    const settings = getEffectiveChatSettings(chat);
+
+    document.getElementById("board-select").value = settings.board;
+    document.getElementById("class-select").value = settings.user_class;
+    document.getElementById("stream-select").value = settings.stream;
+
+    currentMode = settings.mode;
+    document.getElementById("btn-direct").classList.toggle("active", currentMode === "direct");
+    document.getElementById("btn-socratic").classList.toggle("active", currentMode === "socratic");
+}
+
+// Persists one Board/Class/Stream/Mode change into the CURRENTLY ACTIVE
+// chat's own settings only - never any other chat. If there's somehow no
+// active chat, this is a no-op (no global fallback that could bleed into
+// whichever chat is opened next).
+function saveActiveChatSetting(key, value) {
+    const proj = projects.find(p => p.id === activeProjectId);
+    const chat = proj ? proj.chats.find(c => c.id === activeChatId) : null;
+    if (!chat) return;
+
+    chat.settings = getEffectiveChatSettings(chat);
+    chat.settings[key] = value;
+    saveProjectsToStorage();
+}
+
+// Called via onchange="handleContextSettingChange(...)" on the Board/Class/
+// Stream <select> elements in templates/index.html.
+window.handleContextSettingChange = function(settingsKey, elementId) {
+    const value = document.getElementById(elementId).value;
+    saveActiveChatSetting(settingsKey, value);
+};
+
 window.setMode = function(mode) {
     currentMode = mode;
     document.getElementById("btn-direct").classList.toggle("active", mode === "direct");
     document.getElementById("btn-socratic").classList.toggle("active", mode === "socratic");
+    saveActiveChatSetting("mode", mode);
 };
 
 window.handleSidebarSearch = function(event) {
@@ -1599,6 +1673,10 @@ function loadChat(projId, chatId) {
     // that never had a PDF (or an older chat created before this fix)
     // simply has no `pdf` field, which correctly falls through to "hide".
     applyPDFStatusUI(chat);
+
+    // BUG 3 FIX: same reasoning as applyPDFStatusUI above, but for
+    // Board/Class/Stream/Mode - see the BUG 3 FIX block above setMode().
+    applyChatSettingsUI(chat);
 
     typesetMathJax([chatBox]);
     chatBox.scrollTop = chatBox.scrollHeight;
@@ -1899,17 +1977,44 @@ async function deleteProject(projId) {
     // whole. Before the Recent Chats bucket existed, `projects.length === 0`
     // correctly meant "the user has nothing left" and guaranteed a fresh
     // project. Now `projects` can still contain the default bucket even
-    // after the user's last real project is deleted - checking
-    // `projects.length` there would silently skip creating a fresh project
-    // and could land the user on an empty/no-chat screen instead.
+    // after the user's last real project is deleted.
     const realProjects = projects.filter(p => p.id !== DEFAULT_PROJECT_ID);
-    if (realProjects.length === 0) {
-        createNewProject();
-    } else {
+
+    if (realProjects.length > 0) {
         activeProjectId = realProjects[0].id;
         activeChatId = (realProjects[0].chats && realProjects[0].chats.length > 0) ? realProjects[0].chats[0].id : null;
         renderHistoryList();
         if (activeChatId) loadChat(activeProjectId, activeChatId);
+        return;
+    }
+
+    // BUG 4 FIX: deleting the last real Project used to unconditionally
+    // call createNewProject() here - even when the student still had
+    // Recent Chats (the project-less standalone bucket, see
+    // DEFAULT_PROJECT_ID above). That silently manufactured an empty,
+    // unwanted "New Project" folder every time, even though existing
+    // Recent Chats were already a perfectly valid place to land. Zero
+    // *Projects* remaining does not mean the student has nothing left -
+    // whether Recent Chats exist is what actually determines that.
+    const defaultProject = projects.find(p => p.id === DEFAULT_PROJECT_ID);
+    const hasRecentChats = defaultProject && defaultProject.chats && defaultProject.chats.length > 0;
+
+    if (hasRecentChats) {
+        // Land on the existing Recent Chats instead of manufacturing a new
+        // empty Project - the chats stay exactly where they already were,
+        // never moved into a freshly-created Project.
+        activeProjectId = defaultProject.id;
+        activeChatId = defaultProject.chats[0].id;
+        renderHistoryList();
+        loadChat(activeProjectId, activeChatId);
+    } else {
+        // Truly nothing left anywhere (no real Projects, no Recent Chats) -
+        // the UI still needs some active chat to render. Reuse the exact
+        // same fallback the startup flow (initializeActiveProject) already
+        // uses in this situation: create a standalone chat in Recent Chats,
+        // NOT a new Project - so no automatic default Project is introduced
+        // merely because the Project list is empty.
+        createStandaloneChat();
     }
 }
 

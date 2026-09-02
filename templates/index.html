@@ -149,19 +149,19 @@
             </div>
 
             <div class="context-selector">
-                <select id="board-select" class="context-dropdown">
+                <select id="board-select" class="context-dropdown" onchange="handleContextSettingChange('board', 'board-select')">
                     <option value="BD NCTB (Bangla)">BD NCTB (Bangla)</option>
                     <option value="BD NCTB (English Version)">BD NCTB (English Version)</option>
                     <option value="Edexcel / Cambridge (O/A Level)">Edexcel / Cambridge (O/A Level)</option>
                 </select>
 
-                <select id="class-select" class="context-dropdown">
+                <select id="class-select" class="context-dropdown" onchange="handleContextSettingChange('user_class', 'class-select')">
                     <option value="Class 9-10 (SSC)">Class 9-10 (SSC)</option>
                     <option value="Class 11-12 (HSC)">Class 11-12 (HSC)</option>
                     <option value="Class 6-8">Class 6-8</option>
                 </select>
 
-                <select id="stream-select" class="context-dropdown">
+                <select id="stream-select" class="context-dropdown" onchange="handleContextSettingChange('stream', 'stream-select')">
                     <option value="Science (বিজ্ঞান)">Science (বিজ্ঞান)</option>
                     <option value="Commerce (ব্যবসায় শিক্ষা)">Commerce (ব্যবসায় শিক্ষা)</option>
                     <option value="Arts (মানবিক)">Arts (মানবিক)</option>
