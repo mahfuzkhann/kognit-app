@@ -212,7 +212,24 @@ RETRY_REQUEST_TIMEOUT_SECONDS = AI_REQUEST_TIMEOUT_SECONDS
 # never retrying bucket A. If real post-fix latency data shows client
 # timeouts are still common enough to be worth one bounded retry, flip this
 # - do not change the retry loop's structure to do it.
-RETRY_ON_CLIENT_TIMEOUT = False
+#
+# FLIPPED TO TRUE (Phase 1 benchmark, BM-01): a real run hit
+# httpx.ReadTimeout / "client deadline exceeded" on attempt 1/2 at
+# elapsed=30.199s for a simple SSC quadratic-equation question (2x^2-5x-3=0)
+# with CHAT_THINKING_LEVEL=LOW. A trivial question should not genuinely need
+# 30s of model "thinking" at the low setting, so this reads as a transient
+# stall (network/connection read timeout, not sustained model work) rather
+# than a case where retrying is guaranteed to fail again the same way -
+# exactly the condition this toggle exists for. Without a retry, that
+# request was a hard, unrecoverable failure visible to the student (see
+# screenshot: generic "couldn't process that request" with no fallback).
+# The retry reuses the SAME 30s budget (RETRY_REQUEST_TIMEOUT_SECONDS), so
+# worst case a student now waits up to ~60s before seeing an error instead
+# of ~30s - traded deliberately for a real chance of success on what looks
+# like a one-off stall. Revisit if further benchmark runs show this firing
+# repeatedly (that would point to a different root cause than a transient
+# stall).
+RETRY_ON_CLIENT_TIMEOUT = True
 
 # HTTP status codes, other than 5xx, that are treated as bucket B (genuine
 # transient failures) rather than bucket E (unexpected/programming errors).
