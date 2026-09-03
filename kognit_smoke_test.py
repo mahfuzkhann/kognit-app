@@ -347,7 +347,45 @@ class TestRetryPolicy:
         result = ai_engine.generate_ai_response(prompt="hi", mode="direct")
 
         assert result == ai_engine.GENERIC_CHAT_ERROR
-        assert mock_client.chats.create.call_count == ai_engine.MAX_ATTEMPTS
+        assert mock_client.chats.create.call_count == ai_engine.MAX_ATTEMPTS_BUCKET_B
+
+    def test_bucket_b_recovers_after_two_failures(self, mock_client):
+        # Phase 1 benchmark evidence (BM-04/BM-08/BM-12): a single retry
+        # (2 total attempts) recovered only half of the real 5xx incidents
+        # observed. MAX_ATTEMPTS_BUCKET_B was raised 2 -> 3 so a call can
+        # fail twice and still succeed on the third attempt - this proves
+        # that specific new capability actually works, not just that the
+        # constant changed.
+        chat_fail_1 = MagicMock()
+        chat_fail_1.send_message.side_effect = _server_error(503, "UNAVAILABLE")
+        chat_fail_2 = MagicMock()
+        chat_fail_2.send_message.side_effect = _server_error(503, "UNAVAILABLE")
+        chat_ok = MagicMock()
+        chat_ok.send_message.return_value = _make_response("recovered on third attempt")
+        mock_client.chats.create.side_effect = [chat_fail_1, chat_fail_2, chat_ok]
+
+        result = ai_engine.generate_ai_response(prompt="hi", mode="direct")
+
+        assert result == "recovered on third attempt"
+        assert mock_client.chats.create.call_count == 3
+
+    def test_bucket_a_ceiling_unaffected_by_bucket_b_increase(self, mock_client):
+        # MAX_ATTEMPTS_BUCKET_A must stay at 2 (1 retry) even though
+        # MAX_ATTEMPTS_BUCKET_B was raised to 3 - the two buckets are
+        # independent on purpose (see comment above MAX_ATTEMPTS_BUCKET_A
+        # in ai_engine.py). A persistent client-side timeout must still
+        # give up after one retry, not two.
+        assert ai_engine.MAX_ATTEMPTS_BUCKET_A == 2
+        assert ai_engine.MAX_ATTEMPTS_BUCKET_B == 3
+
+        chat = MagicMock()
+        chat.send_message.side_effect = httpx.TimeoutException("deadline exceeded")
+        mock_client.chats.create.return_value = chat
+
+        result = ai_engine.generate_ai_response(prompt="hi", mode="direct")
+
+        assert result == ai_engine.GENERIC_CHAT_ERROR
+        assert mock_client.chats.create.call_count == 2
 
     def test_bucket_b_retry_uses_same_timeout_not_shorter(self, mock_client):
         chat_fail = MagicMock()

@@ -186,7 +186,8 @@ AI_REQUEST_TIMEOUT_SECONDS = 30
 #      not a client mistake): these return from Google FAST (an error
 #      response, not a slow success), so retrying with a full timeout budget
 #      does not meaningfully raise the worst case the way shortening did.
-#      Retried once, after a short jittered delay.
+#      Retried up to twice (3 total attempts) - see MAX_ATTEMPTS_BUCKET_B
+#      below for why this was raised from a single retry.
 #
 #   C. Quota exhaustion - ClientError with HTTP 429 (RESOURCE_EXHAUSTED):
 #      never retried, quota will not clear in a few seconds.
@@ -198,8 +199,49 @@ AI_REQUEST_TIMEOUT_SECONDS = 30
 #   E. Anything else (programming errors, unexpected SDK/response shapes):
 #      never retried, logged, generic error returned.
 #
-# MAX_ATTEMPTS and the retry delay only apply to bucket B above.
-MAX_ATTEMPTS = 2  # 1 initial attempt + 1 retry, bucket B only
+# Bucket A (client-side timeout) and bucket B (transient provider 5xx/409)
+# are given DIFFERENT attempt ceilings below - they used to share one
+# MAX_ATTEMPTS constant, which meant raising bucket B's retry budget would
+# have silently also let a stalled client-side call retry more times (and
+# wait much longer) than intended. They are now independent:
+#
+#   MAX_ATTEMPTS_BUCKET_A = 2  (1 initial + 1 retry - UNCHANGED)
+#   MAX_ATTEMPTS_BUCKET_B = 3  (1 initial + 2 retries - RAISED, see below)
+#
+# MAX_ATTEMPTS_BUCKET_A: unchanged from the original redesign. A stalled/
+# unreachable client-side call is a different failure mode than a fast 5xx
+# response from Google, and letting it retry indefinitely would let worst-
+# case wait time keep compounding (each retry re-spends the full 30s
+# budget) - one retry stays the deliberate ceiling here.
+MAX_ATTEMPTS_BUCKET_A = 2
+
+# MAX_ATTEMPTS_BUCKET_B: RAISED from 2 to 3 (Phase 1 benchmark evidence,
+# BM-04/BM-08/BM-12). All three hit a genuine Gemini 5xx on attempt 1
+# (503 Service Unavailable / 503 / 503), got one retry per the previous
+# policy, and the retry ALSO failed (503, 503, 504 Gateway Timeout
+# respectively) - i.e. a single retry recovered 0 of these 3 real
+# incidents. Across the full 15-entry run, 6/15 calls hit a bucket-B 5xx on
+# attempt 1 at all; of those, 3/6 recovered on the single retry the old
+# policy allowed and 3/6 did not. That is real evidence a second retry is
+# worth attempting before giving up, not a change made on assumption.
+# Bucket B responses return from Google fast (an error, not a slow
+# success - see RETRY_REQUEST_TIMEOUT_SECONDS comment below), so a second
+# retry does not meaningfully change the worst-case wait the way adding a
+# bucket-A retry would; observed worst case in the benchmark for a
+# recovered bucket-B call was ~58s total (1 failed attempt + 1 failed retry
+# + 1 successful retry, each carrying its own ~1-2s jittered delay).
+# Revisit if a future benchmark run shows 3 consecutive 5xx responses on
+# the same request occurring often - that would point to a real Gemini
+# outage window rather than isolated transient errors, which a bounded
+# retry count cannot fix.
+MAX_ATTEMPTS_BUCKET_B = 3
+
+# Kept as the overall per-request loop bound (must be >= the largest of the
+# two bucket-specific ceilings above so bucket B can actually use its full
+# budget). Each bucket enforces ITS OWN ceiling independently via the
+# MAX_ATTEMPTS_BUCKET_A / MAX_ATTEMPTS_BUCKET_B checks in the except
+# blocks below - this is not, by itself, a per-bucket attempt cap.
+MAX_ATTEMPTS = max(MAX_ATTEMPTS_BUCKET_A, MAX_ATTEMPTS_BUCKET_B)
 
 # Bucket B gets the SAME timeout budget on the retry as attempt 1 - not a
 # shorter one. This is deliberate: a 5xx/409 response comes back quickly (it
@@ -471,7 +513,7 @@ def generate_ai_response(
                     attempt, elapsed, mode, board, user_class
                 )
                 return QUOTA_EXHAUSTED_ERROR
-            if e.code in TRANSIENT_RETRYABLE_CLIENT_HTTP_CODES and attempt < MAX_ATTEMPTS:
+            if e.code in TRANSIENT_RETRYABLE_CLIENT_HTTP_CODES and attempt < MAX_ATTEMPTS_BUCKET_B:
                 # Bucket B (409 Aborted-equivalent).
                 retry_delay = random.uniform(
                     RETRY_DELAY_BASE_SECONDS - RETRY_DELAY_JITTER_SECONDS,
@@ -480,7 +522,7 @@ def generate_ai_response(
                 logger.warning(
                     "generate_ai_response transient provider error code=%s attempt=%d/%d timeout=%ds "
                     "elapsed=%.3fs (mode=%s, board=%s, user_class=%s): %s - retrying in %.2fs",
-                    e.code, attempt, MAX_ATTEMPTS, attempt_timeout, elapsed,
+                    e.code, attempt, MAX_ATTEMPTS_BUCKET_B, attempt_timeout, elapsed,
                     mode, board, user_class, e.status, retry_delay
                 )
                 time.sleep(retry_delay)
@@ -489,14 +531,14 @@ def generate_ai_response(
             # is a programming/config error, not something a retry fixes.
             logger.exception(
                 "generate_ai_response client error code=%s attempt=%d/%d elapsed=%.3fs (mode=%s, board=%s, user_class=%s)",
-                e.code, attempt, MAX_ATTEMPTS, elapsed, mode, board, user_class
+                e.code, attempt, MAX_ATTEMPTS_BUCKET_B, elapsed, mode, board, user_class
             )
             return GENERIC_CHAT_ERROR
 
         except genai_errors.ServerError as e:
             # Bucket B: genuine transient provider failure (5xx).
             elapsed = time.perf_counter() - t_attempt_start
-            if attempt < MAX_ATTEMPTS:
+            if attempt < MAX_ATTEMPTS_BUCKET_B:
                 retry_delay = random.uniform(
                     RETRY_DELAY_BASE_SECONDS - RETRY_DELAY_JITTER_SECONDS,
                     RETRY_DELAY_BASE_SECONDS + RETRY_DELAY_JITTER_SECONDS,
@@ -504,33 +546,36 @@ def generate_ai_response(
                 logger.warning(
                     "generate_ai_response transient provider error code=%s attempt=%d/%d timeout=%ds "
                     "elapsed=%.3fs (mode=%s, board=%s, user_class=%s): %s - retrying in %.2fs",
-                    e.code, attempt, MAX_ATTEMPTS, attempt_timeout, elapsed,
+                    e.code, attempt, MAX_ATTEMPTS_BUCKET_B, attempt_timeout, elapsed,
                     mode, board, user_class, e.status, retry_delay
                 )
                 time.sleep(retry_delay)
                 continue
             logger.exception(
                 "generate_ai_response failed after %d attempts with server error code=%s (mode=%s, board=%s, user_class=%s)",
-                MAX_ATTEMPTS, e.code, mode, board, user_class
+                MAX_ATTEMPTS_BUCKET_B, e.code, mode, board, user_class
             )
             return GENERIC_CHAT_ERROR
 
         except (httpx.TimeoutException, httpx.ConnectError) as e:
             # Bucket A: OUR OWN client-side deadline fired (or we could not
-            # connect). NOT retried by default - see RETRY_ON_CLIENT_TIMEOUT
-            # comment above for why, and how to change this.
+            # connect). Retried at most once - see RETRY_ON_CLIENT_TIMEOUT
+            # and MAX_ATTEMPTS_BUCKET_A comments above for why this ceiling
+            # is intentionally kept lower than bucket B's.
             elapsed = time.perf_counter() - t_attempt_start
-            if RETRY_ON_CLIENT_TIMEOUT and attempt < MAX_ATTEMPTS:
+            if RETRY_ON_CLIENT_TIMEOUT and attempt < MAX_ATTEMPTS_BUCKET_A:
                 logger.warning(
                     "generate_ai_response client deadline exceeded attempt=%d/%d timeout=%ds elapsed=%.3fs "
                     "(mode=%s, board=%s, user_class=%s): %s - retrying (RETRY_ON_CLIENT_TIMEOUT=True)",
-                    attempt, MAX_ATTEMPTS, attempt_timeout, elapsed, mode, board, user_class, type(e).__name__
+                    attempt, MAX_ATTEMPTS_BUCKET_A, attempt_timeout, elapsed, mode, board, user_class, type(e).__name__
                 )
                 continue
             logger.exception(
                 "generate_ai_response client deadline exceeded attempt=%d/%d timeout=%ds elapsed=%.3fs "
-                "(mode=%s, board=%s, user_class=%s) - not retried by design (RETRY_ON_CLIENT_TIMEOUT=False)",
-                attempt, MAX_ATTEMPTS, attempt_timeout, elapsed, mode, board, user_class
+                "(mode=%s, board=%s, user_class=%s) - not retried further (RETRY_ON_CLIENT_TIMEOUT=%s, "
+                "MAX_ATTEMPTS_BUCKET_A=%d)",
+                attempt, MAX_ATTEMPTS_BUCKET_A, attempt_timeout, elapsed, mode, board, user_class,
+                RETRY_ON_CLIENT_TIMEOUT, MAX_ATTEMPTS_BUCKET_A
             )
             return GENERIC_CHAT_ERROR
 
