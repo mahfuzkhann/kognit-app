@@ -173,6 +173,92 @@ class TestHappyPath:
         assert "UPLOADED PDF DOCUMENT CONTENT CONTEXT" in config.system_instruction
         assert "Chapter 3 is about..." in config.system_instruction
 
+    def test_pdf_context_under_budget_is_not_truncated_or_flagged(self, mock_client):
+        """A normal-sized PDF (well under MAX_PDF_CONTEXT_CHARS) must be sent
+        in full, with no truncation note added - regression guard against
+        the old unconditional pdf_context[:10000] slice."""
+        chat = MagicMock()
+        chat.send_message.return_value = _make_response("Based on the PDF...")
+        mock_client.chats.create.return_value = chat
+
+        pdf_text = "A" * 50_000  # comfortably under the 300,000-char budget
+        ai_engine.generate_ai_response(prompt="Summarize", mode="direct", pdf_context=pdf_text)
+
+        config = mock_client.chats.create.call_args.kwargs["config"]
+        assert pdf_text in config.system_instruction
+        assert "too long to include in full" not in config.system_instruction
+
+    def test_pdf_context_over_old_10000_char_limit_no_longer_truncated(self, mock_client):
+        """Direct regression test for the confirmed bug: a document longer
+        than the OLD 10,000-char cutoff (but still under the new budget) must
+        now be passed through in full instead of being cut off."""
+        chat = MagicMock()
+        chat.send_message.return_value = _make_response("Based on the PDF...")
+        mock_client.chats.create.return_value = chat
+
+        pdf_text = "B" * 50_000
+        marker = "IMPORTANT_FACT_NEAR_THE_END"
+        pdf_text_with_marker = pdf_text[:40_000] + marker + pdf_text[40_000:]
+
+        ai_engine.generate_ai_response(prompt="What does it say near the end?", mode="direct", pdf_context=pdf_text_with_marker)
+
+        config = mock_client.chats.create.call_args.kwargs["config"]
+        # Old behavior (pdf_context[:10000]) would have cut this off entirely.
+        assert marker in config.system_instruction
+
+    def test_pdf_context_over_new_budget_is_truncated_and_flagged_to_model(self, mock_client, caplog):
+        """A document that genuinely exceeds the new budget must still be
+        truncated (this is a fixed-budget cap, not retrieval), but the model
+        must be told this happened so it can be honest with the student, and
+        the truncation must be logged server-side."""
+        chat = MagicMock()
+        chat.send_message.return_value = _make_response("Based on the PDF...")
+        mock_client.chats.create.return_value = chat
+
+        oversized_pdf = "C" * (ai_engine.MAX_PDF_CONTEXT_CHARS + 5_000)
+
+        with caplog.at_level("WARNING", logger="kognit.ai_engine"):
+            ai_engine.generate_ai_response(prompt="Summarize everything", mode="direct", pdf_context=oversized_pdf)
+
+        config = mock_client.chats.create.call_args.kwargs["config"]
+
+        # Only the first MAX_PDF_CONTEXT_CHARS characters should be present.
+        sent_pdf_section = config.system_instruction.split("UPLOADED PDF DOCUMENT CONTENT CONTEXT]:\n")[1]
+        assert sent_pdf_section.startswith("C" * ai_engine.MAX_PDF_CONTEXT_CHARS)
+        assert sent_pdf_section.count("C") == ai_engine.MAX_PDF_CONTEXT_CHARS
+
+        # Model must be told the document was cut off.
+        assert "too long to include in full" in config.system_instruction
+
+        # Truncation must be observable server-side (was previously silent).
+        assert any("PDF context truncated" in record.message for record in caplog.records)
+
+    def test_pdf_context_exactly_at_budget_is_not_flagged_as_truncated(self, mock_client):
+        """Boundary check: a document exactly MAX_PDF_CONTEXT_CHARS long is
+        not truncated and must not trigger the truncation note."""
+        chat = MagicMock()
+        chat.send_message.return_value = _make_response("Based on the PDF...")
+        mock_client.chats.create.return_value = chat
+
+        exact_budget_pdf = "D" * ai_engine.MAX_PDF_CONTEXT_CHARS
+        ai_engine.generate_ai_response(prompt="Summarize", mode="direct", pdf_context=exact_budget_pdf)
+
+        config = mock_client.chats.create.call_args.kwargs["config"]
+        assert "too long to include in full" not in config.system_instruction
+
+    def test_no_pdf_context_has_no_pdf_section_or_truncation_note(self, mock_client):
+        """Regression guard: chats without a PDF must remain completely
+        unaffected by this change."""
+        chat = MagicMock()
+        chat.send_message.return_value = _make_response("Sure, here's the answer.")
+        mock_client.chats.create.return_value = chat
+
+        ai_engine.generate_ai_response(prompt="What is 2+2?", mode="direct")
+
+        config = mock_client.chats.create.call_args.kwargs["config"]
+        assert "UPLOADED PDF DOCUMENT CONTENT CONTEXT" not in config.system_instruction
+        assert "too long to include in full" not in config.system_instruction
+
 
 # ---------------------------------------------------------------------------
 # Thinking-level / timeout / single-retry-authority configuration

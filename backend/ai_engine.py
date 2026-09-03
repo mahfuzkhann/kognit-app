@@ -83,6 +83,36 @@ IMAGE_DECODE_ERROR = (
 )
 
 # ---------------------------------------------------------------------------
+# PDF CONTEXT BUDGET (Phase 1 fix: confirmed truncation problem).
+#
+# Previously a bare `pdf_context[:10000]` slice with the comment "Truncate if
+# too long for safety" - a leftover from the pre-migration google-generativeai
+# code, with no connection to what gemini-3.6-flash actually supports. Per
+# Google's published model card (ai.google.dev/gemini-api/docs/models/
+# gemini-3.6-flash, confirmed July 2026), gemini-3.6-flash has a 1,048,576-
+# token INPUT context window and up to 65,536 output tokens - the old 10,000-
+# char (~2,500-token) ceiling was using roughly 0.25% of the model's real
+# input budget, truncating mid-document on almost any real textbook chapter.
+#
+# MAX_PDF_CONTEXT_CHARS raises this to a size that comfortably covers a
+# realistic student upload (a chapter/worksheet, not an entire textbook)
+# while staying far inside the model's real limit, leaving headroom for:
+#   - the system instruction itself (a few thousand tokens)
+#   - conversation history (main.py caps this at MAX_HISTORY_MESSAGES *
+#     MAX_HISTORY_MESSAGE_CHARS = 20 * 4000 = 80,000 chars worst case)
+#   - the model's own output budget (up to 65,536 tokens)
+# even under a deliberately conservative ~1-token-per-character estimate for
+# dense Bangla script (Bangla tokenizes far less efficiently than English's
+# ~4 chars/token, so this does not assume English-like headroom).
+#
+# This is still a fixed-budget truncation, NOT retrieval - it does not
+# chunk, rank, or select the most relevant section; long documents past this
+# limit still lose their tail. True retrieval (chunking + embeddings so the
+# RIGHT section is included regardless of document length) is separate,
+# larger-scope work and is intentionally NOT implemented here.
+MAX_PDF_CONTEXT_CHARS = 300_000
+
+# ---------------------------------------------------------------------------
 # THINKING LEVEL CONFIGURATION
 #
 # gemini-3.6-flash defaults to dynamic ("medium") thinking if left
@@ -316,7 +346,36 @@ def generate_ai_response(
     )
 
     if pdf_context:
-        system_instruction += f"\n\n[UPLOADED PDF DOCUMENT CONTENT CONTEXT]:\n{pdf_context[:10000]}" # Truncate if too long for safety
+        pdf_total_chars = len(pdf_context)
+        pdf_context_used = pdf_context[:MAX_PDF_CONTEXT_CHARS]
+        pdf_was_truncated = pdf_total_chars > MAX_PDF_CONTEXT_CHARS
+
+        if pdf_was_truncated:
+            # Was previously silent (no log, no student-facing signal at all).
+            # Logged so real truncation frequency/size is now measurable
+            # instead of assumed.
+            logger.warning(
+                "generate_ai_response: PDF context truncated total_chars=%d "
+                "used_chars=%d limit=%d (mode=%s, board=%s, user_class=%s)",
+                pdf_total_chars, MAX_PDF_CONTEXT_CHARS, MAX_PDF_CONTEXT_CHARS,
+                mode, board, user_class
+            )
+
+        system_instruction += f"\n\n[UPLOADED PDF DOCUMENT CONTENT CONTEXT]:\n{pdf_context_used}"
+
+        if pdf_was_truncated:
+            # Previously the model silently answered as if it had seen the
+            # whole document, with no way for the student to know part of it
+            # was missing. This does not fix incomplete context, but stops
+            # Kognit from acting like it isn't incomplete.
+            system_instruction += (
+                "\n\n[NOTE: The document above was too long to include in full - only "
+                "the beginning portion is shown; the rest of the document is NOT visible "
+                "to you. If the student's question may depend on content that could be "
+                "further into the document (a later chapter, page, or section), say so "
+                "plainly instead of guessing, and ask them to specify or re-upload just "
+                "that part.]"
+            )
 
     if mode == "socratic":
         system_instruction += " DO NOT give direct answers immediately. Guide the student step-by-step using helpful questions!"
