@@ -403,18 +403,22 @@ class TestRetryPolicy:
         assert result == ai_engine.BLOCKED_RESPONSE_ERROR
         assert mock_client.chats.create.call_count == 1
 
-    def test_bucket_a_client_deadline_exceeded_not_retried_by_default(self, mock_client):
+    def test_bucket_a_client_deadline_exceeded_retried_once_then_fails(self, mock_client):
+        # RETRY_ON_CLIENT_TIMEOUT was flipped True -> False after the BM-01
+        # benchmark incident (see ai_engine.py comment on this constant), so
+        # a persistent client-side timeout is now retried exactly once
+        # (bucket A) before giving up - not left unretried on attempt 1.
         chat = MagicMock()
         chat.send_message.side_effect = httpx.TimeoutException("deadline exceeded")
         mock_client.chats.create.return_value = chat
 
-        assert ai_engine.RETRY_ON_CLIENT_TIMEOUT is False  # confirms the documented default
+        assert ai_engine.RETRY_ON_CLIENT_TIMEOUT is True  # confirms the current documented default
         result = ai_engine.generate_ai_response(prompt="hi", mode="direct")
 
         assert result == ai_engine.GENERIC_CHAT_ERROR
-        assert mock_client.chats.create.call_count == 1
+        assert mock_client.chats.create.call_count == 2
 
-    def test_bucket_a_connect_error_not_retried_by_default(self, mock_client):
+    def test_bucket_a_connect_error_retried_once_then_fails(self, mock_client):
         chat = MagicMock()
         chat.send_message.side_effect = httpx.ConnectError("connection failed")
         mock_client.chats.create.return_value = chat
@@ -422,7 +426,7 @@ class TestRetryPolicy:
         result = ai_engine.generate_ai_response(prompt="hi", mode="direct")
 
         assert result == ai_engine.GENERIC_CHAT_ERROR
-        assert mock_client.chats.create.call_count == 1
+        assert mock_client.chats.create.call_count == 2
 
     def test_bucket_e_non_retryable_client_error_400(self, mock_client):
         chat = MagicMock()
