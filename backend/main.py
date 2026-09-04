@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import time
+import uuid
 import httpx
 from fastapi import FastAPI, Request, Form, File, UploadFile, Header, HTTPException, Depends
 from fastapi.concurrency import run_in_threadpool
@@ -10,7 +11,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from backend.ai_engine import generate_ai_response, generate_quiz_questions, generate_chat_title
 from backend.rag_engine import extract_text_from_pdf, PDFExtractionError
-from typing import Optional
+from backend.database import save_quiz_attempt, DatabaseError
+from typing import Optional, Tuple
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("kognit.main")
@@ -83,11 +85,54 @@ SUPABASE_AUTH_TIMEOUT_SECONDS = 10
 # ---------------------------------------------------------------------------
 active_pdf_contexts = {}
 
+# ---------------------------------------------------------------------------
+# In-memory quiz definition store (database-foundation Phase 1).
+#
+# Same MVP pattern/tradeoffs as active_pdf_contexts above: server restart
+# loses any in-flight (generated-but-not-yet-submitted) quiz, and there is
+# no TTL/eviction yet, so this grows unboundedly at real scale. Flagged as
+# the same known technical debt as active_pdf_contexts - not fixed here.
+#
+# Why this exists at all: /api/quiz/generate previously sent the full quiz
+# (including correct_index) to the browser and NEVER kept a server-side
+# copy - scoring happened entirely client-side, in static/js/app.js's
+# showQuizResults(). That is fine for an ephemeral, un-persisted quiz, but
+# it means there was nothing authoritative on the server to grade a
+# submission against. This store is that authoritative copy: created at
+# generation time, consumed (graded + persisted + deleted) at submission
+# time by /api/quiz/submit.
+#
+#   active_quiz_definitions = {
+#       quiz_id: {
+#           "user_id": str,       # verified JWT owner - only they may submit it
+#           "board": str, "user_class": str, "subject": str, "topic": str,
+#           "questions": list,     # backend.ai_engine.validate_quiz_questions() output
+#           "submitted": bool,     # duplicate-submission guard, see quiz_submit_endpoint
+#           "created_at": float,   # time.time(), unused today - kept for future TTL work
+#       },
+#       ...
+#   }
+# ---------------------------------------------------------------------------
+active_quiz_definitions = {}
 
-async def get_current_user_id(authorization: Optional[str] = Header(None)) -> str:
+# Defensive ceiling on how many answers /api/quiz/submit will process in one
+# request. The UI only ever offers 5/10/15-question quizzes (see
+# templates/index.html #quiz-count-select), so this is generous headroom,
+# not a real limit on legitimate use - it exists purely so a forged payload
+# can't force this endpoint to loop over an arbitrarily large list.
+MAX_QUIZ_ANSWERS = 50
+
+
+async def _verify_supabase_token(authorization: Optional[str]) -> Tuple[str, str]:
     """
-    FastAPI dependency: verifies the caller's Supabase access token and
-    returns the authenticated Supabase user id.
+    Verifies a Supabase access token against Supabase's own Auth REST API
+    and returns (user_id, token).
+
+    Shared implementation behind both get_current_user_id() and
+    get_current_user_and_token() below, so every protected endpoint keeps
+    making exactly one Supabase Auth API call per request regardless of
+    which dependency it uses - this refactor does not add a second network
+    round trip anywhere.
 
     Never trust a client-supplied user_id anywhere in this file - the only
     trusted source of user identity in this backend is the return value of
@@ -130,7 +175,30 @@ async def get_current_user_id(authorization: Optional[str] = Header(None)) -> st
         logger.error("Supabase /auth/v1/user returned an unexpected payload shape")
         raise HTTPException(status_code=401, detail="Invalid or expired session. Please log in again.")
 
+    return user_id, token
+
+
+async def get_current_user_id(authorization: Optional[str] = Header(None)) -> str:
+    """
+    FastAPI dependency: verifies the caller's Supabase access token and
+    returns the authenticated Supabase user id. Unchanged behavior/
+    signature from before this refactor - existing endpoints using this
+    dependency (upload_pdf, clear_pdf_endpoint, chat_endpoint,
+    chat_title_endpoint, quiz_generate_endpoint) are unaffected.
+    """
+    user_id, _token = await _verify_supabase_token(authorization)
     return user_id
+
+
+async def get_current_user_and_token(authorization: Optional[str] = Header(None)) -> Tuple[str, str]:
+    """
+    FastAPI dependency: verifies the caller's Supabase access token and
+    returns (user_id, token). Used by quiz_submit_endpoint, which needs the
+    raw token to forward to Supabase's PostgREST API (see
+    backend/database.py:save_quiz_attempt) so the insert runs under RLS as
+    this specific student, not under any backend-held credential.
+    """
+    return await _verify_supabase_token(authorization)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -363,4 +431,129 @@ async def quiz_generate_endpoint(
         topic=topic,
         count=count
     )
-    return {"questions": questions}
+
+    if not questions:
+        # Unchanged behavior for this failure path - the frontend already
+        # handles an empty "questions" list as "Failed to generate quiz."
+        # (see generateAndStartQuiz in static/js/app.js). quiz_id is simply
+        # absent/None; nothing to persist for a quiz that doesn't exist.
+        return {"questions": [], "quiz_id": None}
+
+    # DATABASE FOUNDATION (Phase 1): keep the authoritative, validated quiz
+    # definition server-side, keyed by a fresh quiz_id, so /api/quiz/submit
+    # has something trustworthy to grade against later. See
+    # active_quiz_definitions comment above for the full rationale.
+    quiz_id = uuid.uuid4().hex
+    active_quiz_definitions[quiz_id] = {
+        "user_id": user_id,
+        "board": board,
+        "user_class": user_class,
+        "subject": subject,
+        "topic": topic,
+        "questions": questions,
+        "submitted": False,
+        "created_at": time.time(),
+    }
+
+    return {"questions": questions, "quiz_id": quiz_id}
+
+
+@app.post("/api/quiz/submit")
+async def quiz_submit_endpoint(
+    quiz_id: str = Form(...),
+    answers: str = Form(...),
+    user_and_token: Tuple[str, str] = Depends(get_current_user_and_token),
+):
+    """
+    Persists one completed quiz attempt.
+
+    SCORE INTEGRITY: the client supplies ONLY which option index it picked
+    per question (`answers`, a JSON array). It never supplies a score or
+    per-question correctness - both are computed server-side in
+    backend/database.py:save_quiz_attempt, from the quiz definition this
+    endpoint already has stored in active_quiz_definitions (created by
+    quiz_generate_endpoint above, from Gemini output that has already been
+    schema-validated by backend.ai_engine.validate_quiz_questions). There
+    is nothing client-controlled anywhere in the grading path.
+
+    DUPLICATE SUBMISSION: a quiz definition can be submitted at most once.
+    The "submitted" flag is set BEFORE the (slower) database call so two
+    near-simultaneous submit requests for the same quiz_id can't both pass
+    the check and double-insert - the second one gets HTTP 409. If the
+    database write itself fails, the flag is reset so the student can
+    retry the same quiz_id rather than losing their answers to a transient
+    DB error.
+    """
+    user_id, user_token = user_and_token
+
+    definition = active_quiz_definitions.get(quiz_id)
+    if not definition or definition["user_id"] != user_id:
+        # Covers: unknown quiz_id, a quiz_id generated before a server
+        # restart (active_quiz_definitions is in-memory - see comment
+        # above), and a client attempting to submit another user's
+        # quiz_id. All three get the same generic response so a client
+        # cannot use this endpoint to probe whether a given quiz_id
+        # belongs to someone else.
+        raise HTTPException(
+            status_code=404,
+            detail="This quiz could not be found. It may have expired - please generate a new one.",
+        )
+
+    if definition["submitted"]:
+        raise HTTPException(status_code=409, detail="This quiz has already been submitted.")
+
+    try:
+        parsed_answers = json.loads(answers)
+    except (json.JSONDecodeError, TypeError):
+        raise HTTPException(status_code=400, detail="Malformed answers payload.")
+
+    questions = definition["questions"]
+    if not isinstance(parsed_answers, list) or len(parsed_answers) != len(questions):
+        raise HTTPException(status_code=400, detail="Answers do not match this quiz's question count.")
+
+    if len(parsed_answers) > MAX_QUIZ_ANSWERS:
+        raise HTTPException(status_code=400, detail="Too many answers submitted.")
+
+    validated_answers = []
+    for a in parsed_answers:
+        if a is None:
+            validated_answers.append(None)
+        elif isinstance(a, bool):
+            # bool is a subclass of int in Python - reject explicitly so
+            # `true`/`false` in the JSON can't silently be treated as
+            # option index 1/0.
+            raise HTTPException(status_code=400, detail="Malformed answer value.")
+        elif isinstance(a, int):
+            validated_answers.append(a)
+        else:
+            raise HTTPException(status_code=400, detail="Malformed answer value.")
+
+    definition["submitted"] = True
+    try:
+        result = await save_quiz_attempt(
+            user_token=user_token,
+            user_id=user_id,
+            board=definition["board"],
+            user_class=definition["user_class"],
+            subject=definition["subject"],
+            topic=definition["topic"],
+            questions=questions,
+            selected_answers=validated_answers,
+        )
+    except DatabaseError:
+        definition["submitted"] = False  # allow the student to retry
+        logger.exception(
+            "quiz_submit_endpoint: failed to persist quiz attempt (user_id=%s, quiz_id=%s)",
+            user_id, quiz_id,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Could not save your quiz result right now. Please try submitting again.",
+        )
+
+    # Only remove the definition after a confirmed successful persist - if
+    # save_quiz_attempt raised, the definition is kept (with submitted
+    # reset to False above) so a retry of the exact same quiz_id works.
+    active_quiz_definitions.pop(quiz_id, None)
+
+    return {"status": "success", **result}

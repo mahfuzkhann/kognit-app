@@ -537,14 +537,18 @@ class TestQuizGeneration:
             text='[{"id":1,"question":"2+2?","options":["3","4","5","6"],"correct_index":1,"explanation":"basic addition"}]'
         )
         result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Math", "Addition", count=1)
-        assert result == [{"id": 1, "question": "2+2?", "options": ["3", "4", "5", "6"], "correct_index": 1, "explanation": "basic addition"}]
+        # NOTE: "id" is intentionally dropped by validate_quiz_questions() -
+        # it was never used by the frontend (renders by array position) and
+        # is not the source of truth for the server-side quiz definition
+        # store used for grading (backend/main.py: active_quiz_definitions).
+        assert result == [{"question": "2+2?", "options": ["3", "4", "5", "6"], "correct_index": 1, "explanation": "basic addition"}]
 
     def test_strips_json_code_fence(self, mock_client):
         mock_client.models.generate_content.return_value = _make_response(
             text='```json\n[{"id":1,"question":"Q","options":["A","B","C","D"],"correct_index":0,"explanation":"E"}]\n```'
         )
         result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
-        assert len(result) == 1 and result[0]["id"] == 1
+        assert len(result) == 1 and result[0]["question"] == "Q"
 
     def test_strips_plain_code_fence(self, mock_client):
         mock_client.models.generate_content.return_value = _make_response(
@@ -567,6 +571,93 @@ class TestQuizGeneration:
         mock_client.models.generate_content.return_value = _make_response(text=None)
         result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
         assert result == []
+
+    # -- validate_quiz_questions() schema enforcement (Phase 1 addition) --
+
+    def test_correct_index_out_of_range_is_dropped(self, mock_client):
+        mock_client.models.generate_content.return_value = _make_response(
+            text='[{"question":"Q","options":["A","B"],"correct_index":5,"explanation":"E"}]'
+        )
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        assert result == []
+
+    def test_correct_index_bool_is_dropped(self, mock_client):
+        # bool is an int subclass in Python - `true` must not be silently
+        # treated as index 1.
+        mock_client.models.generate_content.return_value = _make_response(
+            text='[{"question":"Q","options":["A","B"],"correct_index":true,"explanation":"E"}]'
+        )
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        assert result == []
+
+    def test_single_option_question_is_dropped(self, mock_client):
+        mock_client.models.generate_content.return_value = _make_response(
+            text='[{"question":"Q","options":["A"],"correct_index":0,"explanation":"E"}]'
+        )
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        assert result == []
+
+    def test_missing_question_text_is_dropped(self, mock_client):
+        mock_client.models.generate_content.return_value = _make_response(
+            text='[{"options":["A","B"],"correct_index":0,"explanation":"E"}]'
+        )
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        assert result == []
+
+    def test_missing_explanation_defaults_to_empty_string(self, mock_client):
+        mock_client.models.generate_content.return_value = _make_response(
+            text='[{"question":"Q","options":["A","B"],"correct_index":0}]'
+        )
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        assert len(result) == 1 and result[0]["explanation"] == ""
+
+    def test_mixed_valid_and_invalid_entries_keeps_only_valid(self, mock_client):
+        mock_client.models.generate_content.return_value = _make_response(
+            text=(
+                '[{"question":"Good Q","options":["A","B"],"correct_index":0,"explanation":"E"},'
+                '{"question":"Bad Q","options":["A"],"correct_index":0,"explanation":"E"}]'
+            )
+        )
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=2)
+        assert len(result) == 1 and result[0]["question"] == "Good Q"
+
+    def test_all_entries_invalid_returns_empty_list(self, mock_client):
+        mock_client.models.generate_content.return_value = _make_response(
+            text='[{"question":"Bad Q","options":["A"],"correct_index":0,"explanation":"E"}]'
+        )
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        assert result == []
+
+
+class TestValidateQuizQuestions:
+    """Direct unit tests of validate_quiz_questions(), independent of the
+    Gemini call - covers shapes generate_quiz_questions' own tests above
+    don't exercise directly (non-list input, non-dict entries)."""
+
+    def test_non_list_input_returns_empty_list(self):
+        assert ai_engine.validate_quiz_questions({"not": "a list"}) == []
+        assert ai_engine.validate_quiz_questions(None) == []
+        assert ai_engine.validate_quiz_questions("also not a list") == []
+
+    def test_non_dict_entries_are_dropped(self):
+        assert ai_engine.validate_quiz_questions(["not a dict", 123, None]) == []
+
+    def test_options_not_a_list_is_dropped(self):
+        entries = [{"question": "Q", "options": "A,B,C", "correct_index": 0}]
+        assert ai_engine.validate_quiz_questions(entries) == []
+
+    def test_option_with_non_string_entry_is_dropped(self):
+        entries = [{"question": "Q", "options": ["A", 2], "correct_index": 0}]
+        assert ai_engine.validate_quiz_questions(entries) == []
+
+    def test_whitespace_only_question_is_dropped(self):
+        entries = [{"question": "   ", "options": ["A", "B"], "correct_index": 0}]
+        assert ai_engine.validate_quiz_questions(entries) == []
+
+    def test_strips_whitespace_from_question_and_options(self):
+        entries = [{"question": "  Q  ", "options": [" A ", " B "], "correct_index": 0, "explanation": "  E  "}]
+        result = ai_engine.validate_quiz_questions(entries)
+        assert result == [{"question": "Q", "options": ["A", "B"], "correct_index": 0, "explanation": "E"}]
 
 
 # ---------------------------------------------------------------------------

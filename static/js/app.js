@@ -110,6 +110,12 @@ let isPDFLoaded = false;
 let quizQuestions = [];
 let currentQuizIdx = 0;
 let userQuizAnswers = [];
+// DATABASE FOUNDATION (Phase 1): the quiz_id returned by /api/quiz/generate,
+// needed by submitQuizAttempt() to tell the backend which server-held quiz
+// definition to grade against. null whenever there is no active,
+// submittable quiz (before generation, or after a successful/attempted
+// submission clears it in resetQuizModal()).
+let currentQuizId = null;
 
 document.addEventListener("DOMContentLoaded", async () => {
     // Active Session Check
@@ -2636,6 +2642,12 @@ function resetQuizModal() {
     quizQuestions = [];
     currentQuizIdx = 0;
     userQuizAnswers = [];
+    currentQuizId = null;
+    const saveStatus = document.getElementById("quiz-save-status");
+    if (saveStatus) {
+        saveStatus.textContent = "";
+        saveStatus.className = "quiz-save-status hidden";
+    }
 }
 
 window.generateAndStartQuiz = async function() {
@@ -2685,6 +2697,11 @@ window.generateAndStartQuiz = async function() {
             quizQuestions = data.questions;
             currentQuizIdx = 0;
             userQuizAnswers = new Array(quizQuestions.length).fill(null);
+            // DATABASE FOUNDATION (Phase 1): quiz_id identifies the
+            // server-held definition submitQuizAttempt() will grade
+            // against. May be null in a legacy/degraded-server response
+            // shape - submitQuizAttempt() below handles that gracefully.
+            currentQuizId = data.quiz_id || null;
 
             document.getElementById("quiz-setup-view").classList.add("hidden");
             document.getElementById("quiz-active-view").classList.remove("hidden");
@@ -2743,6 +2760,12 @@ function showQuizResults() {
     document.getElementById("quiz-active-view").classList.add("hidden");
     document.getElementById("quiz-result-view").classList.remove("hidden");
 
+    // UNCHANGED: this client-side score/rendering is kept exactly as it
+    // was - it's what the student sees instantly, with no round trip.
+    // Persistence (submitQuizAttempt below) is purely additive: it
+    // separately asks the backend to grade+save the same answers against
+    // its own server-held quiz definition and does not affect what's
+    // rendered here either way.
     let score = 0;
     quizQuestions.forEach((q, i) => {
         if (userQuizAnswers[i] === q.correct_index) score++;
@@ -2762,4 +2785,75 @@ function showQuizResults() {
             </div>
         `;
     }).join('');
+
+    submitQuizAttempt();
+}
+
+// DATABASE FOUNDATION (Phase 1). Fires once, right after the (already
+// working, unchanged) client-side result is shown. Never blocks or alters
+// that display - this only updates the small #quiz-save-status line under
+// the score with a save/failure indicator. The score shown to the student
+// above is NOT replaced by whatever the backend returns; both are computed
+// independently (client-side here for instant display, server-side in
+// backend/database.py:save_quiz_attempt for the persisted, authoritative
+// record) and should normally agree.
+async function submitQuizAttempt() {
+    const statusEl = document.getElementById("quiz-save-status");
+    if (!statusEl) return;
+
+    if (!currentQuizId) {
+        // Nothing to submit against (e.g. an older/degraded generate
+        // response without a quiz_id) - be honest about it rather than
+        // silently doing nothing.
+        statusEl.textContent = "⚠️ This result was not saved to your history.";
+        statusEl.className = "quiz-save-status warning";
+        return;
+    }
+
+    statusEl.textContent = "Saving your result...";
+    statusEl.className = "quiz-save-status";
+
+    const { data: { session } } = await supabaseClient.auth.getSession();
+    if (!session) {
+        // Session expired sometime during the quiz - the result the
+        // student just saw is still theirs, it just won't be saved.
+        statusEl.textContent = "⚠️ Please log in again to save this result.";
+        statusEl.className = "quiz-save-status warning";
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append("quiz_id", currentQuizId);
+    formData.append("answers", JSON.stringify(userQuizAnswers));
+
+    try {
+        const res = await fetch("/api/quiz/submit", {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${session.access_token}` },
+            body: formData,
+        });
+
+        if (res.ok) {
+            statusEl.textContent = "✅ Result saved.";
+            statusEl.className = "quiz-save-status success";
+            // Consumed server-side (backend/main.py pops it on success) -
+            // clear locally too so a stray re-render can't try to resubmit it.
+            currentQuizId = null;
+        } else if (res.status === 409) {
+            // Already submitted (e.g. a duplicate call) - not an error the
+            // student needs to see as a failure.
+            statusEl.textContent = "✅ Result saved.";
+            statusEl.className = "quiz-save-status success";
+            currentQuizId = null;
+        } else if (res.status === 401) {
+            statusEl.textContent = "⚠️ Please log in again to save this result.";
+            statusEl.className = "quiz-save-status warning";
+        } else {
+            statusEl.textContent = "⚠️ Could not save this result. You can retake the quiz to try again.";
+            statusEl.className = "quiz-save-status warning";
+        }
+    } catch (e) {
+        statusEl.textContent = "⚠️ Could not save this result. You can retake the quiz to try again.";
+        statusEl.className = "quiz-save-status warning";
+    }
 }

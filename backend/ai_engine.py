@@ -592,6 +592,77 @@ def generate_ai_response(
     return GENERIC_CHAT_ERROR
 
 
+# ---------------------------------------------------------------------------
+# QUIZ OUTPUT VALIDATION (Phase 1 addition, quiz-persistence work).
+#
+# Previously generate_quiz_questions() returned Gemini's parsed JSON
+# directly with no schema check at all - any malformed entry (missing
+# correct_index, options not a list, correct_index out of range, etc.)
+# would silently reach the frontend. That was tolerable while the quiz was
+# purely ephemeral/client-side, but the new /api/quiz/submit endpoint
+# (backend/main.py) grades a student's answers by reading
+# question["correct_index"] server-side. A malformed question there is no
+# longer just a rendering glitch - it would break score integrity or throw
+# at grading time. This validation is therefore a direct, in-scope
+# requirement of the persistence feature, not a general-purpose cleanup.
+#
+# Deliberately DROPS the "id" field: it was never used by the frontend
+# (static/js/app.js renders questions by array position, see
+# renderQuizQuestion/showQuizResults) and the new server-side quiz
+# definition store (backend/main.py: active_quiz_definitions) also grades
+# by array position - a model-supplied "id" (which is not guaranteed
+# unique or even present) is not the source of truth for anything.
+# ---------------------------------------------------------------------------
+def validate_quiz_questions(raw_questions) -> list:
+    """
+    Filters `raw_questions` (Gemini's parsed JSON) down to only
+    structurally valid MCQ entries. Never raises - unusable entries are
+    dropped silently (logged at debug level would be noisy per-question;
+    the caller logs if the whole result ends up empty).
+
+    A valid entry requires:
+      - "question": non-empty string
+      - "options": a list of at least 2 non-empty strings
+      - "correct_index": an int, 0 <= correct_index < len(options)
+      - "explanation": optional, coerced to "" if missing/wrong type
+    """
+    if not isinstance(raw_questions, list):
+        return []
+
+    validated = []
+    for q in raw_questions:
+        if not isinstance(q, dict):
+            continue
+
+        question_text = q.get("question")
+        options = q.get("options")
+        correct_index = q.get("correct_index")
+        explanation = q.get("explanation")
+
+        if not isinstance(question_text, str) or not question_text.strip():
+            continue
+        if not isinstance(options, list) or len(options) < 2:
+            continue
+        if not all(isinstance(opt, str) and opt.strip() for opt in options):
+            continue
+        # bool is a subclass of int in Python - reject it explicitly so
+        # `correct_index: true` (unlikely, but possible malformed output)
+        # can't slip through as index 1.
+        if isinstance(correct_index, bool) or not isinstance(correct_index, int):
+            continue
+        if not (0 <= correct_index < len(options)):
+            continue
+
+        validated.append({
+            "question": question_text.strip(),
+            "options": [opt.strip() for opt in options],
+            "correct_index": correct_index,
+            "explanation": explanation.strip() if isinstance(explanation, str) else "",
+        })
+
+    return validated
+
+
 def generate_quiz_questions(board: str, user_class: str, subject: str, topic: str, count: int = 5) -> list:
     system_instruction = (
         f"You are an exam paper creator for {board}, {user_class}, Subject: {subject}.\n"
@@ -628,7 +699,16 @@ def generate_quiz_questions(board: str, user_class: str, subject: str, topic: st
         elif "```" in raw_text:
             raw_text = raw_text.split("```")[1].split("```")[0].strip()
 
-        return json.loads(raw_text)
+        parsed = json.loads(raw_text)
+        validated = validate_quiz_questions(parsed)
+        if not validated:
+            logger.error(
+                "generate_quiz_questions: Gemini output had no valid MCQ entries after "
+                "validation (board=%s, user_class=%s, subject=%s, topic=%s, raw_count=%s)",
+                board, user_class, subject, topic,
+                len(parsed) if isinstance(parsed, list) else "not-a-list"
+            )
+        return validated
     except Exception:
         logger.exception(
             "generate_quiz_questions failed (board=%s, user_class=%s, subject=%s, topic=%s)",
