@@ -628,6 +628,50 @@ class TestQuizGeneration:
         result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
         assert result == []
 
+    # -- P0 fix: bucket-B retry for transient 5xx/409 (504 investigation) --
+
+    def test_504_on_first_attempt_retries_and_succeeds_on_second(self, mock_client):
+        good_response = _make_response(
+            text='[{"question":"2+2?","options":["3","4"],"correct_index":1,"explanation":"math"}]'
+        )
+        mock_client.models.generate_content.side_effect = [
+            _server_error(504, "DEADLINE_EXCEEDED"),
+            good_response,
+        ]
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Math", "Addition", count=1)
+        assert result == [{"question": "2+2?", "options": ["3", "4"], "correct_index": 1, "explanation": "math"}]
+        assert mock_client.models.generate_content.call_count == 2
+
+    def test_504_on_every_attempt_exhausts_retries_and_returns_empty_list(self, mock_client):
+        mock_client.models.generate_content.side_effect = _server_error(504, "DEADLINE_EXCEEDED")
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        assert result == []
+        assert mock_client.models.generate_content.call_count == ai_engine.MAX_ATTEMPTS_BUCKET_B
+
+    def test_429_quota_exhausted_returns_empty_list_without_retry(self, mock_client):
+        mock_client.models.generate_content.side_effect = _client_error(429, "RESOURCE_EXHAUSTED")
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        assert result == []
+        assert mock_client.models.generate_content.call_count == 1
+
+    def test_400_client_error_returns_empty_list_without_retry(self, mock_client):
+        mock_client.models.generate_content.side_effect = _client_error(400, "INVALID_ARGUMENT")
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        assert result == []
+        assert mock_client.models.generate_content.call_count == 1
+
+    def test_409_aborted_is_retried_like_chat_bucket_b(self, mock_client):
+        good_response = _make_response(
+            text='[{"question":"Q","options":["A","B"],"correct_index":0,"explanation":"E"}]'
+        )
+        mock_client.models.generate_content.side_effect = [
+            _client_error(409, "ABORTED"),
+            good_response,
+        ]
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        assert len(result) == 1
+        assert mock_client.models.generate_content.call_count == 2
+
 
 class TestValidateQuizQuestions:
     """Direct unit tests of validate_quiz_questions(), independent of the

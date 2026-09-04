@@ -664,6 +664,29 @@ def validate_quiz_questions(raw_questions) -> list:
 
 
 def generate_quiz_questions(board: str, user_class: str, subject: str, topic: str, count: int = 5) -> list:
+    """
+    P0 RELIABILITY FIX (504 investigation): previously this function made a
+    single Gemini call with a blanket `except Exception: return []` - a
+    transient 5xx (observed: 504 DEADLINE_EXCEEDED from Google's own
+    infrastructure) failed the whole quiz generation immediately, with the
+    only "recovery" being the student manually clicking Generate Quiz
+    again. This reuses the SAME bucket classification and constants
+    already proven for generate_ai_response()'s chat path (bucket B:
+    genuine transient provider 5xx/409 -> retried up to MAX_ATTEMPTS_BUCKET_B
+    with the same jittered delay and same retry timeout budget); it is not
+    a new retry design.
+
+    Scope note (deliberately narrower than chat's bucket set): this only
+    adds bucket B (5xx/409). Client-side deadline handling (bucket A /
+    MAX_ATTEMPTS_BUCKET_A / RETRY_ON_CLIENT_TIMEOUT in generate_ai_response)
+    is NOT reused here - that was a separate, independently-tuned decision
+    for the chat path and was not part of the approved scope for this fix.
+    A client-side timeout here (httpx.TimeoutException/ConnectError) falls
+    through to the generic "unexpected error" handling below and is not
+    retried, matching this task's "unexpected errors -> do not retry"
+    instruction. If real-world data later shows quiz generation also needs
+    bucket-A handling, that is a separate, explicitly-scoped follow-up.
+    """
     system_instruction = (
         f"You are an exam paper creator for {board}, {user_class}, Subject: {subject}.\n"
         f"Generate {count} high-quality Multiple Choice Questions (MCQs) on the topic: '{topic}'.\n"
@@ -679,42 +702,129 @@ def generate_quiz_questions(board: str, user_class: str, subject: str, topic: st
         "]"
     )
 
-    try:
-        config_kwargs = dict(
-            system_instruction=system_instruction,
-            http_options=types.HttpOptions(timeout=_seconds_to_ms(AI_REQUEST_TIMEOUT_SECONDS)),
-        )
-        if QUIZ_THINKING_LEVEL is not None:
-            config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=QUIZ_THINKING_LEVEL)
+    for attempt in range(1, MAX_ATTEMPTS_BUCKET_B + 1):
+        attempt_timeout = AI_REQUEST_TIMEOUT_SECONDS if attempt == 1 else RETRY_REQUEST_TIMEOUT_SECONDS
 
-        response = _client.models.generate_content(
-            model=MODEL_NAME,
-            contents=f"Create {count} MCQ questions on {topic}.",
-            config=types.GenerateContentConfig(**config_kwargs),
-        )
-
-        raw_text = (response.text or "").strip()
-        if "```json" in raw_text:
-            raw_text = raw_text.split("```json")[1].split("```")[0].strip()
-        elif "```" in raw_text:
-            raw_text = raw_text.split("```")[1].split("```")[0].strip()
-
-        parsed = json.loads(raw_text)
-        validated = validate_quiz_questions(parsed)
-        if not validated:
-            logger.error(
-                "generate_quiz_questions: Gemini output had no valid MCQ entries after "
-                "validation (board=%s, user_class=%s, subject=%s, topic=%s, raw_count=%s)",
-                board, user_class, subject, topic,
-                len(parsed) if isinstance(parsed, list) else "not-a-list"
+        try:
+            config_kwargs = dict(
+                system_instruction=system_instruction,
+                http_options=types.HttpOptions(timeout=_seconds_to_ms(attempt_timeout)),
             )
-        return validated
-    except Exception:
-        logger.exception(
-            "generate_quiz_questions failed (board=%s, user_class=%s, subject=%s, topic=%s)",
-            board, user_class, subject, topic
-        )
-        return []
+            if QUIZ_THINKING_LEVEL is not None:
+                config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=QUIZ_THINKING_LEVEL)
+
+            response = _client.models.generate_content(
+                model=MODEL_NAME,
+                contents=f"Create {count} MCQ questions on {topic}.",
+                config=types.GenerateContentConfig(**config_kwargs),
+            )
+
+            raw_text = (response.text or "").strip()
+            if not raw_text:
+                # Blocked/empty response (almost always a safety-filter
+                # block) - not retried, matching generate_ai_response's
+                # bucket D: an identical request would just get blocked
+                # again.
+                logger.warning(
+                    "generate_quiz_questions got a blocked/empty response attempt=%d/%d "
+                    "(board=%s, user_class=%s, subject=%s, topic=%s)",
+                    attempt, MAX_ATTEMPTS_BUCKET_B, board, user_class, subject, topic
+                )
+                return []
+
+            if "```json" in raw_text:
+                raw_text = raw_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in raw_text:
+                raw_text = raw_text.split("```")[1].split("```")[0].strip()
+
+            parsed = json.loads(raw_text)
+            validated = validate_quiz_questions(parsed)
+            if not validated:
+                logger.error(
+                    "generate_quiz_questions: Gemini output had no valid MCQ entries after "
+                    "validation (board=%s, user_class=%s, subject=%s, topic=%s, raw_count=%s)",
+                    board, user_class, subject, topic,
+                    len(parsed) if isinstance(parsed, list) else "not-a-list"
+                )
+            return validated
+
+        except genai_errors.ClientError as e:
+            if e.code == 429:
+                # Bucket C: quota exhaustion. Never retried - quota will
+                # not clear in a few seconds.
+                logger.exception(
+                    "generate_quiz_questions quota exhausted attempt=%d "
+                    "(board=%s, user_class=%s, subject=%s, topic=%s)",
+                    attempt, board, user_class, subject, topic
+                )
+                return []
+            if e.code in TRANSIENT_RETRYABLE_CLIENT_HTTP_CODES and attempt < MAX_ATTEMPTS_BUCKET_B:
+                # Bucket B (409 Aborted-equivalent) - same classification
+                # and constants as generate_ai_response.
+                retry_delay = random.uniform(
+                    RETRY_DELAY_BASE_SECONDS - RETRY_DELAY_JITTER_SECONDS,
+                    RETRY_DELAY_BASE_SECONDS + RETRY_DELAY_JITTER_SECONDS,
+                )
+                logger.warning(
+                    "generate_quiz_questions transient provider error code=%s attempt=%d/%d "
+                    "timeout=%ds (board=%s, user_class=%s, subject=%s, topic=%s): %s - retrying in %.2fs",
+                    e.code, attempt, MAX_ATTEMPTS_BUCKET_B, attempt_timeout,
+                    board, user_class, subject, topic, e.status, retry_delay
+                )
+                time.sleep(retry_delay)
+                continue
+            # Bucket E: any other 4xx (bad request, permission denied, etc.)
+            # is a programming/config error, not something a retry fixes.
+            logger.exception(
+                "generate_quiz_questions client error code=%s attempt=%d/%d "
+                "(board=%s, user_class=%s, subject=%s, topic=%s)",
+                e.code, attempt, MAX_ATTEMPTS_BUCKET_B, board, user_class, subject, topic
+            )
+            return []
+
+        except genai_errors.ServerError as e:
+            # Bucket B: genuine transient provider failure (5xx, including
+            # the 504 DEADLINE_EXCEEDED this fix was written for). Returns
+            # from Google fast (an error response, not a slow success), so
+            # retrying with a full timeout budget does not meaningfully
+            # raise the worst-case wait - same reasoning as chat's bucket B.
+            if attempt < MAX_ATTEMPTS_BUCKET_B:
+                retry_delay = random.uniform(
+                    RETRY_DELAY_BASE_SECONDS - RETRY_DELAY_JITTER_SECONDS,
+                    RETRY_DELAY_BASE_SECONDS + RETRY_DELAY_JITTER_SECONDS,
+                )
+                logger.warning(
+                    "generate_quiz_questions transient provider error code=%s attempt=%d/%d "
+                    "timeout=%ds (board=%s, user_class=%s, subject=%s, topic=%s): %s - retrying in %.2fs",
+                    e.code, attempt, MAX_ATTEMPTS_BUCKET_B, attempt_timeout,
+                    board, user_class, subject, topic, e.status, retry_delay
+                )
+                time.sleep(retry_delay)
+                continue
+            logger.exception(
+                "generate_quiz_questions failed after %d attempts with server error code=%s "
+                "(board=%s, user_class=%s, subject=%s, topic=%s)",
+                MAX_ATTEMPTS_BUCKET_B, e.code, board, user_class, subject, topic
+            )
+            return []
+
+        except Exception:
+            # Bucket E: unexpected error - malformed JSON from the model,
+            # a client-side timeout/connect error, or a genuine programming
+            # error. Not retried: for JSON/format issues an identical
+            # request would likely fail the same way again, and client-side
+            # timeout handling (bucket A in generate_ai_response) was
+            # deliberately not carried over here - see function docstring.
+            logger.exception(
+                "generate_quiz_questions failed unexpectedly attempt=%d/%d "
+                "(board=%s, user_class=%s, subject=%s, topic=%s)",
+                attempt, MAX_ATTEMPTS_BUCKET_B, board, user_class, subject, topic
+            )
+            return []
+
+    # Not reachable (the loop always returns), kept as a defensive fallback
+    # matching the same pattern generate_ai_response uses.
+    return []
 
 
 # ---------------------------------------------------------------------------
