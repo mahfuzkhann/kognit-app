@@ -515,7 +515,7 @@ async def quiz_submit_endpoint(
         raise HTTPException(status_code=400, detail="Too many answers submitted.")
 
     validated_answers = []
-    for a in parsed_answers:
+    for i, a in enumerate(parsed_answers):
         if a is None:
             validated_answers.append(None)
         elif isinstance(a, bool):
@@ -524,6 +524,14 @@ async def quiz_submit_endpoint(
             # option index 1/0.
             raise HTTPException(status_code=400, detail="Malformed answer value.")
         elif isinstance(a, int):
+            # Not a score-integrity issue either way (an out-of-range index
+            # can never equal a valid correct_index, so it always grades as
+            # wrong) - but an unbounded value would still be written verbatim
+            # into quiz_answers.selected_index, corrupting that column for
+            # any future analytics/weak-topic-detection work built on top of
+            # it. Reject at the boundary instead of storing garbage.
+            if not (0 <= a < len(questions[i]["options"])):
+                raise HTTPException(status_code=400, detail="Answer index out of range for this question.")
             validated_answers.append(a)
         else:
             raise HTTPException(status_code=400, detail="Malformed answer value.")

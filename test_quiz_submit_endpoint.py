@@ -120,6 +120,18 @@ class TestQuizSubmitValidation:
         resp = client.post("/api/quiz/submit", data={"quiz_id": "quiz-abc", "answers": '["a", 0]'})
         assert resp.status_code == 400
 
+    def test_out_of_range_answer_index_rejected(self, client):
+        _seed_definition()  # 2 questions, each with exactly 2 options (indices 0-1)
+        _override_auth_as("user-1")
+        resp = client.post("/api/quiz/submit", data={"quiz_id": "quiz-abc", "answers": "[99, 0]"})
+        assert resp.status_code == 400
+
+    def test_negative_answer_index_rejected(self, client):
+        _seed_definition()
+        _override_auth_as("user-1")
+        resp = client.post("/api/quiz/submit", data={"quiz_id": "quiz-abc", "answers": "[-1, 0]"})
+        assert resp.status_code == 400
+
     def test_too_many_answers_rejected(self, client):
         big_questions = [
             {"question": f"Q{i}", "options": ["A", "B"], "correct_index": 0, "explanation": ""}
