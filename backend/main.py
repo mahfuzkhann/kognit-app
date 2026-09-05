@@ -1,8 +1,10 @@
 import json
 import logging
 import os
+import threading
 import time
 import uuid
+from collections import deque
 import httpx
 from fastapi import FastAPI, Request, Form, File, UploadFile, Header, HTTPException, Depends
 from fastapi.concurrency import run_in_threadpool
@@ -201,6 +203,209 @@ async def get_current_user_and_token(authorization: Optional[str] = Header(None)
     return await _verify_supabase_token(authorization)
 
 
+# ---------------------------------------------------------------------------
+# Phase 4: per-user rate limiting for Gemini-consuming endpoints.
+#
+# PROBLEM: /api/chat, /api/chat/title, and /api/quiz/generate all invoke the
+# Gemini API (see backend/ai_engine.py). Nothing previously stopped one
+# authenticated user (or a script using a stolen/replayed valid token) from
+# firing requests as fast as the network allows, which is both a real
+# Gemini/API cost risk and a way one user could degrade the app for
+# everyone else. /api/quiz/submit, /api/pdf/upload, and /api/pdf/clear are
+# deliberately NOT covered here - none of them call Gemini (submit only
+# grades against the already-generated server-held definition and writes
+# to Supabase; upload/clear only touch active_pdf_contexts and PyPDF2).
+#
+# IDENTITY: exactly like every other protected endpoint in this file, the
+# rate-limit bucket key is the VERIFIED Supabase user_id returned by
+# get_current_user_id - never anything client-supplied. See
+# _rate_limited_chat / _rate_limited_chat_title / _rate_limited_quiz_generation
+# below: each is a thin dependency that itself depends on
+# get_current_user_id, so FastAPI resolves/verifies the token exactly once
+# per request (dependency results are cached per-request) and the rate
+# check runs immediately after - strictly before the endpoint body (and
+# therefore strictly before any Gemini call) ever executes.
+#
+# ALGORITHM: sliding-window log. Each (user_id, category) pair owns a
+# deque of the timestamps (time.time() floats) of its recent allowed
+# requests. On every check: drop timestamps older than the category's
+# window from the left of the deque, then allow the request only if fewer
+# than the category's max_requests remain; if allowed, append the current
+# timestamp. This is simple, exact (no fixed-window boundary burst bug),
+# and self-bounding in size per bucket (never holds more than
+# max_requests timestamps).
+#
+# PLAN AWARENESS (no billing implemented): RATE_LIMIT_CONFIG plus
+# _get_rate_limit_for() below are the ONLY place a category's limit is
+# resolved. Every user gets the same beta limit today because
+# _get_rate_limit_for() ignores its user_id argument - but that argument
+# already exists, so a future Free/Paid distinction is a change to the
+# body of that one function (e.g. looking up a plan and branching), not a
+# rewrite of every endpoint or of the check/cleanup logic below it.
+#
+# CONCURRENCY: FastAPI/Uvicorn can process requests concurrently (via
+# asyncio and, for blocking work like the Gemini call, a threadpool - see
+# run_in_threadpool usage below). _rate_limit_lock is a plain
+# threading.Lock guarding only the tiny dict/deque read-modify-write in
+# _check_rate_limit - never anything that awaits or blocks on network I/O.
+# The Gemini call itself always happens after this function has already
+# returned (or raised), fully outside the lock.
+#
+# MEMORY: two cleanup mechanisms, both intentionally cheap.
+#   1. Every _check_rate_limit call already prunes ITS OWN bucket's
+#      expired timestamps before deciding, so an active user's bucket
+#      never holds more than max_requests entries.
+#   2. Every RATE_LIMIT_CLEANUP_INTERVAL checks (across ALL users/
+#      categories combined), _cleanup_idle_buckets() does one full sweep
+#      that prunes expired timestamps from and then deletes any bucket
+#      that is now completely empty. This is what actually bounds total
+#      memory: without it, a user who is rate-limited once and never seen
+#      again would leave a permanently empty-but-present dict entry behind.
+#
+# KNOWN BETA-STAGE LIMITATIONS (documented, not fixed here - out of scope
+# per this phase's brief):
+#   - In-memory only: a process restart silently resets every user's
+#     counters to zero (fail-open, not fail-closed - acceptable for a
+#     beta abuse-protection layer, not acceptable as the sole defense in
+#     a paid/production tier).
+#   - Per-process only: if Kognit is ever deployed with more than one
+#     Uvicorn/Gunicorn worker process, each process holds its own
+#     independent _rate_limit_buckets, so the real effective limit per
+#     user becomes (configured limit) x (number of worker processes).
+#     A future multi-worker production deployment would need shared
+#     state (e.g. Redis) for this to remain a real per-user limit - not
+#     implemented now, per explicit scope instructions for this phase.
+# ---------------------------------------------------------------------------
+
+# (max_requests, window_seconds) per category. Beta values approved for
+# Phase 4 - see the Phase 4 inspection report for the reasoning behind
+# each number.
+RATE_LIMIT_CONFIG = {
+    "chat": (20, 60),
+    "chat_title": (10, 60),
+    "quiz_generation": (5, 60),
+}
+
+# (user_id, category) -> deque[float] of request timestamps within the
+# current window for that bucket. Only ever mutated while holding
+# _rate_limit_lock.
+_rate_limit_buckets: dict = {}
+_rate_limit_lock = threading.Lock()
+
+# Counts every _check_rate_limit call (allowed or rejected) so the full
+# dict sweep in _cleanup_idle_buckets only runs periodically instead of on
+# every single request.
+_rate_limit_check_count = 0
+RATE_LIMIT_CLEANUP_INTERVAL = 500
+
+
+def _get_rate_limit_for(user_id: str, category: str):
+    """
+    Plan-awareness hook (see module comment above). Currently ignores
+    user_id and returns the same beta limit for every authenticated user.
+    A future Free/Paid split would look up the user's plan here and
+    return a different (max_requests, window_seconds) pair - no other
+    function in this module would need to change.
+    """
+    return RATE_LIMIT_CONFIG[category]
+
+
+def _cleanup_idle_buckets(now: float) -> None:
+    """
+    MUST be called while already holding _rate_limit_lock.
+
+    One full sweep of _rate_limit_buckets: prunes each bucket's expired
+    timestamps (using that bucket's own category window) and deletes any
+    bucket left empty afterward. This is the only place a bucket is ever
+    removed from the dict - without it, a user/category pair that is
+    checked once and then never again would leave a permanent (but empty)
+    entry behind, growing the dict without bound over the app's lifetime.
+
+    Called only every RATE_LIMIT_CLEANUP_INTERVAL checks (see
+    _check_rate_limit), so this O(active buckets) scan stays cheap at
+    beta scale.
+    """
+    stale_keys = []
+    for (bucket_user_id, category), bucket in _rate_limit_buckets.items():
+        _, window_seconds = RATE_LIMIT_CONFIG[category]
+        cutoff = now - window_seconds
+        while bucket and bucket[0] <= cutoff:
+            bucket.popleft()
+        if not bucket:
+            stale_keys.append((bucket_user_id, category))
+
+    for key in stale_keys:
+        del _rate_limit_buckets[key]
+
+
+def _check_rate_limit(user_id: str, category: str) -> None:
+    """
+    Raises HTTPException(429) if `user_id` has already made
+    max_requests-many requests in category `category` within the current
+    window. Otherwise records this request and returns None.
+
+    MUST be called before the expensive Gemini/API operation it is
+    protecting - every call site in this file is a small dependency
+    (_rate_limited_chat etc.) that FastAPI resolves before the endpoint
+    body runs, so this is enforced structurally, not by convention.
+
+    Never exposes internal state (counters, other users' data, bucket
+    contents) - the raised HTTPException only ever carries the fixed,
+    generic detail message plus a Retry-After header.
+    """
+    global _rate_limit_check_count
+
+    max_requests, window_seconds = _get_rate_limit_for(user_id, category)
+    now = time.time()
+    key = (user_id, category)
+
+    with _rate_limit_lock:
+        bucket = _rate_limit_buckets.setdefault(key, deque())
+
+        cutoff = now - window_seconds
+        while bucket and bucket[0] <= cutoff:
+            bucket.popleft()
+
+        if len(bucket) >= max_requests:
+            # Oldest timestamp still in the window is what will expire
+            # next and free up a slot - Retry-After is how long until
+            # that happens, rounded up so a client that waits exactly
+            # that long is guaranteed to succeed rather than landing one
+            # tick early.
+            retry_after = max(1, int(bucket[0] + window_seconds - now) + 1)
+            _rate_limit_check_count += 1
+            if _rate_limit_check_count % RATE_LIMIT_CLEANUP_INTERVAL == 0:
+                _cleanup_idle_buckets(now)
+            raise HTTPException(
+                status_code=429,
+                detail="Too many requests. Please wait a moment and try again.",
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        bucket.append(now)
+        _rate_limit_check_count += 1
+        if _rate_limit_check_count % RATE_LIMIT_CLEANUP_INTERVAL == 0:
+            _cleanup_idle_buckets(now)
+
+
+async def _rate_limited_chat(user_id: str = Depends(get_current_user_id)) -> str:
+    """Rate-limit dependency for /api/chat. See module comment above."""
+    _check_rate_limit(user_id, "chat")
+    return user_id
+
+
+async def _rate_limited_chat_title(user_id: str = Depends(get_current_user_id)) -> str:
+    """Rate-limit dependency for /api/chat/title. See module comment above."""
+    _check_rate_limit(user_id, "chat_title")
+    return user_id
+
+
+async def _rate_limited_quiz_generation(user_id: str = Depends(get_current_user_id)) -> str:
+    """Rate-limit dependency for /api/quiz/generate. See module comment above."""
+    _check_rate_limit(user_id, "quiz_generation")
+    return user_id
+
+
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request):
     return templates.TemplateResponse(request=request, name="index.html")
@@ -326,7 +531,7 @@ async def chat_endpoint(
     # the whole request. PDF upload/clear below DO require it, since those
     # actions are meaningless without a chat to attach to.
     chat_id: str = Form(""),
-    user_id: str = Depends(get_current_user_id)
+    user_id: str = Depends(_rate_limited_chat)
 ):
     # Read and validate the image BEFORE the try/except below. HTTPException
     # is a subclass of Exception, so raising it inside that broad handler
@@ -392,7 +597,7 @@ async def chat_endpoint(
 async def chat_title_endpoint(
     history: str = Form("[]"),
     board: str = Form("NCTB Bangla Medium"),
-    user_id: str = Depends(get_current_user_id)
+    user_id: str = Depends(_rate_limited_chat_title)
 ):
     """
     FEATURE 2: generates a short, context-aware title for a chat from its
@@ -419,7 +624,7 @@ async def quiz_generate_endpoint(
     subject: str = Form("Science"),
     topic: str = Form("General Practice"),
     count: int = Form(5),
-    user_id: str = Depends(get_current_user_id)
+    user_id: str = Depends(_rate_limited_quiz_generation)
 ):
     # Same blocking-call issue as /api/chat, same fix: offload to the
     # threadpool so this request doesn't block the event loop either.

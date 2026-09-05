@@ -2570,6 +2570,27 @@ window.sendMessage = async function() {
             return;
         }
 
+        // PHASE 4: a 429 here means the backend rate limiter rejected this
+        // request before it ever reached Gemini (see
+        // backend/main.py:_check_rate_limit). Without this check, the code
+        // below would fall through to `data.reply || "No response
+        // received."` - a 429 JSON body is `{"detail": ...}` with no
+        // `reply` field, so the student would see the misleading "No
+        // response received." as if the backend were broken, instead of
+        // "you're sending messages too fast." Handled the same way as the
+        // 401 case above: return early, before touching chat state.
+        if (response.status === 429) {
+            // loadingDiv was already removed above (if still viewing this
+            // chat) - just show the rate-limit message in its place.
+            if (isStillViewingThisChat) {
+                const rateLimitDiv = document.createElement("div");
+                rateLimitDiv.className = "bot-message";
+                rateLimitDiv.textContent = "You're sending messages too quickly. Please wait a moment and try again.";
+                chatBox.appendChild(rateLimitDiv);
+            }
+            return;
+        }
+
         const data = await response.json();
         const replyText = data.reply || "No response received.";
 
@@ -2688,6 +2709,19 @@ window.generateAndStartQuiz = async function() {
         // "Failed to generate quiz." message.
         if (res.status === 401) {
             promptLoginRequired();
+            return;
+        }
+
+        // PHASE 4: a 429 here means the backend rate limiter rejected this
+        // request before it ever reached Gemini (see
+        // backend/main.py:_check_rate_limit) - quiz generation is
+        // Kognit's heaviest single Gemini call, so it has the tightest
+        // limit. Without this check it would fall through to `data.
+        // questions` being undefined and show the generic "Failed to
+        // generate quiz." alert, which doesn't tell the student anything
+        // useful about what happened or what to do next.
+        if (res.status === 429) {
+            alert("You're generating quizzes too quickly. Please wait a moment and try again.");
             return;
         }
 
