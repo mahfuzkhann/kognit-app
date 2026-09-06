@@ -308,7 +308,7 @@ class TestConfiguration:
         mock_client.models.generate_content.return_value = _make_response(
             text='[{"id":1,"question":"Q","options":["A","B","C","D"],"correct_index":0,"explanation":"E"}]'
         )
-        ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Science (বিজ্ঞান)", "Motion", count=1)
 
         config = mock_client.models.generate_content.call_args.kwargs["config"]
         assert config.thinking_config is None
@@ -536,7 +536,7 @@ class TestQuizGeneration:
         mock_client.models.generate_content.return_value = _make_response(
             text='[{"id":1,"question":"2+2?","options":["3","4","5","6"],"correct_index":1,"explanation":"basic addition"}]'
         )
-        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Math", "Addition", count=1)
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Math", "Science (বিজ্ঞান)", "Addition", count=1)
         # NOTE: "id" is intentionally dropped by validate_quiz_questions() -
         # it was never used by the frontend (renders by array position) and
         # is not the source of truth for the server-side quiz definition
@@ -547,29 +547,29 @@ class TestQuizGeneration:
         mock_client.models.generate_content.return_value = _make_response(
             text='```json\n[{"id":1,"question":"Q","options":["A","B","C","D"],"correct_index":0,"explanation":"E"}]\n```'
         )
-        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Science (বিজ্ঞান)", "Motion", count=1)
         assert len(result) == 1 and result[0]["question"] == "Q"
 
     def test_strips_plain_code_fence(self, mock_client):
         mock_client.models.generate_content.return_value = _make_response(
             text='```\n[{"id":1,"question":"Q","options":["A","B","C","D"],"correct_index":0,"explanation":"E"}]\n```'
         )
-        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Science (বিজ্ঞান)", "Motion", count=1)
         assert len(result) == 1
 
     def test_malformed_json_returns_empty_list(self, mock_client):
         mock_client.models.generate_content.return_value = _make_response(text="not valid json at all")
-        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Science (বিজ্ঞান)", "Motion", count=1)
         assert result == []
 
     def test_provider_error_returns_empty_list(self, mock_client):
         mock_client.models.generate_content.side_effect = _server_error(503, "UNAVAILABLE")
-        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Science (বিজ্ঞান)", "Motion", count=1)
         assert result == []
 
     def test_blocked_response_returns_empty_list_not_crash(self, mock_client):
         mock_client.models.generate_content.return_value = _make_response(text=None)
-        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Science (বিজ্ঞান)", "Motion", count=1)
         assert result == []
 
     # -- validate_quiz_questions() schema enforcement (Phase 1 addition) --
@@ -578,7 +578,7 @@ class TestQuizGeneration:
         mock_client.models.generate_content.return_value = _make_response(
             text='[{"question":"Q","options":["A","B"],"correct_index":5,"explanation":"E"}]'
         )
-        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Science (বিজ্ঞান)", "Motion", count=1)
         assert result == []
 
     def test_correct_index_bool_is_dropped(self, mock_client):
@@ -587,28 +587,28 @@ class TestQuizGeneration:
         mock_client.models.generate_content.return_value = _make_response(
             text='[{"question":"Q","options":["A","B"],"correct_index":true,"explanation":"E"}]'
         )
-        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Science (বিজ্ঞান)", "Motion", count=1)
         assert result == []
 
     def test_single_option_question_is_dropped(self, mock_client):
         mock_client.models.generate_content.return_value = _make_response(
             text='[{"question":"Q","options":["A"],"correct_index":0,"explanation":"E"}]'
         )
-        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Science (বিজ্ঞান)", "Motion", count=1)
         assert result == []
 
     def test_missing_question_text_is_dropped(self, mock_client):
         mock_client.models.generate_content.return_value = _make_response(
             text='[{"options":["A","B"],"correct_index":0,"explanation":"E"}]'
         )
-        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Science (বিজ্ঞান)", "Motion", count=1)
         assert result == []
 
     def test_missing_explanation_defaults_to_empty_string(self, mock_client):
         mock_client.models.generate_content.return_value = _make_response(
             text='[{"question":"Q","options":["A","B"],"correct_index":0}]'
         )
-        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Science (বিজ্ঞান)", "Motion", count=1)
         assert len(result) == 1 and result[0]["explanation"] == ""
 
     def test_mixed_valid_and_invalid_entries_keeps_only_valid(self, mock_client):
@@ -618,14 +618,14 @@ class TestQuizGeneration:
                 '{"question":"Bad Q","options":["A"],"correct_index":0,"explanation":"E"}]'
             )
         )
-        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=2)
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Science (বিজ্ঞান)", "Motion", count=2)
         assert len(result) == 1 and result[0]["question"] == "Good Q"
 
     def test_all_entries_invalid_returns_empty_list(self, mock_client):
         mock_client.models.generate_content.return_value = _make_response(
             text='[{"question":"Bad Q","options":["A"],"correct_index":0,"explanation":"E"}]'
         )
-        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Science (বিজ্ঞান)", "Motion", count=1)
         assert result == []
 
     # -- P0 fix: bucket-B retry for transient 5xx/409 (504 investigation) --
@@ -638,25 +638,25 @@ class TestQuizGeneration:
             _server_error(504, "DEADLINE_EXCEEDED"),
             good_response,
         ]
-        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Math", "Addition", count=1)
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Math", "Science (বিজ্ঞান)", "Addition", count=1)
         assert result == [{"question": "2+2?", "options": ["3", "4"], "correct_index": 1, "explanation": "math"}]
         assert mock_client.models.generate_content.call_count == 2
 
     def test_504_on_every_attempt_exhausts_retries_and_returns_empty_list(self, mock_client):
         mock_client.models.generate_content.side_effect = _server_error(504, "DEADLINE_EXCEEDED")
-        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Science (বিজ্ঞান)", "Motion", count=1)
         assert result == []
         assert mock_client.models.generate_content.call_count == ai_engine.MAX_ATTEMPTS_BUCKET_B
 
     def test_429_quota_exhausted_returns_empty_list_without_retry(self, mock_client):
         mock_client.models.generate_content.side_effect = _client_error(429, "RESOURCE_EXHAUSTED")
-        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Science (বিজ্ঞান)", "Motion", count=1)
         assert result == []
         assert mock_client.models.generate_content.call_count == 1
 
     def test_400_client_error_returns_empty_list_without_retry(self, mock_client):
         mock_client.models.generate_content.side_effect = _client_error(400, "INVALID_ARGUMENT")
-        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Science (বিজ্ঞান)", "Motion", count=1)
         assert result == []
         assert mock_client.models.generate_content.call_count == 1
 
@@ -668,7 +668,7 @@ class TestQuizGeneration:
             _client_error(409, "ABORTED"),
             good_response,
         ]
-        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Motion", count=1)
+        result = ai_engine.generate_quiz_questions("NCTB", "SSC", "Physics", "Science (বিজ্ঞান)", "Motion", count=1)
         assert len(result) == 1
         assert mock_client.models.generate_content.call_count == 2
 
