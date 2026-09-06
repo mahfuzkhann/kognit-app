@@ -93,8 +93,6 @@ class TestStrong:
     def test_high_rate_without_qualifying_for_mastered(self):
         # 3 attempts, overall >= 85%, but NOT the last two both >= 85% ->
         # Strong, not Mastered.
-        events = [ev(10, 10, 0), ev(9, 10, 1), ev(6, 10, 2)]  # overall 25/30=83.3% actually below 85
-        # Use a case that is >=85% overall but fails the recency check:
         events = [ev(10, 10, 0), ev(9, 10, 1), ev(8, 10, 2)]  # overall 27/30=90%, last2=(9,8)/10=85%,80%
         result = me.compute_topic_status(events)
         assert result["status"] == me.STATUS_STRONG
@@ -172,11 +170,11 @@ class TestImproving:
     def test_mastered_takes_precedence_over_improving(self):
         # A topic that both trends upward AND clears the Mastered bar is
         # reported as Mastered (the stronger, more specific claim).
-        events = [ev(7, 10, 0), ev(9, 10, 1), ev(9, 10, 2)]  # overall 25/30=83.3% -> not mastered actually
-        # Construct a case that qualifies for BOTH to properly test precedence:
-        events = [ev(7, 10, 0), ev(9, 10, 1), ev(9, 10, 1)]
-        # Cleaner explicit construction: last two at >=85%, overall >=85%, AND rising trend.
-        events = [ev(9, 10, 0), ev(9, 10, 1), ev(9, 10, 2)]  # flat 90%, no trend but still mastered
+        # 70% -> 90% -> 100%: overall = 26/30 = 86.7% (>= 85%), last two
+        # attempts are 90% and 100% (both >= 85%), AND the most recent
+        # attempt (100%) is clearly above the prior mean (70%) - a
+        # genuinely dual-qualifying case for both Mastered and Improving.
+        events = [ev(7, 10, 0), ev(9, 10, 1), ev(10, 10, 2)]
         result = me.compute_topic_status(events)
         assert result["status"] == me.STATUS_MASTERED
 
