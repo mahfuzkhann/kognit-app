@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from backend.ai_engine import generate_ai_response, generate_quiz_questions, generate_chat_title
 from backend.rag_engine import extract_text_from_pdf, PDFExtractionError
-from backend.database import save_quiz_attempt, DatabaseError
+from backend.database import save_quiz_attempt, get_user_topic_profile, DatabaseError
 from typing import Optional, Tuple
 
 logging.basicConfig(level=logging.INFO)
@@ -107,7 +107,7 @@ active_pdf_contexts = {}
 #   active_quiz_definitions = {
 #       quiz_id: {
 #           "user_id": str,       # verified JWT owner - only they may submit it
-#           "board": str, "user_class": str, "subject": str, "topic": str,
+#           "board": str, "user_class": str, "subject": str, "stream": str, "topic": str,
 #           "questions": list,     # backend.ai_engine.validate_quiz_questions() output
 #           "submitted": bool,     # duplicate-submission guard, see quiz_submit_endpoint
 #           "created_at": float,   # time.time(), unused today - kept for future TTL work
@@ -622,10 +622,23 @@ async def quiz_generate_endpoint(
     board: str = Form("NCTB Bangla Medium"),
     user_class: str = Form("Class 9-10 / SSC"),
     subject: str = Form("Science"),
+    stream: str = Form("Science (বিজ্ঞান)"),
     topic: str = Form("General Practice"),
     count: int = Form(5),
     user_id: str = Depends(_rate_limited_quiz_generation)
 ):
+    # PHASE 5A DATA MODEL FIX: `subject` and `stream` are now genuinely
+    # distinct fields. `subject` is expected to be a real academic
+    # subject (e.g. "Physics") supplied by the new #quiz-subject-select
+    # dropdown in the quiz modal (see templates/index.html /
+    # static/js/app.js:generateAndStartQuiz); `stream` is the existing
+    # Science/Commerce/Arts main-nav selection, forwarded separately so
+    # that context is not lost. `stream` has a sensible default (matching
+    # the existing convention for every other parameter here) purely so
+    # this endpoint degrades gracefully rather than 422-ing if an older
+    # cached frontend build omits it - it is not meant to be relied on in
+    # normal operation.
+    #
     # Same blocking-call issue as /api/chat, same fix: offload to the
     # threadpool so this request doesn't block the event loop either.
     questions = await run_in_threadpool(
@@ -633,6 +646,7 @@ async def quiz_generate_endpoint(
         board=board,
         user_class=user_class,
         subject=subject,
+        stream=stream,
         topic=topic,
         count=count
     )
@@ -654,6 +668,7 @@ async def quiz_generate_endpoint(
         "board": board,
         "user_class": user_class,
         "subject": subject,
+        "stream": stream,
         "topic": topic,
         "questions": questions,
         "submitted": False,
@@ -749,6 +764,7 @@ async def quiz_submit_endpoint(
             board=definition["board"],
             user_class=definition["user_class"],
             subject=definition["subject"],
+            stream=definition.get("stream", ""),
             topic=definition["topic"],
             questions=questions,
             selected_answers=validated_answers,
@@ -770,3 +786,49 @@ async def quiz_submit_endpoint(
     active_quiz_definitions.pop(quiz_id, None)
 
     return {"status": "success", **result}
+
+
+@app.get("/api/profile/topics")
+async def profile_topics_endpoint(
+    user_and_token: Tuple[str, str] = Depends(get_current_user_and_token),
+):
+    """
+    PHASE 5A: Student Intelligence read endpoint.
+
+    Returns the authenticated student's own quiz-based topic evidence -
+    one explainable status entry per (subject, topic_key) - computed
+    fresh from backend/database.py:get_user_topic_profile on every call.
+    Nothing is precomputed or cached server-side: this is a deliberate
+    architecture choice (see the Phase 5A guardrail review) so that
+    retuning backend.mastery_engine's thresholds later needs no data
+    migration.
+
+    AUTHENTICATION: identical pattern to quiz_submit_endpoint above -
+    identity and the Supabase access token both come from
+    get_current_user_and_token (the verified JWT), never from anything
+    client-supplied. The token is forwarded to get_user_topic_profile,
+    which queries Supabase under RLS as this specific student - this
+    endpoint's body never sees or handles a user_id it could get wrong.
+
+    Response shape is a named envelope ({"topics": [...]}, not a bare
+    array) specifically so a future sibling field (e.g. a profile-level
+    summary) can be added without a breaking shape change.
+
+    No Gemini call, no rate limiting needed here - this is a simple,
+    cheap, RLS-scoped database read, unlike /api/chat, /api/chat/title,
+    and /api/quiz/generate (see the rate-limiting module comment above).
+    """
+    user_id, user_token = user_and_token
+
+    try:
+        topics = await get_user_topic_profile(user_token=user_token, user_id=user_id)
+    except DatabaseError:
+        logger.exception(
+            "profile_topics_endpoint: failed to fetch topic profile (user_id=%s)", user_id
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Could not load your progress right now. Please try again.",
+        )
+
+    return {"topics": topics}

@@ -1479,6 +1479,16 @@ function saveActiveChatSetting(key, value) {
 window.handleContextSettingChange = function(settingsKey, elementId) {
     const value = document.getElementById(elementId).value;
     saveActiveChatSetting(settingsKey, value);
+
+    // PHASE 5A: if the stream changes while the quiz modal happens to be
+    // open, keep the subject dropdown in sync with it rather than
+    // leaving a stale subject list from the previous stream selected.
+    if (settingsKey === "stream") {
+        const quizModal = document.getElementById("quiz-modal");
+        if (quizModal && !quizModal.classList.contains("hidden")) {
+            populateQuizSubjectOptions();
+        }
+    }
 };
 
 window.setMode = function(mode) {
@@ -2646,9 +2656,41 @@ window.shareChatLink = function() {
     });
 };
 
+// ==================== PHASE 5A: QUIZ SUBJECT SELECTION ====================
+// The quiz modal previously had no real "subject" concept - it silently
+// sent the main-nav stream (Science/Commerce/Arts) as `subject`, which is
+// a track, not an academic subject. This is a small, hardcoded lookup
+// table (matching the existing pattern of hardcoded <option> lists
+// already in templates/index.html), not a curriculum data model - a real
+// curriculum-aware subject/topic system is future work, not this fix.
+const QUIZ_SUBJECTS_BY_STREAM = {
+    "Science (বিজ্ঞান)": ["Physics", "Chemistry", "Biology", "Higher Math", "ICT"],
+    "Commerce (ব্যবসায় শিক্ষা)": ["Accounting", "Business Studies", "Finance & Banking", "ICT"],
+    "Arts (মানবিক)": ["Bangla", "English", "History", "Civics", "ICT"],
+};
+const QUIZ_SUBJECTS_FALLBACK = ["General"];
+
+function populateQuizSubjectOptions() {
+    const streamValue = document.getElementById("stream-select").value;
+    const subjects = QUIZ_SUBJECTS_BY_STREAM[streamValue] || QUIZ_SUBJECTS_FALLBACK;
+
+    const select = document.getElementById("quiz-subject-select");
+    const previousValue = select.value;
+
+    select.innerHTML = subjects.map(s => `<option value="${s}">${s}</option>`).join("");
+
+    // Preserve the student's subject choice across a stream change if it's
+    // still a valid option for the new stream (e.g. "ICT" appears under
+    // every stream above); otherwise default to the first subject listed.
+    if (subjects.includes(previousValue)) {
+        select.value = previousValue;
+    }
+}
+
 // Quiz System
 window.openQuizModal = function() {
     document.getElementById("quiz-modal").classList.remove("hidden");
+    populateQuizSubjectOptions();
     resetQuizModal();
 };
 
@@ -2686,7 +2728,13 @@ window.generateAndStartQuiz = async function() {
     const formData = new FormData();
     formData.append("board", document.getElementById("board-select").value);
     formData.append("user_class", document.getElementById("class-select").value);
-    formData.append("subject", document.getElementById("stream-select").value);
+    // PHASE 5A: subject (real academic subject, e.g. "Physics") and
+    // stream (Science/Commerce/Arts track) are now sent as two distinct
+    // fields - previously stream's value was sent under the "subject"
+    // key, which the backend has now stopped treating as correct (see
+    // backend/main.py:quiz_generate_endpoint).
+    formData.append("subject", document.getElementById("quiz-subject-select").value);
+    formData.append("stream", document.getElementById("stream-select").value);
     formData.append("topic", topic);
     formData.append("count", count);
 

@@ -21,9 +21,15 @@ explicit decision - it must not be smuggled into this module by editing
 _rest_headers() to add one.
 """
 import os
+import re
 import logging
+from collections import OrderedDict
+from datetime import datetime
+from typing import Optional
 
 import httpx
+
+from backend.mastery_engine import EvidenceEvent, compute_topic_status
 
 logger = logging.getLogger("kognit.database")
 
@@ -56,18 +62,86 @@ def _rest_headers(user_token: str) -> dict:
     }
 
 
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
+
+
+def normalize_topic_key(topic: str) -> str:
+    """
+    Phase 5A deterministic topic normalization: trim + collapse internal
+    whitespace + casefold.
+
+    Computed HERE, server-side, at write time (see save_quiz_attempt) -
+    never accepted from the client. The original human-readable `topic`
+    text is always stored and returned unchanged alongside this key (see
+    the `topic` column/field everywhere else in this module) - this
+    function only produces the grouping key used for topic-level
+    aggregation.
+
+    Deliberately does NOT do any of the following (Phase 5A scope,
+    approved): no LLM call, no embeddings, no fuzzy matching, no
+    synonym inference, no Bangla/English/Banglish unification. Two
+    genuinely different spellings of the same real-world topic will
+    produce two different topic_key values on purpose - see
+    supabase/migrations/0002_quiz_topic_identity.sql for the documented
+    limitation and the long-term fix (a curriculum-aware topic
+    vocabulary, not built here).
+
+    `casefold()` is used rather than `lower()` because it is the
+    Unicode-aware, more aggressive normalization recommended for
+    case-insensitive comparison - relevant here since Kognit's topics are
+    frequently typed in Bangla script or mixed Bangla/English.
+
+    An empty/whitespace-only topic normalizes to "" - still a valid,
+    deterministic key, just not a meaningful one; callers are not
+    expected to treat "" specially.
+    """
+    if not isinstance(topic, str):
+        return ""
+    collapsed = _WHITESPACE_RUN_RE.sub(" ", topic.strip())
+    return collapsed.casefold()
+
+
+def _parse_timestamptz(value: str) -> Optional[datetime]:
+    """
+    Parses a PostgREST/Postgres `timestamptz` string (e.g.
+    "2026-09-02T10:15:30.123456+00:00" or "...Z") into a timezone-aware
+    datetime. Returns None (rather than raising) on anything unparseable
+    so one malformed row can be skipped by the caller instead of crashing
+    an entire profile request - see get_user_topic_profile.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        logger.warning("Could not parse timestamptz value from Supabase: %r", value)
+        return None
+
+
 async def save_quiz_attempt(
     user_token: str,
     user_id: str,
     board: str,
     user_class: str,
     subject: str,
+    stream: str,
     topic: str,
     questions: list,
     selected_answers: list,
 ) -> dict:
     """
     Persists one completed quiz attempt plus its per-question answers.
+
+    PHASE 5A DATA MODEL: `subject` must be a real academic subject (e.g.
+    "Physics"), and `stream` is the Science/Commerce/Arts track - these
+    are now two distinct fields (previously the caller only had a single
+    "subject" field that actually held the stream value; see
+    supabase/migrations/0002_quiz_topic_identity.sql). This function does
+    not validate that `subject` "looks like" a real subject - that
+    correction lives entirely in how the caller (backend/main.py, fed by
+    the new subject dropdown in the quiz UI) populates these two
+    parameters now. `topic_key` is computed here, deterministically, from
+    `topic` via normalize_topic_key() - never accepted from the caller.
 
     Grading happens HERE, not in the caller: `questions[i]["correct_index"]`
     (the server-held, validated quiz definition - see
@@ -137,7 +211,9 @@ async def save_quiz_attempt(
         "board": board,
         "user_class": user_class,
         "subject": subject,
+        "stream": stream,
         "topic": topic,
+        "topic_key": normalize_topic_key(topic),
         "total_questions": total_questions,
         "score": score,
     }
@@ -231,3 +307,172 @@ async def _rollback_attempt(user_token: str, attempt_id: str) -> None:
             "save_quiz_attempt rollback: network error deleting orphaned quiz_attempts "
             "row id=%s - needs manual cleanup", attempt_id
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 5A: GET /api/profile/topics read path.
+#
+# quiz_attempts remains the single, immutable, authoritative evidence
+# source - nothing is persisted here beyond what save_quiz_attempt already
+# writes. Status is recomputed on every call from the raw rows, so
+# retuning backend.mastery_engine's thresholds later needs no migration
+# and no backfill: the next request simply computes a different answer
+# from the same unchanged evidence.
+# ---------------------------------------------------------------------------
+
+_PROFILE_TOPICS_SELECT = "id,subject,topic,topic_key,total_questions,score,created_at"
+
+
+async def get_user_topic_profile(user_token: str, user_id: str) -> list:
+    """
+    Fetches the authenticated student's own quiz evidence, grouped by
+    (subject, topic_key), and returns one explainable status dict per
+    topic (see backend.mastery_engine.compute_topic_status for the exact
+    shape).
+
+    SECURITY: forwards the student's OWN Supabase access token, exactly
+    like save_quiz_attempt above - RLS (`auth.uid() = user_id`, see
+    quiz_attempts_select_own in 0001_quiz_persistence.sql) is what
+    actually restricts the returned rows to this student, not any filter
+    applied here. `user_id` is accepted only for logging, matching the
+    established pattern in this module - it is never used to build a
+    query filter, so it cannot be used to read another user's data even
+    if a caller passed the wrong value by mistake.
+
+    LEGACY ROWS: rows with `topic_key IS NULL` predate the Phase 5A
+    subject/stream correction (see the migration file's "LEGACY ROWS"
+    section) and are excluded via the `topic_key=not.is.null` filter
+    below - they must never be silently reinterpreted as clean Phase 5A
+    evidence by, e.g., normalizing their `topic` text on the fly here.
+
+    Raises DatabaseError on any failure, same convention as
+    save_quiz_attempt - callers must translate this into a generic,
+    student-safe message rather than surfacing str(exception).
+    """
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise DatabaseError(
+            "Supabase is not configured on the server (SUPABASE_URL/SUPABASE_ANON_KEY missing)."
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+            resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/quiz_attempts",
+                headers=_rest_headers(user_token),
+                params={
+                    "select": _PROFILE_TOPICS_SELECT,
+                    "topic_key": "not.is.null",
+                    "order": "created_at.asc",
+                },
+            )
+    except httpx.RequestError:
+        logger.exception(
+            "get_user_topic_profile: network error fetching quiz_attempts (user_id=%s)", user_id
+        )
+        raise DatabaseError("network error fetching quiz_attempts")
+
+    if resp.status_code != 200:
+        logger.error(
+            "get_user_topic_profile: quiz_attempts select failed status=%d body=%s (user_id=%s)",
+            resp.status_code, resp.text[:500], user_id,
+        )
+        raise DatabaseError(f"quiz_attempts select failed with status {resp.status_code}")
+
+    try:
+        rows = resp.json()
+    except ValueError:
+        logger.error(
+            "get_user_topic_profile: unexpected quiz_attempts response shape (user_id=%s): %r",
+            user_id, resp.text[:500],
+        )
+        raise DatabaseError("unexpected response shape from quiz_attempts select")
+
+    if not isinstance(rows, list):
+        raise DatabaseError("unexpected response shape from quiz_attempts select")
+
+    return _build_topic_profile(rows, user_id=user_id)
+
+
+def _build_topic_profile(rows: list, user_id: str) -> list:
+    """
+    Groups raw quiz_attempts rows by (subject, topic_key), translates
+    each row into a backend.mastery_engine.EvidenceEvent, and returns one
+    explainable status dict per group.
+
+    This is the ONLY place in the codebase that knows both "what a
+    quiz_attempts row looks like" AND "what an EvidenceEvent looks like" -
+    backend.mastery_engine never sees a row, and never learns that its
+    input came from a quiz. Malformed individual rows are skipped
+    (logged) rather than failing the whole profile - one bad row must not
+    hide a student's entire topic history.
+
+    Uses OrderedDict keyed by (subject, topic_key) so the LAST row seen
+    for a group (rows arrive created_at ascending) provides the
+    human-readable `topic` display text - i.e. the most recently typed
+    spelling of a topic wins for display, even though older spellings
+    that normalized to the same topic_key still contribute their
+    evidence to the same group.
+    """
+    groups: "OrderedDict[tuple, dict]" = OrderedDict()
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+
+        subject = row.get("subject")
+        topic = row.get("topic")
+        topic_key = row.get("topic_key")
+        score = row.get("score")
+        total_questions = row.get("total_questions")
+        created_at_raw = row.get("created_at")
+        event_id = row.get("id")
+
+        if not isinstance(subject, str) or not subject:
+            continue
+        if not isinstance(topic_key, str) or not topic_key:
+            # Defensive - the `topic_key=not.is.null` filter should
+            # already exclude these, but a pure function operating on
+            # already-fetched rows should not trust that unconditionally.
+            continue
+        if not isinstance(score, int) or isinstance(score, bool):
+            continue
+        if not isinstance(total_questions, int) or isinstance(total_questions, bool) or total_questions <= 0:
+            continue
+
+        occurred_at = _parse_timestamptz(created_at_raw)
+        if occurred_at is None:
+            logger.warning(
+                "get_user_topic_profile: skipping row with unparseable created_at "
+                "(user_id=%s, attempt_id=%r)", user_id, event_id,
+            )
+            continue
+
+        key = (subject, topic_key)
+        group = groups.setdefault(key, {"topic": topic if isinstance(topic, str) else topic_key, "events": []})
+        # Most recently seen row's topic text wins for display (rows are
+        # fetched created_at ascending, so later iterations are more recent).
+        if isinstance(topic, str) and topic:
+            group["topic"] = topic
+        group["events"].append(
+            EvidenceEvent(
+                score=score,
+                total_questions=total_questions,
+                occurred_at=occurred_at,
+                event_id=str(event_id) if event_id is not None else "",
+            )
+        )
+
+    results = []
+    for (subject, topic_key), group in groups.items():
+        status_dict = compute_topic_status(group["events"])
+        results.append({
+            "subject": subject,
+            "topic": group["topic"],
+            "topic_key": topic_key,
+            **status_dict,
+        })
+
+    # Most recently practiced topics first - a reasonable default surface
+    # order, not a claim about importance/weakness.
+    results.sort(key=lambda r: r["last_attempt_at"] or "", reverse=True)
+    return results

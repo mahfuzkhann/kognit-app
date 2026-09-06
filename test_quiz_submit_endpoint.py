@@ -64,6 +64,7 @@ def _seed_definition(quiz_id="quiz-abc", user_id="user-1", submitted=False, ques
         "board": "NCTB",
         "user_class": "SSC",
         "subject": "Math",
+        "stream": "Science (বিজ্ঞান)",
         "topic": "Algebra",
         "questions": questions if questions is not None else SAMPLE_QUESTIONS,
         "submitted": submitted,
@@ -210,10 +211,10 @@ class TestQuizSubmitScoreIntegrity:
 class TestQuizGenerateDefinitionStorage:
     def test_generate_stores_definition_and_returns_quiz_id(self, client):
         _override_auth_as("user-1")
-        with patch.object(main_module, "generate_quiz_questions", return_value=SAMPLE_QUESTIONS):
+        with patch.object(main_module, "generate_quiz_questions", return_value=SAMPLE_QUESTIONS) as mock_gen:
             resp = client.post("/api/quiz/generate", data={
-                "board": "NCTB", "user_class": "SSC", "subject": "Math",
-                "topic": "Algebra", "count": 2,
+                "board": "NCTB", "user_class": "SSC", "subject": "Physics",
+                "stream": "Science (বিজ্ঞান)", "topic": "Algebra", "count": 2,
             })
         assert resp.status_code == 200
         body = resp.json()
@@ -222,15 +223,35 @@ class TestQuizGenerateDefinitionStorage:
         assert quiz_id is not None
         stored = main_module.active_quiz_definitions[quiz_id]
         assert stored["user_id"] == "user-1"
+        assert stored["subject"] == "Physics"
+        assert stored["stream"] == "Science (বিজ্ঞান)"
         assert stored["questions"] == SAMPLE_QUESTIONS
         assert stored["submitted"] is False
+        # PHASE 5A: subject and stream are now distinct and both forwarded
+        # to the AI engine (previously the "subject" slot actually held
+        # the stream value - see backend/ai_engine.py:generate_quiz_questions).
+        _, kwargs = mock_gen.call_args
+        assert kwargs["subject"] == "Physics"
+        assert kwargs["stream"] == "Science (বিজ্ঞান)"
+
+    def test_generate_without_stream_falls_back_to_default(self, client):
+        # Defensive default only - protects against an older cached
+        # frontend build that doesn't yet send `stream`; not relied on in
+        # normal operation.
+        _override_auth_as("user-1")
+        with patch.object(main_module, "generate_quiz_questions", return_value=SAMPLE_QUESTIONS):
+            resp = client.post("/api/quiz/generate", data={
+                "board": "NCTB", "user_class": "SSC", "subject": "Math",
+                "topic": "Algebra", "count": 2,
+            })
+        assert resp.status_code == 200
 
     def test_generate_empty_questions_returns_none_quiz_id_and_stores_nothing(self, client):
         _override_auth_as("user-1")
         with patch.object(main_module, "generate_quiz_questions", return_value=[]):
             resp = client.post("/api/quiz/generate", data={
                 "board": "NCTB", "user_class": "SSC", "subject": "Math",
-                "topic": "Algebra", "count": 2,
+                "stream": "Science (বিজ্ঞান)", "topic": "Algebra", "count": 2,
             })
         assert resp.status_code == 200
         assert resp.json() == {"questions": [], "quiz_id": None}
@@ -240,7 +261,7 @@ class TestQuizGenerateDefinitionStorage:
         with patch.object(main_module, "generate_quiz_questions", return_value=SAMPLE_QUESTIONS):
             resp = client.post("/api/quiz/generate", data={
                 "board": "NCTB", "user_class": "SSC", "subject": "Math",
-                "topic": "Algebra", "count": 2,
+                "stream": "Science (বিজ্ঞান)", "topic": "Algebra", "count": 2,
             })
         assert resp.status_code == 401
 
@@ -255,7 +276,7 @@ class TestQuizEndToEndFlow:
         with patch.object(main_module, "generate_quiz_questions", return_value=SAMPLE_QUESTIONS):
             gen_resp = client.post("/api/quiz/generate", data={
                 "board": "NCTB", "user_class": "SSC", "subject": "Math",
-                "topic": "Algebra", "count": 2,
+                "stream": "Science (বিজ্ঞান)", "topic": "Algebra", "count": 2,
             })
         quiz_id = gen_resp.json()["quiz_id"]
 

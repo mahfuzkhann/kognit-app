@@ -663,7 +663,7 @@ def validate_quiz_questions(raw_questions) -> list:
     return validated
 
 
-def generate_quiz_questions(board: str, user_class: str, subject: str, topic: str, count: int = 5) -> list:
+def generate_quiz_questions(board: str, user_class: str, subject: str, stream: str, topic: str, count: int = 5) -> list:
     """
     P0 RELIABILITY FIX (504 investigation): previously this function made a
     single Gemini call with a blanket `except Exception: return []` - a
@@ -688,7 +688,7 @@ def generate_quiz_questions(board: str, user_class: str, subject: str, topic: st
     bucket-A handling, that is a separate, explicitly-scoped follow-up.
     """
     system_instruction = (
-        f"You are an exam paper creator for {board}, {user_class}, Subject: {subject}.\n"
+        f"You are an exam paper creator for {board}, {user_class}, {stream} stream, Subject: {subject}.\n"
         f"Generate {count} high-quality Multiple Choice Questions (MCQs) on the topic: '{topic}'.\n"
         "Output MUST be strict raw JSON array only. Do not wrap in markdown or include conversational text. Format:\n"
         "[\n"
@@ -727,8 +727,8 @@ def generate_quiz_questions(board: str, user_class: str, subject: str, topic: st
                 # again.
                 logger.warning(
                     "generate_quiz_questions got a blocked/empty response attempt=%d/%d "
-                    "(board=%s, user_class=%s, subject=%s, topic=%s)",
-                    attempt, MAX_ATTEMPTS_BUCKET_B, board, user_class, subject, topic
+                    "(board=%s, user_class=%s, subject=%s, stream=%s, topic=%s)",
+                    attempt, MAX_ATTEMPTS_BUCKET_B, board, user_class, subject, stream, topic
                 )
                 return []
 
@@ -742,8 +742,8 @@ def generate_quiz_questions(board: str, user_class: str, subject: str, topic: st
             if not validated:
                 logger.error(
                     "generate_quiz_questions: Gemini output had no valid MCQ entries after "
-                    "validation (board=%s, user_class=%s, subject=%s, topic=%s, raw_count=%s)",
-                    board, user_class, subject, topic,
+                    "validation (board=%s, user_class=%s, subject=%s, stream=%s, topic=%s, raw_count=%s)",
+                    board, user_class, subject, stream, topic,
                     len(parsed) if isinstance(parsed, list) else "not-a-list"
                 )
             return validated
@@ -754,8 +754,8 @@ def generate_quiz_questions(board: str, user_class: str, subject: str, topic: st
                 # not clear in a few seconds.
                 logger.exception(
                     "generate_quiz_questions quota exhausted attempt=%d "
-                    "(board=%s, user_class=%s, subject=%s, topic=%s)",
-                    attempt, board, user_class, subject, topic
+                    "(board=%s, user_class=%s, subject=%s, stream=%s, topic=%s)",
+                    attempt, board, user_class, subject, stream, topic
                 )
                 return []
             if e.code in TRANSIENT_RETRYABLE_CLIENT_HTTP_CODES and attempt < MAX_ATTEMPTS_BUCKET_B:
@@ -767,9 +767,9 @@ def generate_quiz_questions(board: str, user_class: str, subject: str, topic: st
                 )
                 logger.warning(
                     "generate_quiz_questions transient provider error code=%s attempt=%d/%d "
-                    "timeout=%ds (board=%s, user_class=%s, subject=%s, topic=%s): %s - retrying in %.2fs",
+                    "timeout=%ds (board=%s, user_class=%s, subject=%s, stream=%s, topic=%s): %s - retrying in %.2fs",
                     e.code, attempt, MAX_ATTEMPTS_BUCKET_B, attempt_timeout,
-                    board, user_class, subject, topic, e.status, retry_delay
+                    board, user_class, subject, stream, topic, e.status, retry_delay
                 )
                 time.sleep(retry_delay)
                 continue
@@ -777,8 +777,8 @@ def generate_quiz_questions(board: str, user_class: str, subject: str, topic: st
             # is a programming/config error, not something a retry fixes.
             logger.exception(
                 "generate_quiz_questions client error code=%s attempt=%d/%d "
-                "(board=%s, user_class=%s, subject=%s, topic=%s)",
-                e.code, attempt, MAX_ATTEMPTS_BUCKET_B, board, user_class, subject, topic
+                "(board=%s, user_class=%s, subject=%s, stream=%s, topic=%s)",
+                e.code, attempt, MAX_ATTEMPTS_BUCKET_B, board, user_class, subject, stream, topic
             )
             return []
 
@@ -795,16 +795,16 @@ def generate_quiz_questions(board: str, user_class: str, subject: str, topic: st
                 )
                 logger.warning(
                     "generate_quiz_questions transient provider error code=%s attempt=%d/%d "
-                    "timeout=%ds (board=%s, user_class=%s, subject=%s, topic=%s): %s - retrying in %.2fs",
+                    "timeout=%ds (board=%s, user_class=%s, subject=%s, stream=%s, topic=%s): %s - retrying in %.2fs",
                     e.code, attempt, MAX_ATTEMPTS_BUCKET_B, attempt_timeout,
-                    board, user_class, subject, topic, e.status, retry_delay
+                    board, user_class, subject, stream, topic, e.status, retry_delay
                 )
                 time.sleep(retry_delay)
                 continue
             logger.exception(
                 "generate_quiz_questions failed after %d attempts with server error code=%s "
-                "(board=%s, user_class=%s, subject=%s, topic=%s)",
-                MAX_ATTEMPTS_BUCKET_B, e.code, board, user_class, subject, topic
+                "(board=%s, user_class=%s, subject=%s, stream=%s, topic=%s)",
+                MAX_ATTEMPTS_BUCKET_B, e.code, board, user_class, subject, stream, topic
             )
             return []
 
@@ -817,8 +817,8 @@ def generate_quiz_questions(board: str, user_class: str, subject: str, topic: st
             # deliberately not carried over here - see function docstring.
             logger.exception(
                 "generate_quiz_questions failed unexpectedly attempt=%d/%d "
-                "(board=%s, user_class=%s, subject=%s, topic=%s)",
-                attempt, MAX_ATTEMPTS_BUCKET_B, board, user_class, subject, topic
+                "(board=%s, user_class=%s, subject=%s, stream=%s, topic=%s)",
+                attempt, MAX_ATTEMPTS_BUCKET_B, board, user_class, subject, stream, topic
             )
             return []
 
