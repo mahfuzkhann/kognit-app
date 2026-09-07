@@ -2396,6 +2396,14 @@ async function maybeGenerateAiTitle(proj, chat) {
         const formData = new FormData();
         formData.append("history", JSON.stringify(boundedHistory));
         formData.append("board", document.getElementById("board-select").value);
+        // PHASE 5C: lets the backend attach a lightweight conversation_index
+        // entry (see backend/database.py:save_conversation_index_entry) to
+        // this specific chat. No UI change - this is the same background
+        // title-generation call as before, with one more field on an
+        // already-existing request. If omitted (e.g. an older cached build),
+        // the backend just skips that persistence step and still returns
+        // the title normally - see chat_title_endpoint in backend/main.py.
+        formData.append("chat_id", chat.id);
 
         const headers = {};
         const { data: { session } } = await supabaseClient.auth.getSession();

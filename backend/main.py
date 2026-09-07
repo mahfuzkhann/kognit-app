@@ -6,14 +6,23 @@ import time
 import uuid
 from collections import deque
 import httpx
-from fastapi import FastAPI, Request, Form, File, UploadFile, Header, HTTPException, Depends
+from datetime import datetime, timedelta, timezone
+from fastapi import FastAPI, Request, Form, File, UploadFile, Header, HTTPException, Depends, BackgroundTasks
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from backend.ai_engine import generate_ai_response, generate_quiz_questions, generate_chat_title
 from backend.rag_engine import extract_text_from_pdf, PDFExtractionError
-from backend.database import save_quiz_attempt, get_user_topic_profile, DatabaseError
+from backend.database import (
+    save_quiz_attempt,
+    get_user_topic_profile,
+    save_chat_learning_evidence,
+    save_conversation_index_entry,
+    get_learning_history,
+    DatabaseError,
+)
+from backend.learning_memory import detect_learning_signals, is_meaningful_signal_set, resolve_academic_context
 from typing import Optional, Tuple
 
 logging.basicConfig(level=logging.INFO)
@@ -388,16 +397,39 @@ def _check_rate_limit(user_id: str, category: str) -> None:
             _cleanup_idle_buckets(now)
 
 
-async def _rate_limited_chat(user_id: str = Depends(get_current_user_id)) -> str:
-    """Rate-limit dependency for /api/chat. See module comment above."""
+async def _rate_limited_chat(user_and_token: Tuple[str, str] = Depends(get_current_user_and_token)) -> Tuple[str, str]:
+    """
+    Rate-limit dependency for /api/chat. See module comment above.
+
+    PHASE 5B CHANGE: now depends on get_current_user_and_token (not
+    get_current_user_id) and returns (user_id, token), not just user_id -
+    chat_endpoint needs the student's own access token to persist chat
+    learning evidence under RLS (see backend/database.py:
+    save_chat_learning_evidence). This does NOT add a second Supabase Auth
+    API call: get_current_user_and_token was already the sole identity
+    dependency doing that network call; get_current_user_id was a second,
+    separate wrapper around the same underlying _verify_supabase_token
+    call. Depending on get_current_user_and_token here means exactly one
+    Auth API call per /api/chat request, same as before this change.
+    """
+    user_id, _token = user_and_token
     _check_rate_limit(user_id, "chat")
-    return user_id
+    return user_and_token
 
 
-async def _rate_limited_chat_title(user_id: str = Depends(get_current_user_id)) -> str:
-    """Rate-limit dependency for /api/chat/title. See module comment above."""
+async def _rate_limited_chat_title(
+    user_and_token: Tuple[str, str] = Depends(get_current_user_and_token)
+) -> Tuple[str, str]:
+    """
+    Rate-limit dependency for /api/chat/title. See module comment above
+    and the identical PHASE 5B CHANGE note on _rate_limited_chat - this
+    endpoint now also needs the student's own token, to persist a
+    conversation_index entry (see backend/database.py:
+    save_conversation_index_entry) alongside the existing title generation.
+    """
+    user_id, _token = user_and_token
     _check_rate_limit(user_id, "chat_title")
-    return user_id
+    return user_and_token
 
 
 async def _rate_limited_quiz_generation(user_id: str = Depends(get_current_user_id)) -> str:
@@ -513,6 +545,86 @@ def parse_and_validate_history(raw_history: str) -> list:
     return validated[-MAX_HISTORY_MESSAGES:]
 
 
+# ---------------------------------------------------------------------------
+# Phase 5B/5C: chat-derived learning memory - background persistence.
+#
+# NON-NEGOTIABLE RULE (see the Phase 5B/5C implementation brief): a failure
+# anywhere in learning-memory extraction or persistence must NEVER turn a
+# successful chat response into an error, and must NEVER add latency to the
+# response the student is waiting on. Both functions below are designed to
+# be handed to FastAPI's BackgroundTasks (see chat_endpoint and
+# chat_title_endpoint), which runs them AFTER the HTTP response has already
+# been sent - not before, and not concurrently blocking it. Each function
+# catches everything itself as a second layer of defense (so even a bug in
+# this code cannot surface as a server error to anyone, since nothing is
+# waiting on this task's result).
+#
+# Neither function is ever called with client-supplied user_id/user_token -
+# both always come from the verified (user_id, token) tuple resolved by
+# get_current_user_and_token earlier in the same request (see
+# _rate_limited_chat / _rate_limited_chat_title above).
+# ---------------------------------------------------------------------------
+
+async def _background_persist_chat_evidence(
+    user_token: str,
+    user_id: str,
+    subject: str,
+    topic: str,
+    signal_type: str,
+    signal_strength: str,
+    chat_id: str,
+) -> None:
+    try:
+        await save_chat_learning_evidence(
+            user_token=user_token,
+            user_id=user_id,
+            subject=subject,
+            topic=topic,
+            signal_type=signal_type,
+            signal_strength=signal_strength,
+            chat_id=chat_id,
+        )
+    except DatabaseError:
+        logger.exception(
+            "_background_persist_chat_evidence: failed to persist chat learning evidence "
+            "(user_id=%s, signal_type=%s)", user_id, signal_type,
+        )
+    except Exception:
+        # Defensive - this task's failure must never propagate anywhere
+        # that could affect the already-sent chat response.
+        logger.exception(
+            "_background_persist_chat_evidence: unexpected error (user_id=%s)", user_id
+        )
+
+
+async def _background_persist_conversation_index(
+    user_token: str,
+    user_id: str,
+    chat_id: str,
+    short_label: str,
+    subject: Optional[str],
+    attribution_confidence: str,
+) -> None:
+    try:
+        await save_conversation_index_entry(
+            user_token=user_token,
+            user_id=user_id,
+            chat_id=chat_id,
+            short_label=short_label,
+            subject=subject,
+            attribution_confidence=attribution_confidence,
+        )
+    except DatabaseError:
+        logger.exception(
+            "_background_persist_conversation_index: failed to persist conversation_index "
+            "(user_id=%s, chat_id=%s)", user_id, chat_id,
+        )
+    except Exception:
+        logger.exception(
+            "_background_persist_conversation_index: unexpected error (user_id=%s)", user_id
+        )
+
+
 @app.post("/api/chat")
 async def chat_endpoint(
     prompt: str = Form(...),
@@ -531,7 +643,8 @@ async def chat_endpoint(
     # the whole request. PDF upload/clear below DO require it, since those
     # actions are meaningless without a chat to attach to.
     chat_id: str = Form(""),
-    user_id: str = Depends(_rate_limited_chat)
+    background_tasks: BackgroundTasks = None,
+    user_and_token: Tuple[str, str] = Depends(_rate_limited_chat)
 ):
     # Read and validate the image BEFORE the try/except below. HTTPException
     # is a subclass of Exception, so raising it inside that broad handler
@@ -552,6 +665,7 @@ async def chat_endpoint(
     # slow" from "the frontend is slow to render" (the last of those cannot
     # be measured from the backend - it would need client-side timing, which
     # is a separate, frontend-only change not made here).
+    user_id, user_token = user_and_token
     t_request_start = time.perf_counter()
     try:
         if not chat_id:
@@ -585,6 +699,61 @@ async def chat_endpoint(
             t_after_ai - t_request_start,
             mode, bool(image_bytes), bool(pdf_context), len(conversation_history), chat_id or "(none)"
         )
+
+        # Phase 5B/5C: chat learning-memory extraction/scheduling.
+        #
+        # This block has its OWN try/except and MUST keep it - it must
+        # never let an exception fall through to the `except Exception:`
+        # below, which would otherwise incorrectly replace the AI reply
+        # already computed above with the generic error message, breaking
+        # the non-negotiable "learning memory failure never breaks chat"
+        # rule for a failure that happens to occur AFTER a successful
+        # Gemini call.
+        #
+        # detect_learning_signals/resolve_academic_context are pure,
+        # synchronous, and fast (regex/dict lookups only - no I/O) - run
+        # inline, not in the threadpool; only the actual database write
+        # (inside _background_persist_chat_evidence) is deferred via
+        # BackgroundTasks so it cannot add latency to this response.
+        #
+        # HONEST CURRENT BEHAVIOR (updated for Phase 5C activation):
+        # resolve_academic_context() now performs real, deterministic
+        # subject detection against the current message and inherited
+        # subject detection against the bounded history (see
+        # backend/learning_memory.py) - this can genuinely return Known
+        # or Probable for real student messages today. It still NEVER
+        # returns a topic for chat-derived context (topic stays None) -
+        # see that module's docstring for why this remains a deliberate
+        # scope boundary. A message with neither an explicit nor an
+        # inherited subject match still correctly resolves to Unknown,
+        # and nothing is persisted in that case - this is the honest,
+        # intended behavior, not a gap.
+        try:
+            detected_signals = detect_learning_signals(prompt, conversation_history)
+            if is_meaningful_signal_set(detected_signals):
+                # PHASE 5C ACTIVATION: pass the current message and its own
+                # bounded history so resolve_academic_context can perform
+                # its deterministic subject detection/inheritance (see
+                # backend/learning_memory.py) - this is real activation
+                # now, not always-Unknown as in the original 5B/5C wiring.
+                context = resolve_academic_context(prompt=prompt, history=conversation_history)
+                if context.confidence in ("known", "probable") and background_tasks is not None:
+                    for signal in detected_signals:
+                        background_tasks.add_task(
+                            _background_persist_chat_evidence,
+                            user_token=user_token,
+                            user_id=user_id,
+                            subject=context.subject,
+                            topic=context.topic,
+                            signal_type=signal.signal_type,
+                            signal_strength=signal.signal_strength,
+                            chat_id=chat_id,
+                        )
+        except Exception:
+            logger.exception(
+                "chat_endpoint: learning-memory extraction failed - chat response is unaffected"
+            )
+
         return {"reply": response}
     except Exception:
         logger.exception(
@@ -597,7 +766,17 @@ async def chat_endpoint(
 async def chat_title_endpoint(
     history: str = Form("[]"),
     board: str = Form("NCTB Bangla Medium"),
-    user_id: str = Depends(_rate_limited_chat_title)
+    # PHASE 5C ADDITION: identifies which chat this title belongs to, so a
+    # conversation_index entry (see backend/database.py:
+    # save_conversation_index_entry) can be attached to the right chat_id.
+    # Deliberately NOT required (default "") for the same reason chat_id is
+    # optional on /api/chat above - an older cached frontend build that
+    # doesn't send it must keep getting a working title; it just won't get
+    # a conversation_index entry for that call, which fails safe rather
+    # than failing the whole request.
+    chat_id: str = Form(""),
+    background_tasks: BackgroundTasks = None,
+    user_and_token: Tuple[str, str] = Depends(_rate_limited_chat_title)
 ):
     """
     FEATURE 2: generates a short, context-aware title for a chat from its
@@ -608,12 +787,56 @@ async def chat_title_endpoint(
     of the main answer path. Reuses the exact same history validation as
     /api/chat so this endpoint cannot be used to smuggle an oversized or
     malformed payload past the caps enforced there.
+
+    PHASE 5C ADDITION: on a successful title, also schedules (via
+    BackgroundTasks, after this response is already on its way to the
+    client) a single conversation_index row - see
+    supabase/migrations/0003_learning_memory_foundation.sql. This
+    deliberately reuses the title this function ALREADY computes rather
+    than making a second Gemini call purely to produce a memory label -
+    see backend/learning_memory.py and the Phase 5B architecture design
+    review for why. attribution_confidence is "unknown" here because, like
+    chat_endpoint above, resolve_academic_context() has no reliable
+    subject source to draw on yet for a normal chat title call - this is
+    honest, intentional behavior, not an oversight.
     """
+    user_id, user_token = user_and_token
     conversation_history = parse_and_validate_history(history)
     if not conversation_history:
         return {"title": None}
 
     title = await run_in_threadpool(generate_chat_title, history=conversation_history, board=board)
+
+    if title and chat_id and chat_id.strip() and background_tasks is not None:
+        try:
+            # PHASE 5C ACTIVATION: give the resolver a real chance at
+            # subject detection here too - treat the most recent user
+            # message in this history as the "current" message and
+            # everything before it as inheritance context, same semantics
+            # as chat_endpoint above. Purely a label improvement for
+            # conversation_index (recall), never evidence-grade - this
+            # endpoint never writes to learning_evidence.
+            last_user_text = next(
+                (m["text"] for m in reversed(conversation_history) if m.get("role") == "user"),
+                None,
+            )
+            preceding_history = conversation_history[:-1] if conversation_history else None
+            context = resolve_academic_context(prompt=last_user_text, history=preceding_history)
+            background_tasks.add_task(
+                _background_persist_conversation_index,
+                user_token=user_token,
+                user_id=user_id,
+                chat_id=chat_id,
+                short_label=title,
+                subject=context.subject,
+                attribution_confidence=context.confidence,
+            )
+        except Exception:
+            logger.exception(
+                "chat_title_endpoint: failed to schedule conversation_index persistence "
+                "- title response is unaffected"
+            )
+
     return {"title": title}
 
 
@@ -832,3 +1055,126 @@ async def profile_topics_endpoint(
         )
 
     return {"topics": topics}
+
+
+# ---------------------------------------------------------------------------
+# Phase 5D: GET /api/learning/history
+# ---------------------------------------------------------------------------
+
+# Query-time date ranges, never hard-coded "this month" logic server-side -
+# see backend/learning_memory.py's module docstring / the Phase 5B
+# architecture design review's Temporal Model section. A future frontend
+# resolves "this month"/"last week" into concrete since/until instants in
+# the STUDENT'S OWN local timezone (something only the browser reliably
+# knows) before calling this endpoint - this endpoint itself has no
+# timezone logic beyond treating a naive input as UTC (see
+# _parse_iso_datetime below). No frontend calls this endpoint yet - see
+# the Phase 5B/5C/5D final report for why building that UI is deferred.
+DEFAULT_LEARNING_HISTORY_DAYS = 30
+MAX_LEARNING_HISTORY_RANGE_DAYS = 90
+# Small clock-skew allowance, not a security boundary - a client's clock
+# being a few minutes fast should not turn an honest "give me up to now"
+# request into a 400.
+FUTURE_DATE_TOLERANCE = timedelta(minutes=5)
+
+
+def _parse_iso_datetime(value: str) -> Optional[datetime]:
+    """
+    Parses a client-supplied ISO 8601 datetime string into a timezone-aware
+    UTC datetime. Returns None (never raises) on anything unparseable, so
+    the caller can turn that into a clean 400 rather than a 500.
+
+    A naive (no-timezone) input is assumed to already be UTC - this
+    endpoint never guesses a student's timezone; that resolution happens
+    client-side (see module comment above) before since/until are sent.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+@app.get("/api/learning/history")
+async def learning_history_endpoint(
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    limit: int = 100,
+    user_and_token: Tuple[str, str] = Depends(get_current_user_and_token),
+):
+    """
+    PHASE 5D: returns the authenticated student's own learning-memory
+    activity (conversation_index entries + chat-derived learning_evidence,
+    the latter turned into explainable notes via
+    backend.learning_memory.build_conversation_notes) in a bounded date
+    range.
+
+    AUTHENTICATION/ISOLATION: identical pattern to
+    profile_topics_endpoint - identity and the Supabase access token both
+    come from the verified JWT via get_current_user_and_token, never from
+    anything client-supplied; RLS (see
+    supabase/migrations/0003_learning_memory_foundation.sql) is what
+    actually restricts results to this student. No rate limiting here for
+    the same reason /api/profile/topics has none: this makes no Gemini
+    call, it is a simple, cheap, RLS-scoped database read.
+
+    DATE RANGE: `since`/`until` are optional ISO 8601 datetimes (assumed
+    UTC if no offset is given - see _parse_iso_datetime). Defaults to the
+    last DEFAULT_LEARNING_HISTORY_DAYS days ending now if omitted. The
+    requested range is capped at MAX_LEARNING_HISTORY_RANGE_DAYS
+    regardless of what the client asks for, and `until` may not be in the
+    future beyond a small clock-skew allowance - both are defensive
+    ceilings, not something a legitimate client should ever need to work
+    around.
+
+    Does NOT combine chat evidence with quiz mastery status in this
+    response - see backend.learning_memory.build_conversation_notes'
+    docstring for why chat evidence is returned as separate, explainable,
+    non-numeric notes rather than merged into a score. A future,
+    separately-considered change could cross-reference this response's
+    evidence_notes topic_keys against GET /api/profile/topics for the same
+    student to show both side by side - not implemented here.
+    """
+    user_id, user_token = user_and_token
+
+    now = datetime.now(timezone.utc)
+    until_dt = _parse_iso_datetime(until) if until else now
+    if until is not None and until_dt is None:
+        raise HTTPException(status_code=400, detail="Invalid 'until' date.")
+
+    since_dt = _parse_iso_datetime(since) if since else (until_dt - timedelta(days=DEFAULT_LEARNING_HISTORY_DAYS))
+    if since is not None and since_dt is None:
+        raise HTTPException(status_code=400, detail="Invalid 'since' date.")
+
+    if until_dt > now + FUTURE_DATE_TOLERANCE:
+        raise HTTPException(status_code=400, detail="'until' cannot be in the future.")
+    if since_dt >= until_dt:
+        raise HTTPException(status_code=400, detail="'since' must be before 'until'.")
+    if until_dt - since_dt > timedelta(days=MAX_LEARNING_HISTORY_RANGE_DAYS):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Date range cannot exceed {MAX_LEARNING_HISTORY_RANGE_DAYS} days.",
+        )
+
+    try:
+        result = await get_learning_history(
+            user_token=user_token,
+            user_id=user_id,
+            since_iso=since_dt.isoformat(),
+            until_iso=until_dt.isoformat(),
+            limit=limit,
+        )
+    except DatabaseError:
+        logger.exception(
+            "learning_history_endpoint: failed to fetch learning history (user_id=%s)", user_id
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Could not load your learning history right now. Please try again.",
+        )
+
+    return result

@@ -30,6 +30,12 @@ from typing import Optional
 import httpx
 
 from backend.mastery_engine import EvidenceEvent, compute_topic_status
+from backend.learning_memory import (
+    VALID_ATTRIBUTION_CONFIDENCES,
+    VALID_SIGNAL_STRENGTHS,
+    VALID_SIGNAL_TYPES,
+    build_conversation_notes,
+)
 
 logger = logging.getLogger("kognit.database")
 
@@ -476,3 +482,287 @@ def _build_topic_profile(rows: list, user_id: str) -> list:
     # order, not a claim about importance/weakness.
     results.sort(key=lambda r: r["last_attempt_at"] or "", reverse=True)
     return results
+
+# ---------------------------------------------------------------------------
+# Phase 5B/5C: chat-derived learning evidence + conversation index writes.
+#
+# Same security/write pattern as save_quiz_attempt above: the CALLING
+# STUDENT'S OWN Supabase access token is forwarded, never a service-role
+# key - RLS (see supabase/migrations/0003_learning_memory_foundation.sql)
+# is the actual enforcement boundary.
+#
+# CALLER CONTRACT (enforced by backend/main.py, not re-validated here any
+# more strictly than save_quiz_attempt re-validates its own callers):
+#   - subject/topic/attribution_confidence must already have come from
+#     backend.learning_memory.resolve_academic_context() returning Known
+#     or Probable - this module has no opinion on attribution, it only
+#     persists what it's given and enforces the DB-level CHECK constraints
+#     via the same "known"/"probable" values.
+#   - signal_type/signal_strength must be one of
+#     backend.learning_memory's VALID_SIGNAL_TYPES/VALID_SIGNAL_STRENGTHS.
+# ---------------------------------------------------------------------------
+
+async def save_chat_learning_evidence(
+    user_token: str,
+    user_id: str,
+    subject: str,
+    signal_type: str,
+    signal_strength: str,
+    topic: Optional[str] = None,
+    chat_id: str = "",
+) -> None:
+    """
+    Persists one chat-derived learning_evidence row.
+
+    ONLY ever called with Known/Probable attribution - see
+    backend/learning_memory.py's CONTEXT RULE and backend/main.py's
+    chat_endpoint integration. There is deliberately no parameter for
+    "unknown" attribution here; an Unknown-attribution chat interaction
+    never reaches this function at all (it may still produce a
+    conversation_index row - see save_conversation_index_entry below).
+
+    PHASE 5C ACTIVATION UPDATE: `topic` is now optional (defaults to
+    None) - subject-only evidence (topic=None) is a legitimate, common,
+    honest outcome of resolve_academic_context's deterministic subject
+    detection, not a malformed call. `subject` remains required: every
+    Known/Probable ContextResolution always has a subject; only topic is
+    ever absent.
+
+    Best-effort from the caller's perspective: raises DatabaseError on
+    failure like every other write in this module, but backend/main.py
+    calls this from a FastAPI BackgroundTask specifically so a failure
+    here can NEVER turn a successful chat response into an error - see
+    the chat_endpoint docstring for the non-negotiable resilience rule.
+
+    topic_key is computed HERE, server-side, via the same
+    normalize_topic_key() Phase 5A already uses for quiz topics - never
+    accepted from the caller, so chat and quiz topics aggregate under an
+    identical normalization rule. topic_key is None whenever topic is
+    None/blank.
+    """
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise DatabaseError(
+            "Supabase is not configured on the server (SUPABASE_URL/SUPABASE_ANON_KEY missing)."
+        )
+    if signal_type not in VALID_SIGNAL_TYPES:
+        raise DatabaseError(f"invalid signal_type: {signal_type!r}")
+    if signal_strength not in VALID_SIGNAL_STRENGTHS:
+        raise DatabaseError(f"invalid signal_strength: {signal_strength!r}")
+    if not subject or not subject.strip():
+        # Defensive - callers should never reach here without a subject,
+        # since resolve_academic_context() only returns Known/Probable
+        # with a subject present, but a pure persistence function should
+        # not trust that unconditionally either.
+        raise DatabaseError("subject is required for known/probable chat evidence")
+
+    has_topic = bool(topic and topic.strip())
+
+    payload = {
+        "user_id": user_id,
+        "source": "chat",
+        "subject": subject,
+        "topic": topic.strip() if has_topic else None,
+        "topic_key": normalize_topic_key(topic) if has_topic else None,
+        "attribution_confidence": "known",
+        "signal_type": signal_type,
+        "signal_strength": signal_strength,
+        "chat_id": chat_id or None,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+            resp = await client.post(
+                f"{SUPABASE_URL}/rest/v1/learning_evidence",
+                headers=_rest_headers(user_token),
+                json=payload,
+            )
+    except httpx.RequestError:
+        logger.exception(
+            "save_chat_learning_evidence: network error inserting learning_evidence (user_id=%s)", user_id
+        )
+        raise DatabaseError("network error inserting learning_evidence")
+
+    if resp.status_code not in (200, 201):
+        logger.error(
+            "save_chat_learning_evidence: insert failed status=%d body=%s (user_id=%s)",
+            resp.status_code, resp.text[:500], user_id,
+        )
+        raise DatabaseError(f"learning_evidence insert failed with status {resp.status_code}")
+
+
+async def save_conversation_index_entry(
+    user_token: str,
+    user_id: str,
+    chat_id: str,
+    short_label: str,
+    subject: Optional[str] = None,
+    attribution_confidence: str = "unknown",
+) -> None:
+    """
+    Persists one lightweight conversation_index row - "a chat happened,
+    roughly about this, at this time." See
+    supabase/migrations/0003_learning_memory_foundation.sql for why this
+    is intentionally allowed to happen more than once per chat_id over
+    that chat's lifetime (each row is a truthful snapshot, not a mutable
+    summary).
+
+    short_label MUST come from an already-computed value (see
+    backend/main.py:chat_title_endpoint, which reuses the existing
+    generate_chat_title() Gemini call) - this function makes no AI call
+    and has no knowledge of Gemini at all.
+
+    Best-effort from the caller's perspective, same convention as
+    save_chat_learning_evidence above - called from a FastAPI
+    BackgroundTask so persistence failure never affects the chat title
+    response already sent to the student.
+    """
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise DatabaseError(
+            "Supabase is not configured on the server (SUPABASE_URL/SUPABASE_ANON_KEY missing)."
+        )
+    if attribution_confidence not in VALID_ATTRIBUTION_CONFIDENCES:
+        raise DatabaseError(f"invalid attribution_confidence: {attribution_confidence!r}")
+    if not chat_id or not chat_id.strip():
+        raise DatabaseError("chat_id is required for a conversation_index entry")
+    if not short_label or not short_label.strip():
+        raise DatabaseError("short_label is required for a conversation_index entry")
+
+    payload = {
+        "user_id": user_id,
+        "chat_id": chat_id,
+        "subject": subject if (subject and subject.strip()) else None,
+        "attribution_confidence": attribution_confidence,
+        "short_label": short_label.strip(),
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+            resp = await client.post(
+                f"{SUPABASE_URL}/rest/v1/conversation_index",
+                headers=_rest_headers(user_token),
+                json=payload,
+            )
+    except httpx.RequestError:
+        logger.exception(
+            "save_conversation_index_entry: network error inserting conversation_index (user_id=%s)", user_id
+        )
+        raise DatabaseError("network error inserting conversation_index")
+
+    if resp.status_code not in (200, 201):
+        logger.error(
+            "save_conversation_index_entry: insert failed status=%d body=%s (user_id=%s)",
+            resp.status_code, resp.text[:500], user_id,
+        )
+        raise DatabaseError(f"conversation_index insert failed with status {resp.status_code}")
+
+
+# ---------------------------------------------------------------------------
+# Phase 5D: GET /api/learning/history read path.
+# ---------------------------------------------------------------------------
+
+_CONVERSATION_INDEX_SELECT = "chat_id,subject,attribution_confidence,short_label,occurred_at"
+_LEARNING_EVIDENCE_SELECT = "subject,topic,topic_key,signal_type,signal_strength,occurred_at"
+
+# Defensive ceiling independent of whatever the caller requests - mirrors
+# the MAX_QUIZ_ANSWERS pattern in backend/main.py: generous for real use,
+# just not literally unbounded.
+MAX_LEARNING_HISTORY_LIMIT = 200
+
+
+async def get_learning_history(
+    user_token: str,
+    user_id: str,
+    since_iso: str,
+    until_iso: str,
+    limit: int = 100,
+) -> dict:
+    """
+    Fetches this student's own learning-memory activity in [since_iso,
+    until_iso), RLS-scoped exactly like get_user_topic_profile above -
+    `user_id` is accepted for logging only, never used to build a query
+    filter.
+
+    Returns:
+        {
+            "conversations": [
+                {"chat_id", "subject", "attribution_confidence",
+                 "short_label", "occurred_at"}, ...
+            ],  # from conversation_index, most recent first
+            "evidence_notes": [
+                {"topic", "topic_key", "notes": [str, ...]}, ...
+            ],  # from learning_evidence, via
+                # backend.learning_memory.build_conversation_notes -
+                # explainable, non-numeric, never merged with quiz mastery
+        }
+
+    since_iso/until_iso are expected to already be validated, bounded ISO
+    8601 UTC timestamps (see backend/main.py:learning_history_endpoint) -
+    this function does not itself impose a maximum range width, only a
+    maximum row count via `limit`.
+
+    Raises DatabaseError on any failure, same convention as every other
+    read/write in this module.
+    """
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise DatabaseError(
+            "Supabase is not configured on the server (SUPABASE_URL/SUPABASE_ANON_KEY missing)."
+        )
+
+    bounded_limit = max(1, min(limit, MAX_LEARNING_HISTORY_LIMIT))
+
+    try:
+        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+            conv_resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/conversation_index",
+                headers=_rest_headers(user_token),
+                params={
+                    "select": _CONVERSATION_INDEX_SELECT,
+                    "occurred_at": [f"gte.{since_iso}", f"lt.{until_iso}"],
+                    "order": "occurred_at.desc",
+                    "limit": str(bounded_limit),
+                },
+            )
+            evidence_resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/learning_evidence",
+                headers=_rest_headers(user_token),
+                params={
+                    "select": _LEARNING_EVIDENCE_SELECT,
+                    "occurred_at": [f"gte.{since_iso}", f"lt.{until_iso}"],
+                    "order": "occurred_at.desc",
+                    "limit": str(bounded_limit),
+                },
+            )
+    except httpx.RequestError:
+        logger.exception(
+            "get_learning_history: network error (user_id=%s)", user_id
+        )
+        raise DatabaseError("network error fetching learning history")
+
+    if conv_resp.status_code != 200:
+        logger.error(
+            "get_learning_history: conversation_index select failed status=%d body=%s (user_id=%s)",
+            conv_resp.status_code, conv_resp.text[:500], user_id,
+        )
+        raise DatabaseError(f"conversation_index select failed with status {conv_resp.status_code}")
+    if evidence_resp.status_code != 200:
+        logger.error(
+            "get_learning_history: learning_evidence select failed status=%d body=%s (user_id=%s)",
+            evidence_resp.status_code, evidence_resp.text[:500], user_id,
+        )
+        raise DatabaseError(f"learning_evidence select failed with status {evidence_resp.status_code}")
+
+    try:
+        conversations = conv_resp.json()
+        evidence_rows = evidence_resp.json()
+    except ValueError:
+        raise DatabaseError("unexpected response shape from learning history select")
+
+    if not isinstance(conversations, list) or not isinstance(evidence_rows, list):
+        raise DatabaseError("unexpected response shape from learning history select")
+
+    return {
+        "conversations": [c for c in conversations if isinstance(c, dict)],
+        "evidence_notes": build_conversation_notes(
+            [e for e in evidence_rows if isinstance(e, dict)]
+        ),
+    }
