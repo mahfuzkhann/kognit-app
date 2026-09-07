@@ -31,6 +31,8 @@ import httpx
 
 from backend.mastery_engine import EvidenceEvent, compute_topic_status
 from backend.learning_memory import (
+    CONFIDENCE_KNOWN,
+    CONFIDENCE_PROBABLE,
     VALID_ATTRIBUTION_CONFIDENCES,
     VALID_SIGNAL_STRENGTHS,
     VALID_SIGNAL_TYPES,
@@ -508,6 +510,7 @@ async def save_chat_learning_evidence(
     subject: str,
     signal_type: str,
     signal_strength: str,
+    attribution_confidence: str,
     topic: Optional[str] = None,
     chat_id: str = "",
 ) -> None:
@@ -516,14 +519,28 @@ async def save_chat_learning_evidence(
 
     ONLY ever called with Known/Probable attribution - see
     backend/learning_memory.py's CONTEXT RULE and backend/main.py's
-    chat_endpoint integration. There is deliberately no parameter for
-    "unknown" attribution here; an Unknown-attribution chat interaction
-    never reaches this function at all (it may still produce a
-    conversation_index row - see save_conversation_index_entry below).
+    chat_endpoint integration. `attribution_confidence` MUST be exactly
+    "known" or "probable" (see the migration's own CHECK constraint in
+    supabase/migrations/0003_learning_memory_foundation.sql, which this
+    validation mirrors); "unknown" is rejected here as a hard error, not
+    silently written - an Unknown-attribution chat interaction should
+    never reach this function at all (the caller in backend/main.py
+    already gates on `context.confidence in ("known", "probable")` before
+    scheduling this call), but this function does not trust that
+    unconditionally either, matching the existing validation style for
+    signal_type/signal_strength below.
 
-    PHASE 5C ACTIVATION UPDATE: `topic` is now optional (defaults to
-    None) - subject-only evidence (topic=None) is a legitimate, common,
-    honest outcome of resolve_academic_context's deterministic subject
+    BUGFIX (attribution-confidence propagation): this parameter used to
+    not exist at all - the row written was unconditionally stamped
+    "known" regardless of what resolve_academic_context() actually
+    determined, silently discarding a genuine "probable" (inherited-
+    context) resolution. The caller in backend/main.py now forwards
+    `context.confidence` through unchanged - see
+    _background_persist_chat_evidence there.
+
+    PHASE 5C ACTIVATION UPDATE: `topic` is optional (defaults to None) -
+    subject-only evidence (topic=None) is a legitimate, common, honest
+    outcome of resolve_academic_context's deterministic subject
     detection, not a malformed call. `subject` remains required: every
     Known/Probable ContextResolution always has a subject; only topic is
     ever absent.
@@ -544,6 +561,14 @@ async def save_chat_learning_evidence(
         raise DatabaseError(
             "Supabase is not configured on the server (SUPABASE_URL/SUPABASE_ANON_KEY missing)."
         )
+    if attribution_confidence not in (CONFIDENCE_KNOWN, CONFIDENCE_PROBABLE):
+        # Deliberately a STRICTER check than VALID_ATTRIBUTION_CONFIDENCES
+        # (which also permits "unknown", correctly, for conversation_index
+        # below) - "unknown" is never a valid value for this table. This
+        # is the enforcement point for requirement "Unknown context must
+        # continue to produce no learning_evidence row", independent of
+        # whatever the caller's own gating logic does.
+        raise DatabaseError(f"invalid attribution_confidence for learning_evidence: {attribution_confidence!r}")
     if signal_type not in VALID_SIGNAL_TYPES:
         raise DatabaseError(f"invalid signal_type: {signal_type!r}")
     if signal_strength not in VALID_SIGNAL_STRENGTHS:
@@ -563,7 +588,7 @@ async def save_chat_learning_evidence(
         "subject": subject,
         "topic": topic.strip() if has_topic else None,
         "topic_key": normalize_topic_key(topic) if has_topic else None,
-        "attribution_confidence": "known",
+        "attribution_confidence": attribution_confidence,
         "signal_type": signal_type,
         "signal_strength": signal_strength,
         "chat_id": chat_id or None,

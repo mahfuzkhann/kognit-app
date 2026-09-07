@@ -209,6 +209,59 @@ class TestChatResilienceToLearningMemoryFailures:
         assert resp.status_code == 200
         mock_save.assert_not_called()
 
+    def test_PRODUCTION_ACTIVATION_inherited_probable_context_persists_as_probable_not_known(self, client):
+        """
+        BUGFIX REGRESSION (attribution-confidence propagation): Case 2's
+        inherited context resolves to PROBABLE, not KNOWN (see
+        backend.learning_memory.resolve_academic_context). Before the
+        fix, backend/database.py:save_chat_learning_evidence hardcoded
+        "known" regardless of what was actually resolved, so this exact
+        scenario would have silently written "known" to the database.
+        This test drives the real, unmocked resolver end-to-end through
+        /api/chat and asserts the persisted row is genuinely "probable".
+        """
+        _override_auth_as("lm-chat-user-12")
+        history = '[{"role": "user", "text": "Explain Newton'"'"'s second law of physics."}, ' \
+                  '{"role": "bot", "text": "It states that..."}]'
+        with patch.object(main_module, "generate_ai_response", return_value="Sure, here's another way."), \
+             patch.object(main_module, "save_chat_learning_evidence", new=AsyncMock()) as mock_save:
+            resp = client.post(
+                "/api/chat",
+                data={
+                    "prompt": "Aro easy kore bujhao.",
+                    "mode": "direct",
+                    "chat_id": "chat_probable_1",
+                    "history": history,
+                },
+            )
+        assert resp.status_code == 200
+        mock_save.assert_awaited_once()
+        _, kwargs = mock_save.call_args
+        assert kwargs["attribution_confidence"] == "probable"
+        assert kwargs["attribution_confidence"] != "known"
+        assert kwargs["subject"] == "Physics"
+
+    def test_PRODUCTION_ACTIVATION_explicit_known_context_persists_as_known(self, client):
+        """Companion to the probable-context regression test above -
+        confirms the positive case (an explicit, current-message subject
+        match) still correctly persists as "known", not just that
+        "probable" no longer gets clobbered."""
+        _override_auth_as("lm-chat-user-13")
+        with patch.object(main_module, "generate_ai_response", return_value="Sure."), \
+             patch.object(main_module, "save_chat_learning_evidence", new=AsyncMock()) as mock_save:
+            resp = client.post(
+                "/api/chat",
+                data={
+                    "prompt": "Physics-e Newton's second law bujhte parchi na.",
+                    "mode": "direct",
+                    "chat_id": "chat_known_1",
+                },
+            )
+        assert resp.status_code == 200
+        mock_save.assert_awaited_once()
+        _, kwargs = mock_save.call_args
+        assert kwargs["attribution_confidence"] == "known"
+
     def test_ai_engine_failure_is_unrelated_to_learning_memory_and_still_handled(self, client):
         """Pre-existing behavior (backend/main.py's own outer try/except)
         must survive this change untouched: a Gemini failure still returns

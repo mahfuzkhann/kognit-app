@@ -572,6 +572,7 @@ async def _background_persist_chat_evidence(
     topic: str,
     signal_type: str,
     signal_strength: str,
+    attribution_confidence: str,
     chat_id: str,
 ) -> None:
     try:
@@ -582,6 +583,7 @@ async def _background_persist_chat_evidence(
             topic=topic,
             signal_type=signal_type,
             signal_strength=signal_strength,
+            attribution_confidence=attribution_confidence,
             chat_id=chat_id,
         )
     except DatabaseError:
@@ -747,6 +749,17 @@ async def chat_endpoint(
                             topic=context.topic,
                             signal_type=signal.signal_type,
                             signal_strength=signal.signal_strength,
+                            # BUGFIX: this was previously omitted entirely,
+                            # which meant save_chat_learning_evidence always
+                            # hardcoded "known" regardless of what was
+                            # actually resolved here - a genuine "probable"
+                            # (inherited-context) resolution was silently
+                            # written to the database as "known". Forwarding
+                            # context.confidence unchanged is the fix -
+                            # this can only ever be "known" or "probable"
+                            # at this point, since the `if` above already
+                            # excludes "unknown".
+                            attribution_confidence=context.confidence,
                             chat_id=chat_id,
                         )
         except Exception:

@@ -51,7 +51,7 @@ class TestSaveChatLearningEvidenceConfigAndInput:
         with pytest.raises(database.DatabaseError):
             asyncio.run(database.save_chat_learning_evidence(
                 user_token="t", user_id="u", subject="Physics", topic="Force",
-                signal_type="confusion", signal_strength="weak",
+                signal_type="confusion", signal_strength="weak", attribution_confidence="known",
             ))
 
     def test_invalid_signal_type_raises_without_network_call(self, monkeypatch):
@@ -65,7 +65,7 @@ class TestSaveChatLearningEvidenceConfigAndInput:
         with pytest.raises(database.DatabaseError):
             asyncio.run(database.save_chat_learning_evidence(
                 user_token="t", user_id="u", subject="Physics", topic="Force",
-                signal_type="not_a_real_signal", signal_strength="weak",
+                signal_type="not_a_real_signal", signal_strength="weak", attribution_confidence="known",
             ))
         assert called == []
 
@@ -80,7 +80,7 @@ class TestSaveChatLearningEvidenceConfigAndInput:
         with pytest.raises(database.DatabaseError):
             asyncio.run(database.save_chat_learning_evidence(
                 user_token="t", user_id="u", subject="Physics", topic="Force",
-                signal_type="confusion", signal_strength="extremely_strong",
+                signal_type="confusion", signal_strength="extremely_strong", attribution_confidence="known",
             ))
         assert called == []
 
@@ -88,14 +88,14 @@ class TestSaveChatLearningEvidenceConfigAndInput:
         with pytest.raises(database.DatabaseError):
             asyncio.run(database.save_chat_learning_evidence(
                 user_token="t", user_id="u", subject="", topic="Force",
-                signal_type="confusion", signal_strength="weak",
+                signal_type="confusion", signal_strength="weak", attribution_confidence="known",
             ))
 
     def test_missing_topic_raises(self):
         with pytest.raises(database.DatabaseError):
             asyncio.run(database.save_chat_learning_evidence(
                 user_token="t", user_id="u", subject="Physics", topic="   ",
-                signal_type="confusion", signal_strength="weak",
+                signal_type="confusion", signal_strength="weak", attribution_confidence="known",
             ))
         # NOTE: this asserts that a BLANK topic ("   ") still raises -
         # save_chat_learning_evidence rejects a whitespace-only topic the
@@ -128,7 +128,8 @@ class TestSaveChatLearningEvidenceInsert:
         asyncio.run(database.save_chat_learning_evidence(
             user_token="student-token", user_id="user-1",
             subject="Physics", topic="Force & Motion",
-            signal_type="confusion", signal_strength="weak", chat_id="chat_123",
+            signal_type="confusion", signal_strength="weak", attribution_confidence="known",
+            chat_id="chat_123",
         ))
 
     def test_forwards_students_own_token_never_service_role(self, monkeypatch):
@@ -142,6 +143,7 @@ class TestSaveChatLearningEvidenceInsert:
         asyncio.run(database.save_chat_learning_evidence(
             user_token="THIS_STUDENTS_OWN_TOKEN", user_id="u",
             subject="Physics", topic="Force", signal_type="confusion", signal_strength="weak",
+            attribution_confidence="known",
         ))
         assert seen == ["Bearer THIS_STUDENTS_OWN_TOKEN"]
 
@@ -150,7 +152,7 @@ class TestSaveChatLearningEvidenceInsert:
         with pytest.raises(database.DatabaseError):
             asyncio.run(database.save_chat_learning_evidence(
                 user_token="t", user_id="u", subject="Physics", topic="Force",
-                signal_type="confusion", signal_strength="weak",
+                signal_type="confusion", signal_strength="weak", attribution_confidence="known",
             ))
 
     def test_network_error_raises_database_error(self, monkeypatch):
@@ -161,7 +163,7 @@ class TestSaveChatLearningEvidenceInsert:
         with pytest.raises(database.DatabaseError):
             asyncio.run(database.save_chat_learning_evidence(
                 user_token="t", user_id="u", subject="Physics", topic="Force",
-                signal_type="confusion", signal_strength="weak",
+                signal_type="confusion", signal_strength="weak", attribution_confidence="known",
             ))
 
 
@@ -181,7 +183,7 @@ class TestSaveChatLearningEvidenceSubjectOnly:
         _patch_async_client(monkeypatch, _make_transport(handler))
         asyncio.run(database.save_chat_learning_evidence(
             user_token="t", user_id="u", subject="Physics",
-            signal_type="confusion", signal_strength="weak",
+            signal_type="confusion", signal_strength="weak", attribution_confidence="known",
         ))
 
     def test_explicit_none_topic_succeeds(self, monkeypatch):
@@ -193,15 +195,102 @@ class TestSaveChatLearningEvidenceSubjectOnly:
         _patch_async_client(monkeypatch, _make_transport(handler))
         asyncio.run(database.save_chat_learning_evidence(
             user_token="t", user_id="u", subject="Physics", topic=None,
-            signal_type="confusion", signal_strength="weak",
+            signal_type="confusion", signal_strength="weak", attribution_confidence="known",
         ))
 
     def test_subject_alone_still_requires_a_real_subject(self):
         with pytest.raises(database.DatabaseError):
             asyncio.run(database.save_chat_learning_evidence(
                 user_token="t", user_id="u", subject="   ",
-                signal_type="confusion", signal_strength="weak",
+                signal_type="confusion", signal_strength="weak", attribution_confidence="known",
             ))
+
+
+class TestSaveChatLearningEvidenceAttributionConfidencePropagation:
+    """
+    Regression tests for the attribution-confidence propagation bugfix.
+
+    ROOT CAUSE (see backend/database.py:save_chat_learning_evidence and
+    backend/main.py:_background_persist_chat_evidence): the function used
+    to hardcode "attribution_confidence": "known" in its insert payload
+    and had no parameter for it at all, so a genuine "probable"
+    resolution from resolve_academic_context() was silently written as
+    "known". The fix adds a required `attribution_confidence` parameter
+    that flows unchanged from the resolver, through backend/main.py's
+    chat_endpoint and _background_persist_chat_evidence, into this
+    function's insert payload - and rejects "unknown" outright, since
+    "unknown" must never produce a learning_evidence row at all.
+    """
+
+    def test_known_context_writes_known_row(self, monkeypatch):
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = jsonlib.loads(request.content)
+            assert body["attribution_confidence"] == "known"
+            return httpx.Response(201, json=[{"id": "e1", **body}])
+
+        _patch_async_client(monkeypatch, _make_transport(handler))
+        asyncio.run(database.save_chat_learning_evidence(
+            user_token="t", user_id="u", subject="Physics",
+            signal_type="confusion", signal_strength="weak", attribution_confidence="known",
+        ))
+
+    def test_probable_context_writes_probable_row_not_known(self, monkeypatch):
+        """THE bug this fix addresses: a probable resolution must be
+        persisted as "probable", never silently upgraded to "known"."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = jsonlib.loads(request.content)
+            assert body["attribution_confidence"] == "probable"
+            assert body["attribution_confidence"] != "known"
+            return httpx.Response(201, json=[{"id": "e1", **body}])
+
+        _patch_async_client(monkeypatch, _make_transport(handler))
+        asyncio.run(database.save_chat_learning_evidence(
+            user_token="t", user_id="u", subject="Physics",
+            signal_type="confusion", signal_strength="weak", attribution_confidence="probable",
+        ))
+
+    def test_unknown_attribution_confidence_is_rejected_without_network_call(self, monkeypatch):
+        """Unknown context must NEVER produce a learning_evidence row -
+        enforced here at the persistence layer itself, independent of
+        whatever gating the caller in backend/main.py also does."""
+        called = []
+
+        def handler(request):
+            called.append(request)
+            return httpx.Response(201, json=[{"id": "e1"}])
+
+        _patch_async_client(monkeypatch, _make_transport(handler))
+        with pytest.raises(database.DatabaseError):
+            asyncio.run(database.save_chat_learning_evidence(
+                user_token="t", user_id="u", subject="Physics",
+                signal_type="confusion", signal_strength="weak", attribution_confidence="unknown",
+            ))
+        assert called == []
+
+    def test_arbitrary_invalid_attribution_confidence_is_rejected_without_network_call(self, monkeypatch):
+        """Not just "unknown" - any value outside {known, probable} must
+        be rejected before any network call is made, so a caller bug
+        cannot silently write malformed evidence."""
+        called = []
+
+        def handler(request):
+            called.append(request)
+            return httpx.Response(201, json=[{"id": "e1"}])
+
+        _patch_async_client(monkeypatch, _make_transport(handler))
+        with pytest.raises(database.DatabaseError):
+            asyncio.run(database.save_chat_learning_evidence(
+                user_token="t", user_id="u", subject="Physics",
+                signal_type="confusion", signal_strength="weak", attribution_confidence="very_confident",
+            ))
+        assert called == []
+
+    def test_attribution_confidence_has_no_default_value(self):
+        """A caller MUST be explicit - there is no silent fallback to
+        "known" (which is exactly how this bug happened the first time)."""
+        import inspect
+        params = inspect.signature(database.save_chat_learning_evidence).parameters
+        assert params["attribution_confidence"].default is inspect.Parameter.empty
 
 
 # ---------------------------------------------------------------------------
