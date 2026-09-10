@@ -303,19 +303,24 @@
 </div>
 
 <!-- PROFILE MODAL (Phase 6A) -->
-<!-- Single compact form used for BOTH first-time onboarding (auto-opened
-     by checkAndLoadProfile() in app.js when GET /api/profile returns 404)
-     and later edits (opened via the sidebar profile-trigger-btn above).
-     Deliberately just three fields, per the Phase 6A zero-friction
-     requirement - no multi-step wizard, no extra questions. -->
+<!-- Single compact interaction used for BOTH first-time onboarding
+     (auto-opened by checkAndLoadProfile() in app.js when GET /api/profile
+     returns 404) and later edits (opened via the sidebar
+     profile-trigger-btn above). Deliberately just Name, Class, and
+     (when applicable) Stream - no wizard, no extra questions, no
+     explanatory copy beyond the title. Class/Stream use tappable pill
+     buttons rather than <select> dropdowns so choosing feels immediate
+     rather than form-like; #profile-stream-group is hidden entirely by
+     app.js's updateProfileStreamVisibility() when Class 6-8 is selected,
+     since Class 6-8 has no Science/Commerce/Arts stream in the NCTB
+     curriculum (that starts at Class 9) - see NO_STREAM_CLASSES in
+     backend/main.py for the actual enforcement boundary. -->
 <div id="profile-modal" class="modal-overlay hidden">
     <div class="modal-card profile-card" role="dialog" aria-modal="true" aria-labelledby="profile-modal-title-text">
         <div class="modal-header">
             <h2><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"></circle><path d="M4 20c0-4 4-6 8-6s8 2 8 6"></path></svg><span id="profile-modal-title-text">Your Profile</span></h2>
             <button class="close-modal-btn" onclick="closeProfileModal()" aria-label="Close"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
         </div>
-
-        <p id="profile-modal-desc" class="modal-desc hidden">Just the basics, so Kognit can tailor your experience.</p>
 
         <div id="profile-error-msg" class="auth-error-msg hidden"></div>
 
@@ -325,21 +330,21 @@
         </div>
 
         <div class="form-group">
-            <label for="profile-class-select">Class</label>
-            <select id="profile-class-select">
-                <option value="Class 9-10 (SSC)">Class 9-10 (SSC)</option>
-                <option value="Class 11-12 (HSC)">Class 11-12 (HSC)</option>
-                <option value="Class 6-8">Class 6-8</option>
-            </select>
+            <label id="profile-class-label">Class</label>
+            <div class="pill-group" id="profile-class-group" role="group" aria-labelledby="profile-class-label">
+                <button type="button" class="pill-btn" data-value="Class 6-8" aria-pressed="false" onclick="selectProfileClass(this)">Class 6-8</button>
+                <button type="button" class="pill-btn" data-value="Class 9-10 (SSC)" aria-pressed="false" onclick="selectProfileClass(this)">Class 9-10 (SSC)</button>
+                <button type="button" class="pill-btn" data-value="Class 11-12 (HSC)" aria-pressed="false" onclick="selectProfileClass(this)">Class 11-12 (HSC)</button>
+            </div>
         </div>
 
-        <div class="form-group">
-            <label for="profile-stream-select">Stream</label>
-            <select id="profile-stream-select">
-                <option value="Science (বিজ্ঞান)">Science (বিজ্ঞান)</option>
-                <option value="Commerce (ব্যবসায় শিক্ষা)">Commerce (ব্যবসায় শিক্ষা)</option>
-                <option value="Arts (মানবিক)">Arts (মানবিক)</option>
-            </select>
+        <div class="form-group" id="profile-stream-group">
+            <label id="profile-stream-label">Stream</label>
+            <div class="pill-group" id="profile-stream-pills" role="group" aria-labelledby="profile-stream-label">
+                <button type="button" class="pill-btn" data-value="Science (বিজ্ঞান)" aria-pressed="false" onclick="selectProfileStream(this)">Science (বিজ্ঞান)</button>
+                <button type="button" class="pill-btn" data-value="Commerce (ব্যবসায় শিক্ষা)" aria-pressed="false" onclick="selectProfileStream(this)">Commerce (ব্যবসায় শিক্ষা)</button>
+                <button type="button" class="pill-btn" data-value="Arts (মানবিক)" aria-pressed="false" onclick="selectProfileStream(this)">Arts (মানবিক)</button>
+            </div>
         </div>
 
         <button id="profile-save-btn" class="start-quiz-btn" onclick="saveProfile()">Save</button>

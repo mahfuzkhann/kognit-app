@@ -183,6 +183,28 @@ class TestUpsertStudentProfileHappyPath:
         ))
         assert seen_auth_headers == ["Bearer THIS_STUDENTS_OWN_TOKEN"]
 
+    def test_none_stream_sent_as_json_null_bug2(self, monkeypatch):
+        # BUG 2 (Phase 6A correction): Class 6-8 has no stream -
+        # backend/main.py passes Python None for that case, which must
+        # serialize to a real JSON null (clearing the column via
+        # PostgREST), not the string "None" and not be omitted from the
+        # payload (omitting it would leave a previously-set stream
+        # untouched on an UPDATE, which would be wrong if a student edits
+        # their class down to 6-8).
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = jsonlib.loads(request.content)
+            assert "stream" in body
+            assert body["stream"] is None
+            no_stream_row = {**SAMPLE_ROW, "user_class": "Class 6-8", "stream": None}
+            return httpx.Response(201, json=[no_stream_row])
+
+        _patch_async_client(monkeypatch, _make_transport(handler))
+        result = asyncio.run(database.upsert_student_profile(
+            user_token="t", user_id="user-1", name="Mahfuz Khan",
+            user_class="Class 6-8", stream=None,
+        ))
+        assert result["stream"] is None
+
 
 class TestUpsertStudentProfileFailureModes:
     def test_non_2xx_raises(self, monkeypatch):

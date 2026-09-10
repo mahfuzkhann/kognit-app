@@ -1030,16 +1030,27 @@ async def quiz_submit_endpoint(
 # PHASE 6A: student profile (name/class/stream) validation.
 #
 # SINGLE SOURCE OF TRUTH WARNING: VALID_PROFILE_CLASSES / VALID_PROFILE_STREAMS
-# must exactly match the <option> values in templates/index.html's
-# #class-select / #stream-select (duplicated for the profile modal as
-# #profile-class-select / #profile-stream-select) and
-# static/js/app.js's DEFAULT_CHAT_SETTINGS. There is no shared config file
-# between the frontend and backend in this codebase - the same situation
-# already existed, unvalidated, for board/class/stream on /api/chat and for
-# QUIZ_SUBJECTS_BY_STREAM on the quiz modal. If a class/stream option is
-# ever added, removed, or reworded, this set must be updated in the same
-# change, or the backend will reject an otherwise-legitimate frontend
-# value.
+# must exactly match the <option>/pill-button values in templates/index.html's
+# #class-select / #stream-select (top bar) and #profile-class-group /
+# #profile-stream-pills (profile modal), and static/js/app.js's
+# DEFAULT_CHAT_SETTINGS / PROFILE_NO_STREAM_CLASSES. There is no shared
+# config file between the frontend and backend in this codebase - the same
+# situation already existed, unvalidated, for board/class/stream on
+# /api/chat and for QUIZ_SUBJECTS_BY_STREAM on the quiz modal. If a class/
+# stream option is ever added, removed, or reworded, this set must be
+# updated in the same change, or the backend will reject an otherwise-
+# legitimate frontend value.
+#
+# BUG 2 FIX (Phase 6A correction): Class 6-8 predates Science/Commerce/Arts
+# streaming in the NCTB curriculum - that only starts at Class 9. See
+# NO_STREAM_CLASSES below - this is now the ONE place that decides which
+# classes require a stream, matched on the frontend only for UX (hiding
+# the field), never for enforcement (see _validate_profile_stream).
+# supabase/migrations/0006_student_profile_stream_optional.sql made the
+# `stream` column nullable to make storing "no stream" possible at all;
+# it deliberately does not itself encode which classes are exempt, for
+# the same reason VALID_PROFILE_CLASSES/VALID_PROFILE_STREAMS are not a
+# DB-level CHECK constraint (see that migration's comment).
 # ---------------------------------------------------------------------------
 MAX_PROFILE_NAME_LENGTH = 100
 
@@ -1052,6 +1063,9 @@ VALID_PROFILE_STREAMS = {
     "Science (বিজ্ঞান)",
     "Commerce (ব্যবসায় শিক্ষা)",
     "Arts (মানবিক)",
+}
+NO_STREAM_CLASSES = {
+    "Class 6-8",
 }
 
 
@@ -1082,10 +1096,37 @@ def _validate_profile_class(raw_class: str) -> str:
     return raw_class
 
 
-def _validate_profile_stream(raw_stream: str) -> str:
-    if raw_stream not in VALID_PROFILE_STREAMS:
-        raise HTTPException(status_code=422, detail="Unsupported stream value.")
-    return raw_stream
+def _validate_profile_stream(clean_class: str, raw_stream: str) -> Optional[str]:
+    """
+    Returns the cleaned stream, or None for a class that has no stream at
+    all (see NO_STREAM_CLASSES) - or raises HTTPException(422).
+
+    `clean_class` must already have passed _validate_profile_class - this
+    function trusts it as one of VALID_PROFILE_CLASSES, it does not
+    re-validate it.
+
+    BUG 2 FIX: previously `stream` was unconditionally required to be one
+    of VALID_PROFILE_STREAMS, with no way to express "this class doesn't
+    have a stream" - Class 6-8 students had to pick a Science/Commerce/
+    Arts stream that doesn't exist for them in the real NCTB curriculum.
+    Now: for a NO_STREAM_CLASSES class, `stream` must be empty; for every
+    other (already-validated) class, `stream` is still required and must
+    be one of VALID_PROFILE_STREAMS - identical strictness to before for
+    every class this bug doesn't apply to.
+    """
+    cleaned = (raw_stream or "").strip()
+
+    if clean_class in NO_STREAM_CLASSES:
+        if cleaned:
+            raise HTTPException(
+                status_code=422,
+                detail="This class does not have a stream.",
+            )
+        return None
+
+    if cleaned not in VALID_PROFILE_STREAMS:
+        raise HTTPException(status_code=422, detail="A valid stream is required for this class.")
+    return cleaned
 
 
 @app.get("/api/profile")
@@ -1130,7 +1171,7 @@ async def get_profile_endpoint(
 async def update_profile_endpoint(
     name: str = Form(...),
     user_class: str = Form(...),
-    stream: str = Form(...),
+    stream: str = Form(""),
     user_and_token: Tuple[str, str] = Depends(get_current_user_and_token),
 ):
     """
@@ -1141,9 +1182,14 @@ async def update_profile_endpoint(
 
     Validates name/user_class/stream server-side (see
     _validate_profile_name/_validate_profile_class/_validate_profile_stream
-    above) - the frontend's fixed dropdowns are a UX convenience, never
-    the actual authorization/validation boundary, exactly like every other
-    validated input in this file.
+    above) - the frontend's fixed pill-button choices are a UX
+    convenience, never the actual authorization/validation boundary,
+    exactly like every other validated input in this file.
+
+    BUG 2 FIX: `stream` now defaults to "" (not required) because
+    NO_STREAM_CLASSES (Class 6-8) legitimately has none -
+    _validate_profile_stream is what actually decides whether an empty
+    stream is acceptable for the given class, not this Form() default.
 
     AUTHENTICATION/ISOLATION: identical pattern to get_profile_endpoint
     above - user_id/user_token come only from the verified JWT and are
@@ -1154,7 +1200,7 @@ async def update_profile_endpoint(
 
     clean_name = _validate_profile_name(name)
     clean_class = _validate_profile_class(user_class)
-    clean_stream = _validate_profile_stream(stream)
+    clean_stream = _validate_profile_stream(clean_class, stream)
 
     try:
         profile = await upsert_student_profile(

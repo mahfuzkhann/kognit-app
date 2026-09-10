@@ -1426,6 +1426,47 @@ body {
     max-width: 380px !important;
 }
 
+/* PHASE 6A CORRECTION: pill-button choice groups for Class/Stream in the
+   profile modal, replacing the earlier plain <select> dropdowns - a
+   tappable choice feels more like setting up a personal space and less
+   like filling out a registration form, while staying within the
+   existing visual language (same colors/radius family as .quiz-opt-btn).
+   #profile-stream-group (a .form-group) is hidden outright via the
+   existing global .hidden utility when Class 6-8 is selected - see
+   updateProfileStreamVisibility() in app.js. */
+.pill-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.pill-btn {
+    background: #18181f;
+    border: 1px solid #2e2e38;
+    color: #cbd5e1;
+    padding: 9px 14px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.pill-btn:hover {
+    border-color: #4f46e5;
+}
+
+.pill-btn:focus-visible {
+    outline: 2px solid #6366f1;
+    outline-offset: 2px;
+}
+
+.pill-btn.selected {
+    background: #3730a3;
+    border-color: #6366f1;
+    color: #ffffff;
+}
+
 .btn-auth-logout {
     background: rgba(239, 68, 68, 0.2);
     border: 1px solid rgba(239, 68, 68, 0.4);

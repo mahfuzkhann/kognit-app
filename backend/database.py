@@ -879,13 +879,22 @@ async def upsert_student_profile(
     user_id: str,
     name: str,
     user_class: str,
-    stream: str,
+    stream: Optional[str],
 ) -> dict:
     """
     Creates the authenticated student's profile if none exists yet, or
     updates it in place if one already does - a single idempotent write,
     matching the "GET /api/profile, PUT /api/profile" shape (no separate
     create/update endpoints needed).
+
+    `stream` is Optional: BUG 2 FIX (Phase 6A correction) - Class 6-8 has
+    no Science/Commerce/Arts stream in the NCTB curriculum, so
+    backend/main.py's _validate_profile_stream passes None for that case.
+    This function stores whatever it is given (None -> SQL NULL via
+    PostgREST) - it does not itself decide which classes may have a null
+    stream, that decision was already made by the caller. See
+    supabase/migrations/0006_student_profile_stream_optional.sql for the
+    column-level change that made this possible.
 
     Uses PostgREST's upsert (`Prefer: resolution=merge-duplicates`, POST
     with `on_conflict=user_id`) against the table's primary key - this is

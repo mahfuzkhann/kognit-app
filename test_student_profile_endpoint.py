@@ -167,9 +167,17 @@ class TestUpdateProfileValidation:
 
     def test_all_valid_classes_accepted(self, client):
         _override_auth_as("user-1")
-        for cls in ("Class 6-8", "Class 9-10 (SSC)", "Class 11-12 (HSC)"):
+        # Class 6-8 has no stream (see TestUpdateProfileNoStreamClasses
+        # below for the dedicated Bug 2 coverage) - every other class
+        # still requires one.
+        class_and_stream = [
+            ("Class 6-8", ""),
+            ("Class 9-10 (SSC)", "Science (বিজ্ঞান)"),
+            ("Class 11-12 (HSC)", "Science (বিজ্ঞান)"),
+        ]
+        for cls, stream in class_and_stream:
             with patch.object(main_module, "upsert_student_profile", new=AsyncMock(return_value=SAMPLE_PROFILE)):
-                resp = client.put("/api/profile", data={**VALID_FORM, "user_class": cls})
+                resp = client.put("/api/profile", data={**VALID_FORM, "user_class": cls, "stream": stream})
             assert resp.status_code == 200, cls
 
     def test_all_valid_streams_accepted(self, client):
@@ -184,6 +192,70 @@ class TestUpdateProfileValidation:
         with patch.object(main_module, "upsert_student_profile", new=AsyncMock(return_value=SAMPLE_PROFILE)) as mock_fn:
             client.put("/api/profile", data={**VALID_FORM, "name": "  Mahfuz Khan  "})
         assert mock_fn.call_args.kwargs["name"] == "Mahfuz Khan"
+
+
+# ---------------------------------------------------------------------------
+# BUG 2 (Phase 6A correction): Class 6-8 has no academic stream in the
+# NCTB curriculum (streaming starts at Class 9) - these tests are the
+# actual enforcement boundary; the frontend hiding the stream field is
+# only a UX convenience.
+# ---------------------------------------------------------------------------
+
+SAMPLE_PROFILE_NO_STREAM = {
+    "user_id": "user-1",
+    "name": "Mahfuz Khan",
+    "user_class": "Class 6-8",
+    "stream": None,
+    "created_at": "2026-09-01T10:00:00+00:00",
+    "updated_at": "2026-09-01T10:00:00+00:00",
+}
+
+
+class TestUpdateProfileNoStreamClasses:
+    def test_class_6_8_with_empty_stream_succeeds(self, client):
+        _override_auth_as("user-1")
+        with patch.object(main_module, "upsert_student_profile", new=AsyncMock(return_value=SAMPLE_PROFILE_NO_STREAM)) as mock_fn:
+            resp = client.put("/api/profile", data={"name": "Mahfuz Khan", "user_class": "Class 6-8", "stream": ""})
+        assert resp.status_code == 200
+        assert resp.json() == {"profile": SAMPLE_PROFILE_NO_STREAM}
+        assert mock_fn.call_args.kwargs["stream"] is None
+
+    def test_class_6_8_with_stream_field_omitted_entirely_succeeds(self, client):
+        # No "stream" key on the form at all - Form("") default covers it.
+        _override_auth_as("user-1")
+        with patch.object(main_module, "upsert_student_profile", new=AsyncMock(return_value=SAMPLE_PROFILE_NO_STREAM)):
+            resp = client.put("/api/profile", data={"name": "Mahfuz Khan", "user_class": "Class 6-8"})
+        assert resp.status_code == 200
+
+    def test_class_6_8_with_a_stream_is_rejected(self, client):
+        _override_auth_as("user-1")
+        resp = client.put("/api/profile", data={"name": "Mahfuz Khan", "user_class": "Class 6-8", "stream": "Science (বিজ্ঞান)"})
+        assert resp.status_code == 422
+
+    def test_class_9_10_without_stream_is_rejected(self, client):
+        _override_auth_as("user-1")
+        resp = client.put("/api/profile", data={"name": "Mahfuz Khan", "user_class": "Class 9-10 (SSC)", "stream": ""})
+        assert resp.status_code == 422
+
+    def test_class_11_12_without_stream_is_rejected(self, client):
+        _override_auth_as("user-1")
+        resp = client.put("/api/profile", data={"name": "Mahfuz Khan", "user_class": "Class 11-12 (HSC)", "stream": ""})
+        assert resp.status_code == 422
+
+    def test_class_9_10_with_stream_field_omitted_entirely_is_rejected(self, client):
+        _override_auth_as("user-1")
+        resp = client.put("/api/profile", data={"name": "Mahfuz Khan", "user_class": "Class 9-10 (SSC)"})
+        assert resp.status_code == 422
+
+    def test_stream_none_reaches_upsert_as_python_none_not_the_string_none(self, client):
+        # Guards against a subtle regression where "None" (string) leaks
+        # through instead of the actual Python None sentinel.
+        _override_auth_as("user-1")
+        with patch.object(main_module, "upsert_student_profile", new=AsyncMock(return_value=SAMPLE_PROFILE_NO_STREAM)) as mock_fn:
+            client.put("/api/profile", data={"name": "Mahfuz Khan", "user_class": "Class 6-8", "stream": ""})
+        stored_stream = mock_fn.call_args.kwargs["stream"]
+        assert stored_stream is None
+        assert stored_stream != "None"
 
 
 class TestUpdateProfileIsolation:

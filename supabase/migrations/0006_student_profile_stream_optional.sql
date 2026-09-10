@@ -1,0 +1,31 @@
+-- Kognit: Phase 6A correction - Class 6-8 has no academic stream.
+--
+-- Run this AFTER 0005_student_profile.sql has already been applied (and,
+-- per the live isolation-test report, verified). This is a NEW migration,
+-- not an edit to 0005 - 0005 is already live in the Supabase project;
+-- editing an already-applied migration file in place would not
+-- retroactively change the live schema, and would make the migration
+-- history lie about what was actually run.
+--
+-- BANGLADESH NCTB ACADEMIC RULE: Class 6-8 has no Science/Commerce/Arts
+-- streaming - that only begins at Class 9. Every other supported class
+-- (Class 9-10 (SSC), Class 11-12 (HSC)) still requires a stream.
+--
+-- This migration ONLY removes the structural NOT NULL that made "no
+-- stream" impossible to store at all. It does NOT itself decide which
+-- class requires a stream - that rule lives in exactly one place,
+-- backend/main.py's NO_STREAM_CLASSES / _validate_profile_stream, on
+-- purpose. See 0005_student_profile.sql's "CLASS/STREAM VALUES ARE NOT A
+-- DB-LEVEL ENUM/CHECK CONSTRAINT" comment - the same reasoning applies
+-- here: a DB-level CHECK duplicating "Class 6-8 => stream must be null"
+-- would be a second, independently-driftable definition of a business
+-- rule that already lives in Python, not a safety net worth the drift
+-- risk.
+--
+-- SAFE FOR EXISTING ROWS: every row inserted under 0005 already has a
+-- non-null stream (it was required then) - relaxing the constraint only
+-- affects future writes; no existing data is touched, migrated, or
+-- invalidated by this statement.
+
+alter table public.student_profiles
+    alter column stream drop not null;

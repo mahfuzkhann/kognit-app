@@ -448,17 +448,34 @@ window.handleLogout = async function() {
 function updateAuthUI(user) {
     const guestView = document.getElementById("auth-guest-view");
     const loggedView = document.getElementById("auth-logged-view");
-    const nameEl = document.getElementById("user-display-name");
-    const metaEl = document.getElementById("user-display-meta");
 
     if (user) {
         guestView.classList.add("hidden");
         loggedView.classList.remove("hidden");
-        // PHASE 6A: a placeholder until checkAndLoadProfile() resolves -
-        // renderProfileTrigger() overwrites this with the real name/class/
-        // stream (or opens the onboarding modal) moments later.
-        if (nameEl) nameEl.textContent = user.email;
-        if (metaEl) metaEl.textContent = "";
+        // BUG 1 FIX (Phase 6A correction): this function used to
+        // unconditionally reset user-display-name/meta to a "not yet
+        // loaded" placeholder (user.email / blank) on every call -
+        // including every time the PASSIVE onAuthStateChange listener
+        // below fires. That listener fires far more often than actual
+        // login/logout: Supabase's client emits its own internal
+        // INITIAL_SESSION event asynchronously (independent of the
+        // manual getSession() call in DOMContentLoaded, and not
+        // sequenced with it - a real race), plus it re-validates the
+        // session when the browser tab regains focus/visibility (already
+        // called out in that listener's own CHAT-05 comment). That
+        // listener deliberately never re-fetches the profile (by design,
+        // to avoid the CHAT-05 project-reload bug) - so every time it
+        // fired, this function was wiping an already-loaded profile back
+        // to the placeholder with nothing left to restore it. That is
+        // the actual root cause of "profile disappears on tab-switch-
+        // back" and "profile disappears/races on page refresh".
+        // renderProfileTrigger() is the single source of truth for what
+        // the trigger should show given the CURRENT value of
+        // currentProfile (loaded profile, or the pre-profile placeholder
+        // if none yet) - deferring to it here means this function can be
+        // called any number of times, for any reason, without ever
+        // regressing an already-loaded profile.
+        renderProfileTrigger();
     } else {
         guestView.classList.remove("hidden");
         loggedView.classList.add("hidden");
@@ -522,29 +539,84 @@ function renderProfileTrigger() {
 
     if (currentProfile) {
         nameEl.textContent = currentProfile.name;
-        metaEl.textContent = `${currentProfile.user_class} · ${currentProfile.stream}`;
+        // BUG 2: Class 6-8 has no stream (NCTB streaming only starts at
+        // Class 9) - currentProfile.stream is null/empty for those
+        // profiles, so show the class alone rather than "Class 6-8 ·
+        // null"/"Class 6-8 · ".
+        metaEl.textContent = currentProfile.stream
+            ? `${currentProfile.user_class} · ${currentProfile.stream}`
+            : currentProfile.user_class;
     } else if (currentUser) {
         nameEl.textContent = currentUser.email;
         metaEl.textContent = "Complete your profile";
     }
 }
 
+// BUG 2: Class 6-8 has no Science/Commerce/Arts streaming in the NCTB
+// curriculum - that only starts at Class 9. Must match
+// NO_STREAM_CLASSES in backend/main.py exactly (frontend hiding is UX
+// only; the backend validation is the actual boundary - see that
+// module's comment).
+const PROFILE_NO_STREAM_CLASSES = new Set(["Class 6-8"]);
+
+function _selectPill(groupId, value) {
+    const group = document.getElementById(groupId);
+    if (!group) return;
+    group.querySelectorAll(".pill-btn").forEach((btn) => {
+        const isMatch = btn.dataset.value === value;
+        btn.classList.toggle("selected", isMatch);
+        btn.setAttribute("aria-pressed", isMatch ? "true" : "false");
+    });
+}
+
+function _getSelectedPillValue(groupId) {
+    const selected = document.querySelector(`#${groupId} .pill-btn.selected`);
+    return selected ? selected.dataset.value : null;
+}
+
+function updateProfileStreamVisibility(selectedClass) {
+    const streamGroup = document.getElementById("profile-stream-group");
+    const hideStream = PROFILE_NO_STREAM_CLASSES.has(selectedClass);
+    streamGroup.classList.toggle("hidden", hideStream);
+    if (hideStream) {
+        // A previously-chosen stream no longer applies once Class 6-8 is
+        // selected - clear it rather than silently submitting a stale
+        // value the student can no longer see.
+        document.querySelectorAll("#profile-stream-pills .pill-btn").forEach((b) => {
+            b.classList.remove("selected");
+            b.setAttribute("aria-pressed", "false");
+        });
+    }
+}
+
+window.selectProfileClass = function(btn) {
+    _selectPill("profile-class-group", btn.dataset.value);
+    updateProfileStreamVisibility(btn.dataset.value);
+};
+
+window.selectProfileStream = function(btn) {
+    _selectPill("profile-stream-pills", btn.dataset.value);
+};
+
+let _profileModalIsOnboarding = false;
+
 window.openProfileModal = function(opts = {}) {
-    const onboarding = !!opts.onboarding;
+    _profileModalIsOnboarding = !!opts.onboarding;
 
     document.getElementById("profile-modal").classList.remove("hidden");
     document.getElementById("profile-error-msg").classList.add("hidden");
-    document.getElementById("profile-modal-desc").classList.toggle("hidden", !onboarding);
-    document.getElementById("profile-modal-title-text").textContent = onboarding ? "Welcome to Kognit" : "Your Profile";
+    document.getElementById("profile-modal-title-text").textContent =
+        _profileModalIsOnboarding ? "Set up your learning space" : "Your Profile";
+    document.getElementById("profile-save-btn").textContent =
+        _profileModalIsOnboarding ? "Get Started" : "Save";
 
     const nameInput = document.getElementById("profile-name-input");
-    const classSelect = document.getElementById("profile-class-select");
-    const streamSelect = document.getElementById("profile-stream-select");
 
+    let initialClass, initialStream;
     if (currentProfile) {
         nameInput.value = currentProfile.name;
-        classSelect.value = currentProfile.user_class;
-        streamSelect.value = currentProfile.stream;
+        initialClass = currentProfile.user_class;
+        initialStream = currentProfile.stream || null;
     } else {
         // GOOGLE SIGN-IN NAME PREFILL: Supabase's Google OAuth provider
         // populates user_metadata.full_name (and usually .name) - prefill
@@ -554,8 +626,14 @@ window.openProfileModal = function(opts = {}) {
         // only, never trusted for authorization.
         const meta = (currentUser && currentUser.user_metadata) || {};
         nameInput.value = meta.full_name || meta.name || "";
-        classSelect.value = "Class 9-10 (SSC)";
-        streamSelect.value = "Science (বিজ্ঞান)";
+        initialClass = "Class 9-10 (SSC)";
+        initialStream = "Science (বিজ্ঞান)";
+    }
+
+    _selectPill("profile-class-group", initialClass);
+    updateProfileStreamVisibility(initialClass);
+    if (initialStream) {
+        _selectPill("profile-stream-pills", initialStream);
     }
 
     setTimeout(() => nameInput.focus(), 50);
@@ -567,8 +645,6 @@ window.closeProfileModal = function() {
 
 window.saveProfile = async function() {
     const nameInput = document.getElementById("profile-name-input");
-    const classSelect = document.getElementById("profile-class-select");
-    const streamSelect = document.getElementById("profile-stream-select");
     const errorMsg = document.getElementById("profile-error-msg");
     const saveBtn = document.getElementById("profile-save-btn");
 
@@ -577,6 +653,24 @@ window.saveProfile = async function() {
     const name = nameInput.value.trim();
     if (!name) {
         errorMsg.textContent = "Please enter your name.";
+        errorMsg.classList.remove("hidden");
+        return;
+    }
+
+    const selectedClass = _getSelectedPillValue("profile-class-group");
+    if (!selectedClass) {
+        errorMsg.textContent = "Please select your class.";
+        errorMsg.classList.remove("hidden");
+        return;
+    }
+
+    // BUG 2: Class 6-8 has no stream - send an empty value rather than
+    // requiring a selection the curriculum doesn't have. Every other
+    // class still requires one.
+    const noStream = PROFILE_NO_STREAM_CLASSES.has(selectedClass);
+    const selectedStream = noStream ? "" : _getSelectedPillValue("profile-stream-pills");
+    if (!noStream && !selectedStream) {
+        errorMsg.textContent = "Please select your stream.";
         errorMsg.classList.remove("hidden");
         return;
     }
@@ -590,11 +684,13 @@ window.saveProfile = async function() {
 
     const formData = new FormData();
     formData.append("name", name);
-    formData.append("user_class", classSelect.value);
-    formData.append("stream", streamSelect.value);
+    formData.append("user_class", selectedClass);
+    formData.append("stream", selectedStream);
 
+    const savingLabel = "Saving...";
+    const idleLabel = _profileModalIsOnboarding ? "Get Started" : "Save";
     saveBtn.disabled = true;
-    saveBtn.textContent = "Saving...";
+    saveBtn.textContent = savingLabel;
 
     try {
         const resp = await fetch("/api/profile", {
@@ -619,7 +715,7 @@ window.saveProfile = async function() {
         errorMsg.classList.remove("hidden");
     } finally {
         saveBtn.disabled = false;
-        saveBtn.textContent = "Save";
+        saveBtn.textContent = idleLabel;
     }
 };
 
