@@ -20,6 +20,8 @@ from backend.database import (
     save_chat_learning_evidence,
     save_conversation_index_entry,
     get_learning_history,
+    get_student_profile,
+    upsert_student_profile,
     DatabaseError,
 )
 from backend.learning_memory import detect_learning_signals, is_meaningful_signal_set, resolve_academic_context
@@ -1022,6 +1024,156 @@ async def quiz_submit_endpoint(
     active_quiz_definitions.pop(quiz_id, None)
 
     return {"status": "success", **result}
+
+
+# ---------------------------------------------------------------------------
+# PHASE 6A: student profile (name/class/stream) validation.
+#
+# SINGLE SOURCE OF TRUTH WARNING: VALID_PROFILE_CLASSES / VALID_PROFILE_STREAMS
+# must exactly match the <option> values in templates/index.html's
+# #class-select / #stream-select (duplicated for the profile modal as
+# #profile-class-select / #profile-stream-select) and
+# static/js/app.js's DEFAULT_CHAT_SETTINGS. There is no shared config file
+# between the frontend and backend in this codebase - the same situation
+# already existed, unvalidated, for board/class/stream on /api/chat and for
+# QUIZ_SUBJECTS_BY_STREAM on the quiz modal. If a class/stream option is
+# ever added, removed, or reworded, this set must be updated in the same
+# change, or the backend will reject an otherwise-legitimate frontend
+# value.
+# ---------------------------------------------------------------------------
+MAX_PROFILE_NAME_LENGTH = 100
+
+VALID_PROFILE_CLASSES = {
+    "Class 6-8",
+    "Class 9-10 (SSC)",
+    "Class 11-12 (HSC)",
+}
+VALID_PROFILE_STREAMS = {
+    "Science (বিজ্ঞান)",
+    "Commerce (ব্যবসায় শিক্ষা)",
+    "Arts (মানবিক)",
+}
+
+
+def _validate_profile_name(raw_name: str) -> str:
+    """
+    Returns the cleaned name, or raises HTTPException(422) if invalid.
+
+    Deliberately permissive (Phase 6A requirement: Bangla names, English
+    names, and mixed formatting must all work equally well) - only rejects
+    empty/whitespace-only input and caps length. No character-class regex:
+    that would risk rejecting legitimate Bangladeshi names, which is
+    explicitly disallowed by the Phase 6A brief.
+    """
+    cleaned = (raw_name or "").strip()
+    if not cleaned:
+        raise HTTPException(status_code=422, detail="Name is required.")
+    if len(cleaned) > MAX_PROFILE_NAME_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Name must be {MAX_PROFILE_NAME_LENGTH} characters or fewer.",
+        )
+    return cleaned
+
+
+def _validate_profile_class(raw_class: str) -> str:
+    if raw_class not in VALID_PROFILE_CLASSES:
+        raise HTTPException(status_code=422, detail="Unsupported class value.")
+    return raw_class
+
+
+def _validate_profile_stream(raw_stream: str) -> str:
+    if raw_stream not in VALID_PROFILE_STREAMS:
+        raise HTTPException(status_code=422, detail="Unsupported stream value.")
+    return raw_stream
+
+
+@app.get("/api/profile")
+async def get_profile_endpoint(
+    user_and_token: Tuple[str, str] = Depends(get_current_user_and_token),
+):
+    """
+    PHASE 6A: returns the authenticated student's own profile (name/class/
+    stream), or HTTP 404 if they have not created one yet. The frontend
+    uses that 404 as the sole signal to show the (single, compact) profile
+    onboarding form - see static/js/app.js:checkAndLoadProfile.
+
+    AUTHENTICATION/ISOLATION: identical pattern to profile_topics_endpoint
+    below - identity and the Supabase access token both come only from the
+    verified JWT (get_current_user_and_token); RLS
+    (supabase/migrations/0005_student_profile.sql) is what actually
+    restricts the result to this student.
+
+    No Gemini call, no rate limiting needed - a simple, cheap, RLS-scoped
+    database read, same reasoning as profile_topics_endpoint below.
+    """
+    user_id, user_token = user_and_token
+
+    try:
+        profile = await get_student_profile(user_token=user_token, user_id=user_id)
+    except DatabaseError:
+        logger.exception(
+            "get_profile_endpoint: failed to fetch profile (user_id=%s)", user_id
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Could not load your profile right now. Please try again.",
+        )
+
+    if profile is None:
+        raise HTTPException(status_code=404, detail="No profile found.")
+
+    return {"profile": profile}
+
+
+@app.put("/api/profile")
+async def update_profile_endpoint(
+    name: str = Form(...),
+    user_class: str = Form(...),
+    stream: str = Form(...),
+    user_and_token: Tuple[str, str] = Depends(get_current_user_and_token),
+):
+    """
+    PHASE 6A: creates the authenticated student's profile if none exists
+    yet, or updates it in place if one already does. A single endpoint
+    covers both onboarding and later edits - see
+    backend/database.py:upsert_student_profile.
+
+    Validates name/user_class/stream server-side (see
+    _validate_profile_name/_validate_profile_class/_validate_profile_stream
+    above) - the frontend's fixed dropdowns are a UX convenience, never
+    the actual authorization/validation boundary, exactly like every other
+    validated input in this file.
+
+    AUTHENTICATION/ISOLATION: identical pattern to get_profile_endpoint
+    above - user_id/user_token come only from the verified JWT and are
+    never accepted from the request body, so a student can never write
+    another student's profile.
+    """
+    user_id, user_token = user_and_token
+
+    clean_name = _validate_profile_name(name)
+    clean_class = _validate_profile_class(user_class)
+    clean_stream = _validate_profile_stream(stream)
+
+    try:
+        profile = await upsert_student_profile(
+            user_token=user_token,
+            user_id=user_id,
+            name=clean_name,
+            user_class=clean_class,
+            stream=clean_stream,
+        )
+    except DatabaseError:
+        logger.exception(
+            "update_profile_endpoint: failed to save profile (user_id=%s)", user_id
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Could not save your profile right now. Please try again.",
+        )
+
+    return {"profile": profile}
 
 
 @app.get("/api/profile/topics")

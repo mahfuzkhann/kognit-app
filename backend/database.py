@@ -791,3 +791,167 @@ async def get_learning_history(
             [e for e in evidence_rows if isinstance(e, dict)]
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 6A: student profile (name/class/stream) - read + upsert.
+#
+# PURELY IDENTITY/CONTEXT DATA. See
+# supabase/migrations/0005_student_profile.sql for why this lives in its
+# own table and is never merged with quiz_attempts/learning_evidence -
+# this module must never be changed to have these two functions read from
+# or write into those tables, or vice versa.
+#
+# Validation of name/user_class/stream happens in backend/main.py BEFORE
+# either function below is called - exactly like every other write path
+# in this module, this code trusts its caller for value validity and only
+# guards against missing Supabase configuration and unexpected PostgREST
+# responses.
+# ---------------------------------------------------------------------------
+
+_STUDENT_PROFILE_SELECT = "user_id,name,user_class,stream,created_at,updated_at"
+
+
+async def get_student_profile(user_token: str, user_id: str) -> Optional[dict]:
+    """
+    Fetches the authenticated student's own profile.
+
+    Returns None if the student has never created a profile yet -
+    backend/main.py:get_profile_endpoint turns that into HTTP 404, which
+    the frontend uses as the sole signal to show the (single, compact)
+    onboarding form.
+
+    SECURITY: forwards the student's OWN Supabase access token, exactly
+    like get_user_topic_profile above - RLS (`auth.uid() = user_id`, see
+    student_profiles_select_own in 0005_student_profile.sql) is what
+    actually restricts the returned row to this student. `user_id` is
+    accepted only for logging, matching the established pattern in this
+    module - it is never used to build a query filter.
+
+    Raises DatabaseError on any failure, same convention as every other
+    read in this module.
+    """
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise DatabaseError(
+            "Supabase is not configured on the server (SUPABASE_URL/SUPABASE_ANON_KEY missing)."
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+            resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/student_profiles",
+                headers=_rest_headers(user_token),
+                params={"select": _STUDENT_PROFILE_SELECT, "limit": "1"},
+            )
+    except httpx.RequestError:
+        logger.exception(
+            "get_student_profile: network error fetching student_profiles (user_id=%s)", user_id
+        )
+        raise DatabaseError("network error fetching student_profiles")
+
+    if resp.status_code != 200:
+        logger.error(
+            "get_student_profile: student_profiles select failed status=%d body=%s (user_id=%s)",
+            resp.status_code, resp.text[:500], user_id,
+        )
+        raise DatabaseError(f"student_profiles select failed with status {resp.status_code}")
+
+    try:
+        rows = resp.json()
+    except ValueError:
+        logger.error(
+            "get_student_profile: unexpected student_profiles response shape (user_id=%s): %r",
+            user_id, resp.text[:500],
+        )
+        raise DatabaseError("unexpected response shape from student_profiles select")
+
+    if not isinstance(rows, list):
+        raise DatabaseError("unexpected response shape from student_profiles select")
+
+    if not rows:
+        return None
+
+    return rows[0]
+
+
+async def upsert_student_profile(
+    user_token: str,
+    user_id: str,
+    name: str,
+    user_class: str,
+    stream: str,
+) -> dict:
+    """
+    Creates the authenticated student's profile if none exists yet, or
+    updates it in place if one already does - a single idempotent write,
+    matching the "GET /api/profile, PUT /api/profile" shape (no separate
+    create/update endpoints needed).
+
+    Uses PostgREST's upsert (`Prefer: resolution=merge-duplicates`, POST
+    with `on_conflict=user_id`) against the table's primary key - this is
+    what makes "one profile per authenticated user" hold even under a
+    duplicate/racing submit, without this function needing to first SELECT
+    to decide insert-vs-update itself.
+
+    `updated_at` is deliberately NOT set here -
+    supabase/migrations/0005_student_profile.sql's
+    trg_student_profiles_updated_at trigger sets it from the database's
+    own clock on every UPDATE (including the UPDATE half of this upsert),
+    exactly like `created_at`'s DB-side default handles the INSERT case.
+    This function never computes or trusts a client-adjacent timestamp for
+    either column.
+
+    SECURITY: forwards the student's OWN Supabase access token - RLS
+    (`auth.uid() = user_id`, see student_profiles_insert_own /
+    student_profiles_update_own) is what actually restricts this write to
+    the caller's own row. A forged `user_id` could never satisfy those
+    policies' `with check`.
+
+    Raises DatabaseError on any failure, same convention as every other
+    write in this module.
+    """
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise DatabaseError(
+            "Supabase is not configured on the server (SUPABASE_URL/SUPABASE_ANON_KEY missing)."
+        )
+
+    payload = {
+        "user_id": user_id,
+        "name": name,
+        "user_class": user_class,
+        "stream": stream,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+            resp = await client.post(
+                f"{SUPABASE_URL}/rest/v1/student_profiles",
+                headers={
+                    **_rest_headers(user_token),
+                    "Prefer": "resolution=merge-duplicates,return=representation",
+                },
+                params={"on_conflict": "user_id"},
+                json=payload,
+            )
+    except httpx.RequestError:
+        logger.exception(
+            "upsert_student_profile: network error upserting student_profiles (user_id=%s)", user_id
+        )
+        raise DatabaseError("network error upserting student_profiles")
+
+    if resp.status_code not in (200, 201):
+        logger.error(
+            "upsert_student_profile: student_profiles upsert failed status=%d body=%s (user_id=%s)",
+            resp.status_code, resp.text[:500], user_id,
+        )
+        raise DatabaseError(f"student_profiles upsert failed with status {resp.status_code}")
+
+    try:
+        rows = resp.json()
+        return rows[0]
+    except (ValueError, KeyError, IndexError, TypeError):
+        logger.error(
+            "upsert_student_profile: unexpected student_profiles response shape (user_id=%s): %r",
+            user_id, resp.text[:500],
+        )
+        raise DatabaseError("unexpected response shape from student_profiles upsert")

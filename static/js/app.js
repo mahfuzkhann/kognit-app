@@ -8,6 +8,13 @@ const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 let currentUser = null;
 let isSignUpMode = false;
 
+// PHASE 6A: the authenticated student's own profile (name/class/stream),
+// or null if not yet loaded/created. See checkAndLoadProfile() below for
+// when this is populated - deliberately a separate, small piece of state
+// from `projects` (never synced through saveProjectsToStorage/localStorage,
+// never touched by Phase 5A-5E mastery/insight logic).
+let currentProfile = null;
+
 // ==================== APP STATE ====================
 let currentMode = "direct";
 let projects = [];
@@ -124,6 +131,10 @@ document.addEventListener("DOMContentLoaded", async () => {
         currentUser = session.user;
         updateAuthUI(currentUser);
         await loadProjectsFromDatabase();
+        // PHASE 6A: covers BOTH the returning-user session-restore case
+        // AND the Google OAuth redirect-back case (a full-page reload, so
+        // it lands here too - see the onAuthStateChange comment below).
+        await checkAndLoadProfile();
     } else {
         loadProjectsFromLocalStorage();
     }
@@ -386,6 +397,10 @@ window.handleEmailAuth = async function(type) {
         currentUser = result.data.user;
         updateAuthUI(currentUser);
         await loadProjectsFromDatabase();
+        // PHASE 6A: no-op if there's no active session yet (e.g. signup
+        // pending email verification) - fetchOwnProfile() checks for a
+        // session itself before calling the backend.
+        await checkAndLoadProfile();
         closeAuthModal();
         alert(type === 'signup' ? "Registration successful! Please check your email to verify." : "Logged in successfully!");
     }
@@ -421,6 +436,11 @@ window.handleLogout = async function() {
     activeProjectId = null;
     activeChatId = null;
 
+    // PHASE 6A: this student's profile must not leak into the next
+    // session on this browser (guest or a different account), same
+    // reasoning as clearing `projects`/localStorage above.
+    currentProfile = null;
+
     loadProjectsFromLocalStorage();
     alert("Logged out successfully!");
 };
@@ -428,17 +448,180 @@ window.handleLogout = async function() {
 function updateAuthUI(user) {
     const guestView = document.getElementById("auth-guest-view");
     const loggedView = document.getElementById("auth-logged-view");
-    const emailText = document.getElementById("user-display-email");
+    const nameEl = document.getElementById("user-display-name");
+    const metaEl = document.getElementById("user-display-meta");
 
     if (user) {
         guestView.classList.add("hidden");
         loggedView.classList.remove("hidden");
-        emailText.textContent = user.email;
+        // PHASE 6A: a placeholder until checkAndLoadProfile() resolves -
+        // renderProfileTrigger() overwrites this with the real name/class/
+        // stream (or opens the onboarding modal) moments later.
+        if (nameEl) nameEl.textContent = user.email;
+        if (metaEl) metaEl.textContent = "";
     } else {
         guestView.classList.remove("hidden");
         loggedView.classList.add("hidden");
     }
 }
+
+// ==================== PHASE 6A: STUDENT PROFILE ====================
+// Minimal persistent identity: name, class, stream only - see
+// backend/main.py's GET/PUT /api/profile and
+// supabase/migrations/0005_student_profile.sql. Deliberately NOT part of
+// `projects`/localStorage sync, and never merged with Phase 5A-5E
+// mastery/insight state - see that migration's comment for why.
+
+async function fetchOwnProfile() {
+    const { data: { session } } = await supabaseClient.auth.getSession();
+    if (!session) return { status: "unauthenticated" };
+
+    try {
+        const resp = await fetch("/api/profile", {
+            headers: { "Authorization": `Bearer ${session.access_token}` }
+        });
+        if (resp.status === 404) return { status: "missing" };
+        if (!resp.ok) return { status: "error" };
+        const data = await resp.json();
+        return { status: "found", profile: data.profile };
+    } catch (e) {
+        return { status: "error" };
+    }
+}
+
+// Called once per explicit login (initial session-restore on page load,
+// and every explicit sign-in via handleEmailAuth) - deliberately NEVER
+// called from the passive onAuthStateChange listener above, matching the
+// exact CHAT-05 convention documented on that listener (a listener that
+// also fires on tab-focus/session-recovery must never trigger a visible
+// state change like auto-opening a modal).
+async function checkAndLoadProfile() {
+    const result = await fetchOwnProfile();
+
+    if (result.status === "found") {
+        currentProfile = result.profile;
+        renderProfileTrigger();
+    } else if (result.status === "missing") {
+        currentProfile = null;
+        renderProfileTrigger();
+        // Zero-friction onboarding: a first-time student is asked for
+        // name/class/stream immediately, in the same compact form used
+        // for later edits - no separate welcome screen, no wizard.
+        openProfileModal({ onboarding: true });
+    }
+    // "unauthenticated"/"error": leave currentProfile untouched. A
+    // transient failure here must never block the rest of the app - the
+    // student can still open the profile from the sidebar manually later,
+    // which retries the fetch.
+}
+
+function renderProfileTrigger() {
+    const nameEl = document.getElementById("user-display-name");
+    const metaEl = document.getElementById("user-display-meta");
+    if (!nameEl || !metaEl) return;
+
+    if (currentProfile) {
+        nameEl.textContent = currentProfile.name;
+        metaEl.textContent = `${currentProfile.user_class} · ${currentProfile.stream}`;
+    } else if (currentUser) {
+        nameEl.textContent = currentUser.email;
+        metaEl.textContent = "Complete your profile";
+    }
+}
+
+window.openProfileModal = function(opts = {}) {
+    const onboarding = !!opts.onboarding;
+
+    document.getElementById("profile-modal").classList.remove("hidden");
+    document.getElementById("profile-error-msg").classList.add("hidden");
+    document.getElementById("profile-modal-desc").classList.toggle("hidden", !onboarding);
+    document.getElementById("profile-modal-title-text").textContent = onboarding ? "Welcome to Kognit" : "Your Profile";
+
+    const nameInput = document.getElementById("profile-name-input");
+    const classSelect = document.getElementById("profile-class-select");
+    const streamSelect = document.getElementById("profile-stream-select");
+
+    if (currentProfile) {
+        nameInput.value = currentProfile.name;
+        classSelect.value = currentProfile.user_class;
+        streamSelect.value = currentProfile.stream;
+    } else {
+        // GOOGLE SIGN-IN NAME PREFILL: Supabase's Google OAuth provider
+        // populates user_metadata.full_name (and usually .name) - prefill
+        // from whichever is present so the student doesn't have to retype
+        // a name Google already gave Kognit. The field stays fully
+        // editable (Phase 6A requirement): this is a display convenience
+        // only, never trusted for authorization.
+        const meta = (currentUser && currentUser.user_metadata) || {};
+        nameInput.value = meta.full_name || meta.name || "";
+        classSelect.value = "Class 9-10 (SSC)";
+        streamSelect.value = "Science (বিজ্ঞান)";
+    }
+
+    setTimeout(() => nameInput.focus(), 50);
+};
+
+window.closeProfileModal = function() {
+    document.getElementById("profile-modal").classList.add("hidden");
+};
+
+window.saveProfile = async function() {
+    const nameInput = document.getElementById("profile-name-input");
+    const classSelect = document.getElementById("profile-class-select");
+    const streamSelect = document.getElementById("profile-stream-select");
+    const errorMsg = document.getElementById("profile-error-msg");
+    const saveBtn = document.getElementById("profile-save-btn");
+
+    errorMsg.classList.add("hidden");
+
+    const name = nameInput.value.trim();
+    if (!name) {
+        errorMsg.textContent = "Please enter your name.";
+        errorMsg.classList.remove("hidden");
+        return;
+    }
+
+    const { data: { session } } = await supabaseClient.auth.getSession();
+    if (!session) {
+        errorMsg.textContent = "Please log in again.";
+        errorMsg.classList.remove("hidden");
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append("name", name);
+    formData.append("user_class", classSelect.value);
+    formData.append("stream", streamSelect.value);
+
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Saving...";
+
+    try {
+        const resp = await fetch("/api/profile", {
+            method: "PUT",
+            headers: { "Authorization": `Bearer ${session.access_token}` },
+            body: formData
+        });
+
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            errorMsg.textContent = data.detail || "Could not save your profile. Please try again.";
+            errorMsg.classList.remove("hidden");
+            return;
+        }
+
+        const data = await resp.json();
+        currentProfile = data.profile;
+        renderProfileTrigger();
+        closeProfileModal();
+    } catch (e) {
+        errorMsg.textContent = "Could not save your profile. Please try again.";
+        errorMsg.classList.remove("hidden");
+    } finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = "Save";
+    }
+};
 
 // ==================== BUG 1 FIX: LOGIN-REQUIRED UX ====================
 // Login is mandatory for every protected action (chat, quiz, PDF upload) -

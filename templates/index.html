@@ -130,9 +130,21 @@
                 <button class="btn-auth-login" onclick="openAuthModal()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path></svg> Login / Sign Up</button>
             </div>
             <div id="auth-logged-view" class="user-profile-bar hidden">
-                <div class="user-info">
-                    <span id="user-display-email" class="user-email-text"></span>
-                </div>
+                <!-- PHASE 6A: sidebar-bottom profile entry. The whole row
+                     (except Logout) opens the profile modal - see
+                     openProfileModal()/checkAndLoadProfile() in app.js.
+                     Shows the student's name + "Class · Stream" once a
+                     profile exists; falls back to their email with a
+                     "Complete your profile" hint before that (which is
+                     only ever visible for a brief moment, since a missing
+                     profile also auto-opens the modal on login). -->
+                <button type="button" id="profile-trigger-btn" class="profile-trigger-btn" onclick="openProfileModal()" aria-haspopup="dialog" aria-label="Open your profile">
+                    <span class="profile-trigger-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"></circle><path d="M4 20c0-4 4-6 8-6s8 2 8 6"></path></svg></span>
+                    <span class="user-info">
+                        <span id="user-display-name" class="user-name-text"></span>
+                        <span id="user-display-meta" class="user-meta-text"></span>
+                    </span>
+                </button>
                 <button id="logout-btn" class="btn-auth-logout" onclick="handleLogout()" title="Logout"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg></button>
             </div>
         </div>
@@ -287,6 +299,50 @@
             <span id="auth-toggle-desc">Don't have an account?</span>
             <a href="javascript:void(0)" id="auth-toggle-link" onclick="toggleAuthMode()">Sign Up</a>
         </div>
+    </div>
+</div>
+
+<!-- PROFILE MODAL (Phase 6A) -->
+<!-- Single compact form used for BOTH first-time onboarding (auto-opened
+     by checkAndLoadProfile() in app.js when GET /api/profile returns 404)
+     and later edits (opened via the sidebar profile-trigger-btn above).
+     Deliberately just three fields, per the Phase 6A zero-friction
+     requirement - no multi-step wizard, no extra questions. -->
+<div id="profile-modal" class="modal-overlay hidden">
+    <div class="modal-card profile-card" role="dialog" aria-modal="true" aria-labelledby="profile-modal-title-text">
+        <div class="modal-header">
+            <h2><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"></circle><path d="M4 20c0-4 4-6 8-6s8 2 8 6"></path></svg><span id="profile-modal-title-text">Your Profile</span></h2>
+            <button class="close-modal-btn" onclick="closeProfileModal()" aria-label="Close"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
+        </div>
+
+        <p id="profile-modal-desc" class="modal-desc hidden">Just the basics, so Kognit can tailor your experience.</p>
+
+        <div id="profile-error-msg" class="auth-error-msg hidden"></div>
+
+        <div class="form-group">
+            <label for="profile-name-input">Name</label>
+            <input type="text" id="profile-name-input" placeholder="Your name" maxlength="100">
+        </div>
+
+        <div class="form-group">
+            <label for="profile-class-select">Class</label>
+            <select id="profile-class-select">
+                <option value="Class 9-10 (SSC)">Class 9-10 (SSC)</option>
+                <option value="Class 11-12 (HSC)">Class 11-12 (HSC)</option>
+                <option value="Class 6-8">Class 6-8</option>
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="profile-stream-select">Stream</label>
+            <select id="profile-stream-select">
+                <option value="Science (বিজ্ঞান)">Science (বিজ্ঞান)</option>
+                <option value="Commerce (ব্যবসায় শিক্ষা)">Commerce (ব্যবসায় শিক্ষা)</option>
+                <option value="Arts (মানবিক)">Arts (মানবিক)</option>
+            </select>
+        </div>
+
+        <button id="profile-save-btn" class="start-quiz-btn" onclick="saveProfile()">Save</button>
     </div>
 </div>
 

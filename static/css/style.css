@@ -1367,13 +1367,63 @@ body {
     overflow: hidden;
 }
 
-.user-email-text {
-    font-size: 12px;
+/* PHASE 6A: sidebar-bottom profile trigger (name + class/stream, opens the
+   profile modal). Sits inside the existing .user-profile-bar row next to
+   the unchanged Logout button. */
+.profile-trigger-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    border: none;
+    padding: 4px;
+    border-radius: 6px;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.profile-trigger-btn:hover,
+.profile-trigger-btn:focus-visible {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.profile-trigger-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.08);
     color: #cbd5e1;
+}
+
+.user-name-text {
+    font-size: 12px;
+    font-weight: 600;
+    color: #e2e8f0;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     display: block;
+}
+
+.user-meta-text {
+    font-size: 11px;
+    color: #888888;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: block;
+}
+
+.profile-card {
+    max-width: 380px !important;
 }
 
 .btn-auth-logout {
