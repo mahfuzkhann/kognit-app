@@ -20,6 +20,7 @@ from backend.database import (
     save_chat_learning_evidence,
     save_conversation_index_entry,
     get_learning_history,
+    get_learning_insights,
     get_student_profile,
     upsert_student_profile,
     DatabaseError,
@@ -1507,3 +1508,54 @@ async def learning_history_endpoint(
         )
 
     return result
+
+# ---------------------------------------------------------------------------
+# Phase 5E: GET /api/profile/insights
+# ---------------------------------------------------------------------------
+
+@app.get("/api/profile/insights")
+async def profile_insights_endpoint(
+    user_and_token: Tuple[str, str] = Depends(get_current_user_and_token),
+):
+    """
+    PHASE 5E: Student Intelligence read endpoint for chat-derived
+    insights - the qualitative counterpart to /api/profile/topics above
+    (which remains entirely unchanged and quiz-only).
+
+    Returns the authenticated student's own chat-based learning insights
+    (repeated_difficulty / recurring_confusion / emerging_strength),
+    computed fresh from backend/database.py:get_learning_insights on
+    every call - nothing precomputed or cached server-side, matching
+    profile_topics_endpoint's own stated architecture choice, for the
+    same reason: retuning backend.insight_engine's thresholds later needs
+    no data migration.
+
+    AUTHENTICATION: identical pattern to profile_topics_endpoint and
+    learning_history_endpoint - identity and the Supabase access token
+    both come from get_current_user_and_token (the verified JWT), never
+    from anything client-supplied. RLS is what actually restricts the
+    returned rows to this student; this endpoint's body never sees or
+    handles a user_id it could get wrong.
+
+    Deliberately does NOT merge with /api/profile/topics' response - see
+    backend.insight_engine's module docstring for why quiz-based status
+    and chat-based insights are kept as two separate, differently-shaped
+    outputs rather than one combined score.
+
+    No Gemini call, no rate limiting needed here - same reasoning as
+    profile_topics_endpoint: a simple, cheap, RLS-scoped database read.
+    """
+    user_id, user_token = user_and_token
+
+    try:
+        insights = await get_learning_insights(user_token=user_token, user_id=user_id)
+    except DatabaseError:
+        logger.exception(
+            "profile_insights_endpoint: failed to fetch learning insights (user_id=%s)", user_id
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Could not load your learning insights right now. Please try again.",
+        )
+
+    return {"insights": insights}

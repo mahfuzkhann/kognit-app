@@ -38,6 +38,7 @@ from backend.learning_memory import (
     VALID_SIGNAL_TYPES,
     build_conversation_notes,
 )
+from backend.insight_engine import ChatEvidenceRecord, compute_insights
 
 logger = logging.getLogger("kognit.database")
 
@@ -971,3 +972,154 @@ async def upsert_student_profile(
             user_id, resp.text[:500],
         )
         raise DatabaseError("unexpected response shape from student_profiles upsert")
+
+# ---------------------------------------------------------------------------
+# Phase 5E: GET /api/profile/insights read path.
+#
+# This is the ONLY place in the codebase that knows both "what a
+# learning_evidence row looks like" AND "what a ChatEvidenceRecord looks
+# like" - backend.insight_engine never sees a row, and never learns that
+# its input came from PostgREST, exactly mirroring get_user_topic_profile/
+# _build_topic_profile's relationship with backend.mastery_engine above.
+# ---------------------------------------------------------------------------
+
+_INSIGHT_EVIDENCE_SELECT = "id,subject,topic,topic_key,signal_type,attribution_confidence,occurred_at"
+
+# Bounded by row COUNT, not a date range (unlike get_learning_history,
+# which is a recall/date-picker feature) - Phase 5E insights should
+# reflect a student's evidence regardless of exactly how long ago it
+# happened, but must still never scan unlimited history (brief Section
+# 21). 500 rows is generous for a beta-stage evidence volume while still
+# being a real ceiling, not "unbounded in practice."
+MAX_INSIGHT_EVIDENCE_ROWS = 500
+
+
+async def get_learning_insights(user_token: str, user_id: str) -> list:
+    """
+    Fetches this student's own chat-derived learning_evidence (bounded by
+    MAX_INSIGHT_EVIDENCE_ROWS, most recent first) and computes Phase 5E
+    Student Intelligence insights via backend.insight_engine.compute_insights.
+
+    SECURITY: identical pattern to get_user_topic_profile/get_learning_history -
+    forwards the student's OWN Supabase access token; RLS
+    (`auth.uid() = user_id` on learning_evidence, see
+    supabase/migrations/0003_learning_memory_foundation.sql) is what
+    actually restricts the returned rows to this student. `user_id` is
+    accepted for logging only, never used to build a query filter.
+
+    Raises DatabaseError on any failure, same convention as every other
+    read/write in this module.
+    """
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise DatabaseError(
+            "Supabase is not configured on the server (SUPABASE_URL/SUPABASE_ANON_KEY missing)."
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+            resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/learning_evidence",
+                headers=_rest_headers(user_token),
+                params={
+                    "select": _INSIGHT_EVIDENCE_SELECT,
+                    "order": "occurred_at.desc",
+                    "limit": str(MAX_INSIGHT_EVIDENCE_ROWS),
+                },
+            )
+    except httpx.RequestError:
+        logger.exception(
+            "get_learning_insights: network error fetching learning_evidence (user_id=%s)", user_id
+        )
+        raise DatabaseError("network error fetching learning_evidence")
+
+    if resp.status_code != 200:
+        logger.error(
+            "get_learning_insights: learning_evidence select failed status=%d body=%s (user_id=%s)",
+            resp.status_code, resp.text[:500], user_id,
+        )
+        raise DatabaseError(f"learning_evidence select failed with status {resp.status_code}")
+
+    try:
+        rows = resp.json()
+    except ValueError:
+        logger.error(
+            "get_learning_insights: unexpected learning_evidence response shape (user_id=%s): %r",
+            user_id, resp.text[:500],
+        )
+        raise DatabaseError("unexpected response shape from learning_evidence select")
+
+    if not isinstance(rows, list):
+        raise DatabaseError("unexpected response shape from learning_evidence select")
+
+    return _build_insights(rows, user_id=user_id)
+
+
+def _build_insights(rows: list, user_id: str) -> list:
+    """
+    Translates raw learning_evidence rows into ChatEvidenceRecord
+    instances and runs backend.insight_engine.compute_insights.
+
+    Malformed individual rows are skipped (logged), matching
+    _build_topic_profile's established resilience convention - one bad
+    row must not hide a student's entire insight set.
+    """
+    records = []
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+
+        subject = row.get("subject")
+        signal_type = row.get("signal_type")
+        attribution_confidence = row.get("attribution_confidence")
+        record_id = row.get("id")
+        occurred_at_raw = row.get("occurred_at")
+
+        if not isinstance(subject, str) or not subject.strip():
+            continue
+        if not isinstance(signal_type, str) or not signal_type:
+            continue
+        if not isinstance(attribution_confidence, str) or attribution_confidence not in (
+            CONFIDENCE_KNOWN, CONFIDENCE_PROBABLE,
+        ):
+            # Includes the CONFIDENCE_UNKNOWN case defensively - no row in
+            # learning_evidence should ever actually have this value (the
+            # table's own CHECK constraint forbids it), but a translation
+            # function should not trust that unconditionally either.
+            continue
+
+        occurred_at = _parse_timestamptz(occurred_at_raw)
+        if occurred_at is None:
+            logger.warning(
+                "get_learning_insights: skipping row with unparseable occurred_at "
+                "(user_id=%s, evidence_id=%r)", user_id, record_id,
+            )
+            continue
+
+        records.append(
+            ChatEvidenceRecord(
+                record_id=str(record_id) if record_id is not None else "",
+                subject=subject,
+                topic=row.get("topic") if isinstance(row.get("topic"), str) else None,
+                topic_key=row.get("topic_key") if isinstance(row.get("topic_key"), str) else None,
+                signal_type=signal_type,
+                attribution_confidence=attribution_confidence,
+                occurred_at=occurred_at,
+            )
+        )
+
+    insights = compute_insights(records)
+
+    return [
+        {
+            "subject": insight.subject,
+            "topic": insight.topic,
+            "topic_key": insight.topic_key,
+            "insight_type": insight.insight_type,
+            "confidence": insight.confidence,
+            "evidence_count": insight.evidence_count,
+            "first_observed_at": insight.first_observed_at.isoformat(),
+            "last_observed_at": insight.last_observed_at.isoformat(),
+        }
+        for insight in insights
+    ]
