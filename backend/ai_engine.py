@@ -365,14 +365,29 @@ def generate_ai_response(
     prompt: str,
     mode: str = "direct",
     board: str = "NCTB",
-    user_class: str = "SSC",
-    stream: str = "Science",
+    user_class: Optional[str] = None,
+    stream: Optional[str] = None,
     image_bytes: bytes = None,
     pdf_context: str = "",
     history: list = None
 ) -> str:
+    # ISSUE 1 FIX (Phase 6A final correction): user_class/stream now come
+    # from the student's own Profile (backend/main.py:
+    # _get_academic_context) and can genuinely be None - either because
+    # the student has no profile yet, or (stream only) because their
+    # class has no stream (Class 6-8). "Missing profile must NOT cause
+    # the system to guess a class/stream" - so this builds the academic
+    # clause conditionally rather than ever substituting a fabricated
+    # default class/stream into the prompt.
+    if user_class and stream:
+        academic_clause = f"studying {user_class} ({stream} stream)"
+    elif user_class:
+        academic_clause = f"studying {user_class}"
+    else:
+        academic_clause = "at the secondary/higher-secondary level"
+
     system_instruction = (
-        f"You are Kognit, an expert academic AI tutor for students in {board}, studying {user_class} ({stream} stream).\n"
+        f"You are Kognit, an expert academic AI tutor for students in {board}, {academic_clause}.\n"
         "STRICT ACADEMIC & VISION RULES:\n"
         "1. IMAGE ANALYSIS: If an image is provided, carefully read handwritten questions, printed equations, or diagrams. Solve step-by-step.\n"
         "2. PDF CONTEXT: If a PDF document text context is provided below, prioritize answering questions based on that document content.\n"
@@ -663,7 +678,14 @@ def validate_quiz_questions(raw_questions) -> list:
     return validated
 
 
-def generate_quiz_questions(board: str, user_class: str, subject: str, stream: str, topic: str, count: int = 5) -> list:
+def generate_quiz_questions(
+    board: str,
+    user_class: Optional[str],
+    subject: str,
+    stream: Optional[str],
+    topic: str,
+    count: int = 5,
+) -> list:
     """
     P0 RELIABILITY FIX (504 investigation): previously this function made a
     single Gemini call with a blanket `except Exception: return []` - a
@@ -686,9 +708,21 @@ def generate_quiz_questions(board: str, user_class: str, subject: str, stream: s
     retried, matching this task's "unexpected errors -> do not retry"
     instruction. If real-world data later shows quiz generation also needs
     bucket-A handling, that is a separate, explicitly-scoped follow-up.
+
+    `user_class`/`stream` are Optional: ISSUE 1 FIX (Phase 6A final
+    correction) - see generate_ai_response's identical handling above for
+    why (missing profile, or a Class 6-8 profile with no stream). Never
+    fabricates a class/stream in the prompt when either is missing.
     """
+    if user_class and stream:
+        academic_clause = f"{user_class}, {stream} stream"
+    elif user_class:
+        academic_clause = f"{user_class}"
+    else:
+        academic_clause = "the secondary/higher-secondary level"
+
     system_instruction = (
-        f"You are an exam paper creator for {board}, {user_class}, {stream} stream, Subject: {subject}.\n"
+        f"You are an exam paper creator for {board}, {academic_clause}, Subject: {subject}.\n"
         f"Generate {count} high-quality Multiple Choice Questions (MCQs) on the topic: '{topic}'.\n"
         "Output MUST be strict raw JSON array only. Do not wrap in markdown or include conversational text. Format:\n"
         "[\n"

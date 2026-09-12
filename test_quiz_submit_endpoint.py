@@ -209,12 +209,28 @@ class TestQuizSubmitScoreIntegrity:
 
 
 class TestQuizGenerateDefinitionStorage:
+    SAMPLE_PROFILE = {
+        "user_id": "user-1",
+        "name": "Test Student",
+        "user_class": "Class 11-12 (HSC)",
+        "stream": "Science (বিজ্ঞান)",
+        "created_at": "2026-09-01T10:00:00+00:00",
+        "updated_at": "2026-09-01T10:00:00+00:00",
+    }
+
     def test_generate_stores_definition_and_returns_quiz_id(self, client):
+        # ISSUE 1 FIX: user_class/stream in the stored definition (and
+        # forwarded to generate_quiz_questions) now come from the
+        # student's PROFILE, never from client-sent form fields - this
+        # request deliberately sends board/user_class/stream form values
+        # that DISAGREE with the mocked profile, to prove the form values
+        # are ignored, not merely unused by coincidence.
         _override_auth_as("user-1")
-        with patch.object(main_module, "generate_quiz_questions", return_value=SAMPLE_QUESTIONS) as mock_gen:
+        with patch.object(main_module, "generate_quiz_questions", return_value=SAMPLE_QUESTIONS) as mock_gen, \
+             patch.object(main_module, "get_student_profile", new=AsyncMock(return_value=self.SAMPLE_PROFILE)):
             resp = client.post("/api/quiz/generate", data={
-                "board": "NCTB", "user_class": "SSC", "subject": "Physics",
-                "stream": "Science (বিজ্ঞান)", "topic": "Algebra", "count": 2,
+                "board": "SOME OTHER BOARD", "user_class": "Class 6-8", "subject": "Physics",
+                "stream": "Commerce (ব্যবসায় শিক্ষা)", "topic": "Algebra", "count": 2,
             })
         assert resp.status_code == 200
         body = resp.json()
@@ -224,34 +240,72 @@ class TestQuizGenerateDefinitionStorage:
         stored = main_module.active_quiz_definitions[quiz_id]
         assert stored["user_id"] == "user-1"
         assert stored["subject"] == "Physics"
+        # Profile-derived values, NOT the form's "Class 6-8"/"Commerce".
+        assert stored["user_class"] == "Class 11-12 (HSC)"
         assert stored["stream"] == "Science (বিজ্ঞান)"
-        assert stored["questions"] == SAMPLE_QUESTIONS
-        assert stored["submitted"] is False
-        # PHASE 5A: subject and stream are now distinct and both forwarded
-        # to the AI engine (previously the "subject" slot actually held
-        # the stream value - see backend/ai_engine.py:generate_quiz_questions).
+        assert stored["board"] == main_module.DEFAULT_BOARD
         _, kwargs = mock_gen.call_args
         assert kwargs["subject"] == "Physics"
+        assert kwargs["user_class"] == "Class 11-12 (HSC)"
         assert kwargs["stream"] == "Science (বিজ্ঞান)"
+        assert kwargs["board"] == main_module.DEFAULT_BOARD
 
-    def test_generate_without_stream_falls_back_to_default(self, client):
-        # Defensive default only - protects against an older cached
-        # frontend build that doesn't yet send `stream`; not relied on in
-        # normal operation.
+    def test_generate_with_no_profile_omits_class_and_stream(self, client):
+        # ISSUE 1: "missing profile must NOT cause the system to guess a
+        # class/stream" - generate_quiz_questions must receive None/None,
+        # and the NOT-NULL quiz_attempts.user_class column gets the
+        # storage-only sentinel, never a fabricated real class.
         _override_auth_as("user-1")
-        with patch.object(main_module, "generate_quiz_questions", return_value=SAMPLE_QUESTIONS):
-            resp = client.post("/api/quiz/generate", data={
-                "board": "NCTB", "user_class": "SSC", "subject": "Math",
-                "topic": "Algebra", "count": 2,
-            })
+        with patch.object(main_module, "generate_quiz_questions", return_value=SAMPLE_QUESTIONS) as mock_gen, \
+             patch.object(main_module, "get_student_profile", new=AsyncMock(return_value=None)):
+            resp = client.post("/api/quiz/generate", data={"subject": "Physics", "topic": "Algebra", "count": 2})
         assert resp.status_code == 200
+        quiz_id = resp.json()["quiz_id"]
+        stored = main_module.active_quiz_definitions[quiz_id]
+        assert stored["user_class"] == main_module.UNSPECIFIED_USER_CLASS
+        assert stored["stream"] is None
+        _, kwargs = mock_gen.call_args
+        assert kwargs["user_class"] is None
+        assert kwargs["stream"] is None
+
+    def test_generate_for_class_6_to_8_profile_has_no_stream(self, client):
+        # ISSUE 1 / Bug 2 interaction: a real Class 6-8 profile has
+        # stream=None - this must reach generate_quiz_questions as None,
+        # not be treated as "missing profile".
+        _override_auth_as("user-1")
+        profile_6_8 = {**self.SAMPLE_PROFILE, "user_class": "Class 6-8", "stream": None}
+        with patch.object(main_module, "generate_quiz_questions", return_value=SAMPLE_QUESTIONS) as mock_gen, \
+             patch.object(main_module, "get_student_profile", new=AsyncMock(return_value=profile_6_8)):
+            resp = client.post("/api/quiz/generate", data={"subject": "General", "topic": "x", "count": 2})
+        assert resp.status_code == 200
+        quiz_id = resp.json()["quiz_id"]
+        stored = main_module.active_quiz_definitions[quiz_id]
+        assert stored["user_class"] == "Class 6-8"
+        assert stored["stream"] is None
+        _, kwargs = mock_gen.call_args
+        assert kwargs["user_class"] == "Class 6-8"
+        assert kwargs["stream"] is None
+
+    def test_generate_client_cannot_choose_another_users_profile_via_form(self, client):
+        # ISSUE 1 security requirement: there is no user_id (or class/
+        # stream) field on this form at all anymore - identity can only
+        # come from the verified token, and get_student_profile is always
+        # called with THIS request's authenticated user_id.
+        _override_auth_as("user-42", token="student-42-token")
+        mock_profile_fn = AsyncMock(return_value=self.SAMPLE_PROFILE)
+        with patch.object(main_module, "generate_quiz_questions", return_value=SAMPLE_QUESTIONS), \
+             patch.object(main_module, "get_student_profile", new=mock_profile_fn):
+            client.post("/api/quiz/generate", data={"subject": "Physics", "topic": "x", "count": 2})
+        _, kwargs = mock_profile_fn.call_args
+        assert kwargs["user_id"] == "user-42"
+        assert kwargs["user_token"] == "student-42-token"
 
     def test_generate_empty_questions_returns_none_quiz_id_and_stores_nothing(self, client):
         _override_auth_as("user-1")
-        with patch.object(main_module, "generate_quiz_questions", return_value=[]):
+        with patch.object(main_module, "generate_quiz_questions", return_value=[]), \
+             patch.object(main_module, "get_student_profile", new=AsyncMock(return_value=self.SAMPLE_PROFILE)):
             resp = client.post("/api/quiz/generate", data={
-                "board": "NCTB", "user_class": "SSC", "subject": "Math",
-                "stream": "Science (বিজ্ঞান)", "topic": "Algebra", "count": 2,
+                "subject": "Math", "topic": "Algebra", "count": 2,
             })
         assert resp.status_code == 200
         assert resp.json() == {"questions": [], "quiz_id": None}
@@ -260,8 +314,7 @@ class TestQuizGenerateDefinitionStorage:
     def test_generate_requires_auth(self, client):
         with patch.object(main_module, "generate_quiz_questions", return_value=SAMPLE_QUESTIONS):
             resp = client.post("/api/quiz/generate", data={
-                "board": "NCTB", "user_class": "SSC", "subject": "Math",
-                "stream": "Science (বিজ্ঞান)", "topic": "Algebra", "count": 2,
+                "subject": "Math", "topic": "Algebra", "count": 2,
             })
         assert resp.status_code == 401
 

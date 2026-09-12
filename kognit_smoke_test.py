@@ -261,6 +261,103 @@ class TestHappyPath:
 
 
 # ---------------------------------------------------------------------------
+# ISSUE 1 (Phase 6A final correction): user_class/stream are now Optional -
+# a missing profile or a Class 6-8 profile (no stream) must never cause
+# the prompt to fabricate/guess an academic level.
+# ---------------------------------------------------------------------------
+
+class TestOptionalAcademicContext:
+    def test_full_class_and_stream_included(self, mock_client):
+        chat = MagicMock()
+        chat.send_message.return_value = _make_response("ok")
+        mock_client.chats.create.return_value = chat
+
+        ai_engine.generate_ai_response(
+            prompt="hi", mode="direct", board="BD NCTB (Bangla)",
+            user_class="Class 11-12 (HSC)", stream="Science (বিজ্ঞান)",
+        )
+
+        config = mock_client.chats.create.call_args.kwargs["config"]
+        assert "studying Class 11-12 (HSC) (Science (বিজ্ঞান) stream)" in config.system_instruction
+
+    def test_class_with_no_stream_omits_stream_clause(self, mock_client):
+        # Class 6-8 profile: stream=None, must not say "(None stream)".
+        chat = MagicMock()
+        chat.send_message.return_value = _make_response("ok")
+        mock_client.chats.create.return_value = chat
+
+        ai_engine.generate_ai_response(
+            prompt="hi", mode="direct", board="BD NCTB (Bangla)",
+            user_class="Class 6-8", stream=None,
+        )
+
+        config = mock_client.chats.create.call_args.kwargs["config"]
+        assert "studying Class 6-8" in config.system_instruction
+        assert "None" not in config.system_instruction
+        assert "stream)" not in config.system_instruction
+
+    def test_missing_profile_omits_class_and_stream_entirely(self, mock_client):
+        # No profile at all: must not guess ANY class, not even a
+        # placeholder-looking one.
+        chat = MagicMock()
+        chat.send_message.return_value = _make_response("ok")
+        mock_client.chats.create.return_value = chat
+
+        ai_engine.generate_ai_response(
+            prompt="hi", mode="direct", board="BD NCTB (Bangla)",
+            user_class=None, stream=None,
+        )
+
+        config = mock_client.chats.create.call_args.kwargs["config"]
+        assert "None" not in config.system_instruction
+        assert "studying" not in config.system_instruction
+
+    def test_quiz_generation_full_class_and_stream_included(self, mock_client):
+        mock_client.models.generate_content.return_value = _make_response(
+            text='[{"id":1,"question":"q","options":["a","b"],"correct_index":0,"explanation":"e"}]'
+        )
+
+        ai_engine.generate_quiz_questions(
+            board="BD NCTB (Bangla)", user_class="Class 11-12 (HSC)",
+            subject="Physics", stream="Science (বিজ্ঞান)", topic="Motion", count=1,
+        )
+
+        config = mock_client.models.generate_content.call_args.kwargs["config"]
+        assert "Class 11-12 (HSC), Science (বিজ্ঞান) stream" in config.system_instruction
+
+    def test_quiz_generation_no_stream_omits_stream_clause(self, mock_client):
+        mock_client.models.generate_content.return_value = _make_response(
+            text='[{"id":1,"question":"q","options":["a","b"],"correct_index":0,"explanation":"e"}]'
+        )
+
+        ai_engine.generate_quiz_questions(
+            board="BD NCTB (Bangla)", user_class="Class 6-8",
+            subject="General", stream=None, topic="Fractions", count=1,
+        )
+
+        config = mock_client.models.generate_content.call_args.kwargs["config"]
+        assert "Class 6-8" in config.system_instruction
+        assert "None" not in config.system_instruction
+        # "Class 6-8" must appear alone (no trailing ", <stream> stream")
+        # before the ", Subject:" clause.
+        preamble = config.system_instruction.split(", Subject:")[0]
+        assert preamble.endswith("Class 6-8")
+
+    def test_quiz_generation_missing_profile_omits_class_and_stream(self, mock_client):
+        mock_client.models.generate_content.return_value = _make_response(
+            text='[{"id":1,"question":"q","options":["a","b"],"correct_index":0,"explanation":"e"}]'
+        )
+
+        ai_engine.generate_quiz_questions(
+            board="BD NCTB (Bangla)", user_class=None,
+            subject="General", stream=None, topic="Fractions", count=1,
+        )
+
+        config = mock_client.models.generate_content.call_args.kwargs["config"]
+        assert "None" not in config.system_instruction
+
+
+# ---------------------------------------------------------------------------
 # Thinking-level / timeout / single-retry-authority configuration
 # ---------------------------------------------------------------------------
 

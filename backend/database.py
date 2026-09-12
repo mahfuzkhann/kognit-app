@@ -132,13 +132,20 @@ async def save_quiz_attempt(
     board: str,
     user_class: str,
     subject: str,
-    stream: str,
+    stream: Optional[str],
     topic: str,
     questions: list,
     selected_answers: list,
 ) -> dict:
     """
     Persists one completed quiz attempt plus its per-question answers.
+
+    `stream` is Optional: ISSUE 1 FIX (Phase 6A final correction) - a
+    Class 6-8 student's profile has no stream at all (see
+    NO_STREAM_CLASSES in backend/main.py), and quiz_attempts.stream has
+    always been nullable (supabase/migrations/0002_quiz_topic_identity.sql
+    added it without a NOT NULL). This function stores whatever it is
+    given; it does not decide when a null stream is acceptable.
 
     PHASE 5A DATA MODEL: `subject` must be a real academic subject (e.g.
     "Physics"), and `stream` is the Science/Commerce/Arts track - these

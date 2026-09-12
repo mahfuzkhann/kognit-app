@@ -434,10 +434,23 @@ async def _rate_limited_chat_title(
     return user_and_token
 
 
-async def _rate_limited_quiz_generation(user_id: str = Depends(get_current_user_id)) -> str:
-    """Rate-limit dependency for /api/quiz/generate. See module comment above."""
+async def _rate_limited_quiz_generation(
+    user_and_token: Tuple[str, str] = Depends(get_current_user_and_token)
+) -> Tuple[str, str]:
+    """
+    Rate-limit dependency for /api/quiz/generate. See module comment above.
+
+    ISSUE 1 CHANGE: now depends on get_current_user_and_token (not
+    get_current_user_id) and returns (user_id, token), not just user_id -
+    matching the identical PHASE 5B change already made to
+    _rate_limited_chat/_rate_limited_chat_title above, for the same
+    reason: quiz_generate_endpoint now needs the student's own access
+    token to fetch their profile (see _get_academic_context) under RLS.
+    Exactly one Supabase Auth API call per request, same as before.
+    """
+    user_id, _token = user_and_token
     _check_rate_limit(user_id, "quiz_generation")
-    return user_id
+    return user_and_token
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -629,13 +642,105 @@ async def _background_persist_conversation_index(
         )
 
 
+
+# ---------------------------------------------------------------------------
+# ISSUE 1 FIX (Phase 6A final correction): PROFILE IS THE ONLY SOURCE OF
+# ACADEMIC CLASS/STREAM CONTEXT REACHING THE AI.
+#
+# Previously /api/chat, /api/chat/title, and /api/quiz/generate all
+# accepted board/user_class/stream as client-supplied Form fields, mirrored
+# from the (now-removed) #board-select/#class-select/#stream-select
+# workspace dropdowns and a separate per-chat `chat.settings` object in
+# static/js/app.js. The Phase 6A student_profiles table was a completely
+# independent, never-connected system - a student's saved Profile could
+# say "Class 11-12 Science" while their last-touched workspace dropdown
+# (or an unrelated chat's remembered settings) sent "Class 9-10 Science"
+# to the AI. That is the exact "competing academic context" bug this fix
+# removes.
+#
+# _get_academic_context() below is now the ONLY place user_class/stream
+# are resolved for any AI call, and it is always derived from the
+# AUTHENTICATED student's own student_profiles row (via
+# backend/database.py:get_student_profile, RLS-scoped, same token/identity
+# pattern as every other profile read in this file) - never from a
+# request body/form field. A client can no longer send an arbitrary
+# class/stream at all: chat_endpoint/chat_title_endpoint/
+# quiz_generate_endpoint simply have no such parameter anymore.
+#
+# BOARD: inspected before deciding anything here (per explicit
+# instruction not to blindly hardcode "NCTB Bangla Medium"). Findings:
+#   - board is NEVER stored in student_profiles and the Phase 6A brief
+#     explicitly forbids ever adding a Board/Curriculum onboarding field -
+#     there is no per-student signal to derive it from at all, so a
+#     single global constant is the only option, not a shortcut.
+#   - the OLD Form(...) defaults ("NCTB Bangla Medium") were already
+#     stale/inconsistent with the real dropdown text ("BD NCTB (Bangla)")
+#     and were only a same-request fallback that real traffic essentially
+#     never hit, because the dropdown always sent a real value.
+#   - the dropdown's FIRST <option> ("BD NCTB (Bangla)") is what any
+#     student who never touched the selector was already, implicitly,
+#     always sending - i.e. the de facto historical default for the
+#     overwhelming majority of requests. DEFAULT_BOARD below standardizes
+#     on that value (not the old, rarely-hit Form default) as the more
+#     historically accurate, honest choice, matching Kognit's
+#     Bangladesh-first, NCTB-first identity (see Kognit_Master_Context).
+# ---------------------------------------------------------------------------
+DEFAULT_BOARD = "BD NCTB (Bangla)"
+
+# quiz_attempts.user_class is NOT NULL (supabase/migrations/0001) and
+# predates Phase 6A profiles entirely - a genuinely missing profile at
+# quiz-generation time (see _get_academic_context) cannot be stored as
+# NULL there. This sentinel is a STORAGE-ONLY fallback for that one
+# column; it is never passed to generate_quiz_questions (which still
+# receives the true None and omits the class from the prompt, never
+# fabricating one) and never treated as a real class value by anything
+# that reads it back. No migration needed - relaxing this NOT NULL
+# constraint would require one, but storing this sentinel does not.
+UNSPECIFIED_USER_CLASS = "Unspecified"
+
+
+async def _get_academic_context(user_token: str, user_id: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Returns (user_class, stream) for the authenticated student, or
+    (None, None) if they have no profile yet, or if the profile fetch
+    itself fails.
+
+    MISSING PROFILE MUST NOT CAUSE THE SYSTEM TO GUESS: a logged-in
+    student CAN reach /api/chat or /api/quiz/generate before ever saving
+    a profile (the onboarding modal auto-opens but is dismissible, see
+    static/js/app.js:checkAndLoadProfile) - this function distinguishes
+    that real case from a fetch failure but treats both identically for
+    the caller's purposes: (None, None), never a fabricated class/stream.
+    ai_engine.py's generate_ai_response/generate_quiz_questions handle
+    user_class=None/stream=None by omitting the academic-level clause
+    from the prompt entirely rather than inventing one.
+
+    A DatabaseError here (Supabase misconfigured/unreachable) is
+    deliberately NOT re-raised to fail the whole chat/quiz request - core
+    chat must not become newly fragile against a dependency
+    (student_profiles) it did not need before this fix. It is logged so a
+    real, sustained outage is observable, and the request proceeds with
+    no academic context, exactly like a genuinely missing profile.
+    """
+    try:
+        profile = await get_student_profile(user_token=user_token, user_id=user_id)
+    except DatabaseError:
+        logger.warning(
+            "_get_academic_context: profile fetch failed, proceeding without "
+            "academic context (user_id=%s)", user_id,
+        )
+        return None, None
+
+    if profile is None:
+        return None, None
+
+    return profile.get("user_class"), profile.get("stream")
+
+
 @app.post("/api/chat")
 async def chat_endpoint(
     prompt: str = Form(...),
     mode: str = Form("direct"),
-    board: str = Form("NCTB Bangla Medium"),
-    user_class: str = Form("Class 9-10 / SSC"),
-    stream: str = Form("Science"),
     image: Optional[UploadFile] = File(None),
     history: str = Form("[]"),
     # BUG 2 FIX: identifies which chat this message belongs to, so PDF
@@ -650,6 +755,7 @@ async def chat_endpoint(
     background_tasks: BackgroundTasks = None,
     user_and_token: Tuple[str, str] = Depends(_rate_limited_chat)
 ):
+
     # Read and validate the image BEFORE the try/except below. HTTPException
     # is a subclass of Exception, so raising it inside that broad handler
     # would get swallowed into a generic 200 "reply" - it needs to propagate
@@ -678,6 +784,12 @@ async def chat_endpoint(
         conversation_history = parse_and_validate_history(history)
         t_after_parsing = time.perf_counter()
 
+        # ISSUE 1 FIX: user_class/stream now come ONLY from the student's
+        # own Profile (see _get_academic_context above) - never a
+        # client-supplied form field. `board` is a single hardcoded
+        # constant (DEFAULT_BOARD above) for the same reason.
+        user_class, stream = await _get_academic_context(user_token=user_token, user_id=user_id)
+
         # generate_ai_response is a synchronous, blocking call (it calls the
         # Gemini SDK directly). Running it in FastAPI's threadpool keeps it
         # off the main async event loop, so one slow/stuck AI call no longer
@@ -687,7 +799,7 @@ async def chat_endpoint(
             generate_ai_response,
             prompt=prompt,
             mode=mode,
-            board=board,
+            board=DEFAULT_BOARD,
             user_class=user_class,
             stream=stream,
             image_bytes=image_bytes,
@@ -780,7 +892,6 @@ async def chat_endpoint(
 @app.post("/api/chat/title")
 async def chat_title_endpoint(
     history: str = Form("[]"),
-    board: str = Form("NCTB Bangla Medium"),
     # PHASE 5C ADDITION: identifies which chat this title belongs to, so a
     # conversation_index entry (see backend/database.py:
     # save_conversation_index_entry) can be attached to the right chat_id.
@@ -820,7 +931,7 @@ async def chat_title_endpoint(
     if not conversation_history:
         return {"title": None}
 
-    title = await run_in_threadpool(generate_chat_title, history=conversation_history, board=board)
+    title = await run_in_threadpool(generate_chat_title, history=conversation_history, board=DEFAULT_BOARD)
 
     if title and chat_id and chat_id.strip() and background_tasks is not None:
         try:
@@ -857,31 +968,38 @@ async def chat_title_endpoint(
 
 @app.post("/api/quiz/generate")
 async def quiz_generate_endpoint(
-    board: str = Form("NCTB Bangla Medium"),
-    user_class: str = Form("Class 9-10 / SSC"),
     subject: str = Form("Science"),
-    stream: str = Form("Science (বিজ্ঞান)"),
     topic: str = Form("General Practice"),
     count: int = Form(5),
-    user_id: str = Depends(_rate_limited_quiz_generation)
+    user_and_token: Tuple[str, str] = Depends(_rate_limited_quiz_generation)
 ):
-    # PHASE 5A DATA MODEL FIX: `subject` and `stream` are now genuinely
-    # distinct fields. `subject` is expected to be a real academic
-    # subject (e.g. "Physics") supplied by the new #quiz-subject-select
-    # dropdown in the quiz modal (see templates/index.html /
-    # static/js/app.js:generateAndStartQuiz); `stream` is the existing
-    # Science/Commerce/Arts main-nav selection, forwarded separately so
-    # that context is not lost. `stream` has a sensible default (matching
-    # the existing convention for every other parameter here) purely so
-    # this endpoint degrades gracefully rather than 422-ing if an older
-    # cached frontend build omits it - it is not meant to be relied on in
-    # normal operation.
-    #
+    # ISSUE 1 FIX: board/user_class/stream are no longer client-supplied
+    # Form fields (a client can no longer send an arbitrary class/stream
+    # for quiz generation, same fix as chat_endpoint above). `subject`
+    # (a real academic subject like "Physics") remains a legitimate
+    # per-quiz-request choice from the #quiz-subject-select dropdown - it
+    # is not part of the student's academic IDENTITY, so it stays as a
+    # normal form field. See _get_academic_context's docstring for the
+    # missing-profile behavior.
+    user_id, user_token = user_and_token
+    user_class, stream = await _get_academic_context(user_token=user_token, user_id=user_id)
+
+    # quiz_attempts.user_class is NOT NULL (see
+    # supabase/migrations/0001_quiz_persistence.sql) - unlike the AI
+    # prompt (which omits the academic-level clause entirely for a
+    # missing profile, see ai_engine.py), the stored quiz-attempt record
+    # cannot literally be NULL here. UNSPECIFIED_USER_CLASS is a storage-
+    # only sentinel for the rare "no profile yet" case; it is never passed
+    # to generate_quiz_questions itself, which still sees the true
+    # user_class (None if missing) and does not fabricate a class in the
+    # prompt. No migration needed - `stream` was already nullable.
+    stored_user_class = user_class or UNSPECIFIED_USER_CLASS
+
     # Same blocking-call issue as /api/chat, same fix: offload to the
     # threadpool so this request doesn't block the event loop either.
     questions = await run_in_threadpool(
         generate_quiz_questions,
-        board=board,
+        board=DEFAULT_BOARD,
         user_class=user_class,
         subject=subject,
         stream=stream,
@@ -903,8 +1021,8 @@ async def quiz_generate_endpoint(
     quiz_id = uuid.uuid4().hex
     active_quiz_definitions[quiz_id] = {
         "user_id": user_id,
-        "board": board,
-        "user_class": user_class,
+        "board": DEFAULT_BOARD,
+        "user_class": stored_user_class,
         "subject": subject,
         "stream": stream,
         "topic": topic,

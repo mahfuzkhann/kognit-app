@@ -32,17 +32,52 @@ let activeChatId = null;
 // Minimal, beta-safe fix (no database schema change, no migration): one
 // reserved project id acts as the "Recent Chats" bucket. It is a project
 // exactly like any other in the data model (same user_projects row shape:
-// id/title/chats) - the ONLY thing that makes it special is this constant
-// id, checked by every function below that needs to tell it apart from a
-// real, user-created project. This keeps it fully backward compatible with
-// existing accounts (nothing is migrated; the bucket is created lazily,
-// the first time a user actually creates a standalone chat) and with the
-// existing Supabase RLS/upsert path (it's just another row the owning user
-// already has full access to).
+// id/title/chats) - the ONLY thing that makes it special is this id,
+// checked by every function below that needs to tell it apart from a
+// real, user-created project.
 //
 // This project is NEVER shown as a folder, is NEVER user-renamable, and can
 // NEVER be deleted via deleteProject() - see the guards below.
-const DEFAULT_PROJECT_ID = "proj_recent_default";
+//
+// ISSUE 2 FIX ("normal/default chats disappear after logout/login, but
+// project-contained chats survive"): this id used to be the single literal
+// string "proj_recent_default", IDENTICAL for every account on every
+// browser. syncProjectToDatabase() below upserts with
+// `{onConflict: "id"}` - for that to be valid at all, user_projects.id
+// must be a table-wide unique/primary key, not scoped per user (if it
+// were, `onConflict: "id"` would be an invalid conflict target and EVERY
+// project sync would fail outright with a Postgres error, not just this
+// one - which contradicts real, uniquely-Date.now()-id'd projects working
+// fine for every account). With a single shared literal id, only the
+// FIRST account ever to successfully sync a "Recent Chats" project could
+// ever own that row - every other account's own attempt to upsert their
+// OWN "Recent Chats" project hit RLS's UPDATE policy blocking a write to
+// a row a different user_id already owns, silently failing every time,
+// forever, for every account except that first one. Their default/
+// standalone chats would then never actually persist, and the next
+// logout/login's RLS-scoped SELECT would correctly never return a row
+// they never actually managed to own - while their real, uniquely-id'd
+// projects were completely unaffected. Reproduced deterministically
+// (using these exact functions, not a rewritten copy) in a local test
+// harness before this fix.
+//
+// Suffixing with the authenticated user's own id restores the same
+// per-account uniqueness real projects already had via Date.now(), with
+// no schema change. A guest/local-only session (currentUser is null,
+// nothing is ever synced to Supabase - see syncProjectToDatabase's
+// `if (!currentUser) return;` guard) keeps the original plain literal;
+// collisions are only possible once a row is actually written to the
+// shared table, so only that case needs the fix.
+const DEFAULT_PROJECT_ID_GUEST = "proj_recent_default";
+let DEFAULT_PROJECT_ID = DEFAULT_PROJECT_ID_GUEST;
+
+// Called immediately after every place `currentUser` is assigned (see the
+// call sites below) so DEFAULT_PROJECT_ID always reflects who, if anyone,
+// is actually logged in BEFORE any project code (which reads
+// DEFAULT_PROJECT_ID) can run for that session.
+function _setDefaultProjectIdForUser(user) {
+    DEFAULT_PROJECT_ID = user ? `proj_recent_default_${user.id}` : DEFAULT_PROJECT_ID_GUEST;
+}
 
 let editingProjectId = null;
 let editingChatId = null;
@@ -129,6 +164,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     const { data: { session } } = await supabaseClient.auth.getSession();
     if (session) {
         currentUser = session.user;
+        // ISSUE 2 FIX: must happen before loadProjectsFromDatabase() (and
+        // anything else that reads DEFAULT_PROJECT_ID) - see that
+        // constant's definition above for why.
+        _setDefaultProjectIdForUser(currentUser);
         updateAuthUI(currentUser);
         await loadProjectsFromDatabase();
         // PHASE 6A: covers BOTH the returning-user session-restore case
@@ -158,8 +197,12 @@ document.addEventListener("DOMContentLoaded", async () => {
         // This listener now ONLY keeps currentUser/the header UI in sync -
         // it must never touch `projects`, `activeProjectId`, or
         // `activeChatId` again after the initial load, no matter how many
-        // times it fires or why.
+        // times it fires or why. Updating DEFAULT_PROJECT_ID here is safe
+        // (a plain variable reassignment, not a projects/activeProjectId/
+        // activeChatId mutation) and keeps it correct if this fires with a
+        // genuinely different user.
         currentUser = session ? session.user : null;
+        _setDefaultProjectIdForUser(currentUser);
         updateAuthUI(currentUser);
     });
 });
@@ -395,6 +438,9 @@ window.handleEmailAuth = async function(type) {
         // (see its comment above) - this explicit user action needs to
         // drive the load itself now.
         currentUser = result.data.user;
+        // ISSUE 2 FIX: must happen before loadProjectsFromDatabase() -
+        // see DEFAULT_PROJECT_ID's definition above for why.
+        _setDefaultProjectIdForUser(currentUser);
         updateAuthUI(currentUser);
         await loadProjectsFromDatabase();
         // PHASE 6A: no-op if there's no active session yet (e.g. signup
@@ -424,6 +470,10 @@ window.handleGoogleSignIn = async function() {
 window.handleLogout = async function() {
     await supabaseClient.auth.signOut();
     currentUser = null;
+    // ISSUE 2 FIX: resets back to the guest sentinel so a subsequent
+    // guest/local-only session in this same tab (loadProjectsFromLocalStorage,
+    // below) never uses a stale, previous account's per-user default id.
+    _setDefaultProjectIdForUser(null);
     updateAuthUI(null);
 
     // Security fix: the logged-in user's projects were mirrored into
@@ -1306,9 +1356,11 @@ async function regenerateBotMessage(meta, btnEl) {
     const formData = new FormData();
     formData.append("prompt", userMsg.text || "Analyze this document/image.");
     formData.append("mode", currentMode);
-    formData.append("board", document.getElementById("board-select").value);
-    formData.append("user_class", document.getElementById("class-select").value);
-    formData.append("stream", document.getElementById("stream-select").value);
+    // ISSUE 1 FIX: board/user_class/stream are no longer sent by the
+    // client at all - the backend derives them from the student's own
+    // Profile (see backend/main.py:_get_academic_context). Sending a
+    // workspace-selector value here was the exact "competing academic
+    // context" bug this fix removes.
     formData.append("history", JSON.stringify(boundedHistory));
     // BUG 2 FIX: scopes PDF context lookup to the chat that owns this
     // regenerate request - meta.chatId is already the correct, existing
@@ -1602,9 +1654,7 @@ async function submitUserMessageAndAppendReplyInner(meta, msg, finalText, chat, 
     const formData = new FormData();
     formData.append("prompt", finalText || "Analyze this document/image.");
     formData.append("mode", currentMode);
-    formData.append("board", document.getElementById("board-select").value);
-    formData.append("user_class", document.getElementById("class-select").value);
-    formData.append("stream", document.getElementById("stream-select").value);
+    // ISSUE 1 FIX: see the identical comment in regenerateBotMessage above.
     formData.append("history", JSON.stringify(boundedHistory));
     // BUG 2 FIX: requestChatId is the same CHAT-05-style race-safe id
     // already captured above for this request - reused here rather than
@@ -1687,62 +1737,62 @@ function resendUserMessage(meta, btnEl) {
     return submitUserMessageAndAppendReply(meta, undefined);
 }
 
-// ==================== BUG 3 FIX: PER-CHAT BOARD/CLASS/STREAM/MODE ====================
-// Board, Class, Stream, and Direct/Socratic mode used to live only in the
-// #board-select/#class-select/#stream-select DOM elements and the global
-// `currentMode` variable - genuinely global state shared across every chat.
-// Switching chats never touched them, so whatever was last selected in
-// Chat A silently carried over into Chat B, even though the student might
-// reasonably believe Chat B has its own curriculum/mode context.
+// ==================== BUG 3 FIX: PER-CHAT MODE ====================
+// Direct/Socratic mode used to live only in the global `currentMode`
+// variable - shared across every chat. Switching chats never touched it,
+// so whatever was last selected in Chat A silently carried over into
+// Chat B, even though the student might reasonably believe Chat B has
+// its own mode.
 //
 // Fix mirrors the existing per-chat PDF isolation pattern (chat.pdf +
-// applyPDFStatusUI, see BUG 2 FIX above): each chat object now carries its
-// own optional `settings` field ({ board, user_class, stream, mode }).
-// DOM/`currentMode` remain the single live "what's currently on screen"
-// source of truth (every existing formData.append(...) read site for these
-// values is intentionally left untouched) - they are just now kept in sync
+// applyPDFStatusUI, see BUG 2 FIX above): each chat object carries its
+// own optional `settings` field ({ mode }). `currentMode` remains the
+// single live "what's currently on screen" source of truth, kept in sync
 // with the active chat on every switch (applyChatSettingsUI, called from
 // loadChat) and written back into the active chat the moment the student
-// changes one (saveActiveChatSetting, called from setMode/handleContextSettingChange).
-
-// Matches the default selected <option> in each dropdown and the default
-// active mode button in templates/index.html, so a chat that has never had
-// its own settings explicitly set behaves exactly as it did before this fix.
+// changes it (saveActiveChatSetting, called from setMode).
+//
+// ISSUE 1 FIX (Phase 6A final correction): this object used to also
+// carry board/user_class/stream, mirrored from the (now-removed)
+// workspace #board-select/#class-select/#stream-select dropdowns - that
+// was the "competing academic context" bug (a chat's remembered settings
+// could disagree with the student's saved Profile). Academic context now
+// comes ONLY from the Profile, resolved server-side (see backend/main.py:
+// _get_academic_context) - it is no longer part of per-chat settings at
+// all. `mode` (Direct/Socratic) is unrelated to academic identity and
+// remains exactly as it was.
 const DEFAULT_CHAT_SETTINGS = {
-    board: "BD NCTB (Bangla)",
-    user_class: "Class 9-10 (SSC)",
-    stream: "Science (বিজ্ঞান)",
     mode: "direct"
 };
 
 // Always returns a COMPLETE settings object for a chat, filling in any
 // missing key from DEFAULT_CHAT_SETTINGS - covers brand-new chats
 // (chat.settings is undefined) and any pre-existing chat created before
-// this fix shipped (same situation, same fallback).
+// this fix shipped (same situation, same fallback). A pre-existing chat's
+// serialized settings may still contain leftover board/user_class/stream
+// keys from before this fix - harmless dead data, never read by anything
+// now; not worth a cleanup migration for a client-side convenience cache.
 function getEffectiveChatSettings(chat) {
     return Object.assign({}, DEFAULT_CHAT_SETTINGS, (chat && chat.settings) || {});
 }
 
-// Syncs the on-screen Board/Class/Stream dropdowns and Direct/Socratic mode
-// buttons + `currentMode` to the chat being switched INTO. Called by
-// loadChat() so every chat switch restores that chat's own settings instead
-// of leaving whatever the previously open chat had selected on screen.
+// Syncs the Direct/Socratic mode buttons + `currentMode` to the chat being
+// switched INTO. Called by loadChat() so every chat switch restores that
+// chat's own mode instead of leaving whatever the previously open chat had
+// selected on screen. ISSUE 1 FIX: no longer touches board/class/stream
+// dropdowns - they don't exist anymore.
 function applyChatSettingsUI(chat) {
     const settings = getEffectiveChatSettings(chat);
-
-    document.getElementById("board-select").value = settings.board;
-    document.getElementById("class-select").value = settings.user_class;
-    document.getElementById("stream-select").value = settings.stream;
 
     currentMode = settings.mode;
     document.getElementById("btn-direct").classList.toggle("active", currentMode === "direct");
     document.getElementById("btn-socratic").classList.toggle("active", currentMode === "socratic");
 }
 
-// Persists one Board/Class/Stream/Mode change into the CURRENTLY ACTIVE
-// chat's own settings only - never any other chat. If there's somehow no
-// active chat, this is a no-op (no global fallback that could bleed into
-// whichever chat is opened next).
+// Persists one Mode change into the CURRENTLY ACTIVE chat's own settings
+// only - never any other chat. If there's somehow no active chat, this is
+// a no-op (no global fallback that could bleed into whichever chat is
+// opened next).
 function saveActiveChatSetting(key, value) {
     const proj = projects.find(p => p.id === activeProjectId);
     const chat = proj ? proj.chats.find(c => c.id === activeChatId) : null;
@@ -1752,23 +1802,6 @@ function saveActiveChatSetting(key, value) {
     chat.settings[key] = value;
     saveProjectsToStorage();
 }
-
-// Called via onchange="handleContextSettingChange(...)" on the Board/Class/
-// Stream <select> elements in templates/index.html.
-window.handleContextSettingChange = function(settingsKey, elementId) {
-    const value = document.getElementById(elementId).value;
-    saveActiveChatSetting(settingsKey, value);
-
-    // PHASE 5A: if the stream changes while the quiz modal happens to be
-    // open, keep the subject dropdown in sync with it rather than
-    // leaving a stale subject list from the previous stream selected.
-    if (settingsKey === "stream") {
-        const quizModal = document.getElementById("quiz-modal");
-        if (quizModal && !quizModal.classList.contains("hidden")) {
-            populateQuizSubjectOptions();
-        }
-    }
-};
 
 window.setMode = function(mode) {
     currentMode = mode;
@@ -2674,7 +2707,9 @@ async function maybeGenerateAiTitle(proj, chat) {
 
         const formData = new FormData();
         formData.append("history", JSON.stringify(boundedHistory));
-        formData.append("board", document.getElementById("board-select").value);
+        // ISSUE 1 FIX: board is no longer client-supplied - the backend
+        // uses a single hardcoded constant now (see backend/main.py:
+        // DEFAULT_BOARD).
         // PHASE 5C: lets the backend attach a lightweight conversation_index
         // entry (see backend/database.py:save_conversation_index_entry) to
         // this specific chat. No UI change - this is the same background
@@ -2803,9 +2838,7 @@ window.sendMessage = async function() {
     const formData = new FormData();
     formData.append("prompt", promptText || "Analyze this document/image.");
     formData.append("mode", currentMode);
-    formData.append("board", document.getElementById("board-select").value);
-    formData.append("user_class", document.getElementById("class-select").value);
-    formData.append("stream", document.getElementById("stream-select").value);
+    // ISSUE 1 FIX: see the identical comment in regenerateBotMessage above.
     formData.append("history", JSON.stringify(boundedHistory));
     // BUG 2 FIX: requestChatId (captured above, before this async flow
     // continues) is the chat that actually owns this message - reused
@@ -2958,7 +2991,13 @@ const QUIZ_SUBJECTS_BY_STREAM = {
 const QUIZ_SUBJECTS_FALLBACK = ["General"];
 
 function populateQuizSubjectOptions() {
-    const streamValue = document.getElementById("stream-select").value;
+    // ISSUE 1 FIX: subject options now come from the student's own
+    // Profile (currentProfile.stream), not the removed workspace stream
+    // selector. A Class 6-8 profile has stream=null (no stream at all -
+    // see NO_STREAM_CLASSES in backend/main.py), which correctly falls
+    // through to QUIZ_SUBJECTS_FALLBACK, same as an unrecognized stream
+    // value always did.
+    const streamValue = currentProfile ? currentProfile.stream : null;
     const subjects = QUIZ_SUBJECTS_BY_STREAM[streamValue] || QUIZ_SUBJECTS_FALLBACK;
 
     const select = document.getElementById("quiz-subject-select");
@@ -3013,15 +3052,13 @@ window.generateAndStartQuiz = async function() {
     const count = document.getElementById("quiz-count-select").value;
 
     const formData = new FormData();
-    formData.append("board", document.getElementById("board-select").value);
-    formData.append("user_class", document.getElementById("class-select").value);
-    // PHASE 5A: subject (real academic subject, e.g. "Physics") and
-    // stream (Science/Commerce/Arts track) are now sent as two distinct
-    // fields - previously stream's value was sent under the "subject"
-    // key, which the backend has now stopped treating as correct (see
-    // backend/main.py:quiz_generate_endpoint).
+    // ISSUE 1 FIX: board/user_class/stream are no longer sent - the
+    // backend derives them from the student's own Profile (see
+    // backend/main.py:_get_academic_context). `subject` (a real academic
+    // subject like "Physics") remains a legitimate per-quiz-request
+    // choice from #quiz-subject-select - it is not part of academic
+    // identity, so it stays client-supplied.
     formData.append("subject", document.getElementById("quiz-subject-select").value);
-    formData.append("stream", document.getElementById("stream-select").value);
     formData.append("topic", topic);
     formData.append("count", count);
 
