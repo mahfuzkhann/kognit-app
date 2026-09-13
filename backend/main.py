@@ -26,6 +26,7 @@ from backend.database import (
     DatabaseError,
 )
 from backend.learning_memory import detect_learning_signals, is_meaningful_signal_set, resolve_academic_context
+from backend.learning_snapshot import build_learning_snapshot
 from typing import Optional, Tuple
 
 logging.basicConfig(level=logging.INFO)
@@ -1559,3 +1560,71 @@ async def profile_insights_endpoint(
         )
 
     return {"insights": insights}
+
+
+# ---------------------------------------------------------------------------
+# Phase 6B: GET /api/profile/snapshot
+# ---------------------------------------------------------------------------
+
+@app.get("/api/profile/snapshot")
+async def profile_snapshot_endpoint(
+    user_and_token: Tuple[str, str] = Depends(get_current_user_and_token),
+):
+    """
+    PHASE 6B: Learning Snapshot - a structured combination of Phase 5A
+    quiz mastery status and Phase 5E chat insights into Strengths / Needs
+    Practice / Recent Progress, computed by
+    backend.learning_snapshot.build_learning_snapshot.
+
+    This endpoint computes NOTHING itself, matching the established
+    convention (see profile_topics_endpoint/profile_insights_endpoint
+    above): it calls the same two UNMODIFIED read functions those
+    endpoints already use - get_user_topic_profile (Phase 5A) and
+    get_learning_insights (Phase 5E) - and passes their results straight
+    into build_learning_snapshot, a pure function. No new database table,
+    no new Gemini/LLM call, no new mastery or insight algorithm.
+
+    AUTHENTICATION/ISOLATION: identical pattern to profile_topics_endpoint
+    and profile_insights_endpoint - identity and the Supabase access
+    token both come only from the verified JWT
+    (get_current_user_and_token), never from anything client-supplied.
+    RLS on both quiz_attempts and learning_evidence is what actually
+    restricts the underlying rows to this student; this endpoint's body
+    never sees or handles a user_id it could get wrong.
+
+    Deliberately a SEPARATE endpoint rather than folded into
+    /api/profile/topics or /api/profile/insights - both of those remain
+    entirely unchanged. This keeps quiz-only and chat-only consumers
+    unaffected, and keeps the combined view's semantics (see
+    backend.learning_snapshot's module docstring) independently
+    versionable.
+
+    No Gemini call, no rate limiting needed here - same reasoning as
+    profile_topics_endpoint/profile_insights_endpoint: two simple, cheap,
+    RLS-scoped database reads plus a pure in-process combination.
+    """
+    user_id, user_token = user_and_token
+
+    try:
+        topics = await get_user_topic_profile(user_token=user_token, user_id=user_id)
+    except DatabaseError:
+        logger.exception(
+            "profile_snapshot_endpoint: failed to fetch topic profile (user_id=%s)", user_id
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Could not load your learning snapshot right now. Please try again.",
+        )
+
+    try:
+        insights = await get_learning_insights(user_token=user_token, user_id=user_id)
+    except DatabaseError:
+        logger.exception(
+            "profile_snapshot_endpoint: failed to fetch learning insights (user_id=%s)", user_id
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Could not load your learning snapshot right now. Please try again.",
+        )
+
+    return build_learning_snapshot(topics, insights)
