@@ -1832,3 +1832,313 @@ body {
         flex-wrap: wrap;
     }
 }
+
+/* ============================================================
+   STUDENT PROFILE PANEL (Phase 6E)
+   Presentation only - reuses the existing dark/indigo design
+   vocabulary already established by .modal-card/.pill-btn/
+   .result-item elsewhere in this file. No new color palette,
+   no new component family.
+   ============================================================ */
+
+.profile-panel-card {
+    max-width: 720px;
+    max-height: 88vh;
+    padding: 0;
+    overflow: hidden;
+}
+
+.profile-panel-card .modal-header {
+    padding: 20px 24px 16px 24px;
+    margin: 0;
+}
+
+.sp-scroll-area {
+    overflow-y: auto;
+    padding: 4px 24px 24px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+}
+
+.sp-section {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.sp-section-title {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: #888888;
+}
+
+.sp-visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+}
+
+.sp-header-section {
+    border-bottom: 1px solid #22222a;
+    padding-bottom: 18px;
+}
+
+.sp-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.sp-header-name {
+    font-size: 18px;
+    font-weight: 700;
+    color: #ffffff;
+}
+
+.sp-header-meta {
+    font-size: 13px;
+    color: #999999;
+    margin-top: 2px;
+}
+
+.sp-edit-btn {
+    background: #18181f;
+    border: 1px solid #2e2e38;
+    color: #cbd5e1;
+    padding: 8px 14px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s;
+    flex-shrink: 0;
+}
+
+.sp-edit-btn:hover {
+    border-color: #4f46e5;
+    color: #ffffff;
+}
+
+.sp-edit-btn:focus-visible {
+    outline: 2px solid #6366f1;
+    outline-offset: 2px;
+}
+
+.sp-loading {
+    font-size: 13px;
+    color: #777777;
+    font-style: italic;
+}
+
+.sp-empty-state {
+    font-size: 13px;
+    color: #888888;
+    line-height: 1.5;
+    background: #0d0d10;
+    border: 1px dashed #2a2a33;
+    border-radius: 8px;
+    padding: 12px 14px;
+}
+
+.sp-unavailable-state {
+    font-size: 13px;
+    color: #a1a1aa;
+    background: #18181f;
+    border: 1px solid #2e2e38;
+    border-radius: 8px;
+    padding: 10px 14px;
+}
+
+/* Learning overview: a small row of counts, never a "score." */
+.sp-overview-body {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+.sp-overview-stat {
+    background: #18181f;
+    border: 1px solid #2e2e38;
+    border-radius: 8px;
+    padding: 10px 14px;
+    min-width: 120px;
+    flex: 1;
+}
+
+.sp-overview-stat-value {
+    font-size: 20px;
+    font-weight: 700;
+    color: #ffffff;
+}
+
+.sp-overview-stat-label {
+    font-size: 11px;
+    color: #999999;
+    margin-top: 2px;
+}
+
+.sp-progress-banner {
+    font-size: 13px;
+    line-height: 1.5;
+    padding: 12px 14px;
+    border-radius: 8px;
+    border: 1px solid #2e2e38;
+    background: #18181f;
+    color: #dddddd;
+}
+
+.sp-progress-banner.sp-progress-improving {
+    border-color: rgba(74, 222, 128, 0.4);
+    background: rgba(74, 222, 128, 0.08);
+    color: #bbf7d0;
+}
+
+/* Strengths / Needs practice: grouped by subject, matching the
+   requested "Mathematics / • Algebra / • Geometry" presentation. */
+.sp-subject-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.sp-subject-name {
+    font-size: 13px;
+    font-weight: 700;
+    color: #e5e7eb;
+}
+
+.sp-topic-line {
+    font-size: 13px;
+    color: #b8b8c0;
+    padding-left: 14px;
+    position: relative;
+}
+
+.sp-topic-line::before {
+    content: "•";
+    position: absolute;
+    left: 0;
+    color: #6366f1;
+}
+
+/* Needs practice / mistakes: each entry is a small card with a status
+   label - text-based, never color-only (Accessibility section). */
+.sp-item-card {
+    background: #18181f;
+    border: 1px solid #2e2e38;
+    border-radius: 8px;
+    padding: 10px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.sp-item-top-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.sp-item-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #ffffff;
+}
+
+.sp-item-status-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: #fbbf24;
+}
+
+.sp-item-detail {
+    font-size: 12px;
+    color: #999999;
+    line-height: 1.4;
+}
+
+/* Next-step recommendations. */
+.sp-recommendation-card {
+    background: #18181f;
+    border: 1px solid #2e2e38;
+    border-radius: 8px;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.sp-recommendation-top-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.sp-recommendation-type-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: #a5b4fc;
+}
+
+.sp-recommendation-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #ffffff;
+}
+
+.sp-recommendation-reason {
+    font-size: 12px;
+    color: #999999;
+    line-height: 1.4;
+}
+
+.sp-recommendation-action-btn {
+    align-self: flex-start;
+    margin-top: 2px;
+    background: rgba(99, 102, 241, 0.12);
+    border: 1px solid rgba(99, 102, 241, 0.4);
+    color: #c7d2fe;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.sp-recommendation-action-btn:hover {
+    background: rgba(99, 102, 241, 0.22);
+    border-color: #6366f1;
+}
+
+.sp-recommendation-action-btn:focus-visible {
+    outline: 2px solid #6366f1;
+    outline-offset: 2px;
+}
+
+@media (max-width: 640px) {
+    .profile-panel-card {
+        max-width: 100%;
+        width: 96%;
+        max-height: 92vh;
+    }
+
+    .sp-overview-stat {
+        min-width: 100px;
+    }
+}

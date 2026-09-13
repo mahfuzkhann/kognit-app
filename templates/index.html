@@ -130,15 +130,23 @@
                 <button class="btn-auth-login" onclick="openAuthModal()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path></svg> Login / Sign Up</button>
             </div>
             <div id="auth-logged-view" class="user-profile-bar hidden">
-                <!-- PHASE 6A: sidebar-bottom profile entry. The whole row
-                     (except Logout) opens the profile modal - see
-                     openProfileModal()/checkAndLoadProfile() in app.js.
-                     Shows the student's name + "Class · Stream" once a
-                     profile exists; falls back to their email with a
-                     "Complete your profile" hint before that (which is
-                     only ever visible for a brief moment, since a missing
-                     profile also auto-opens the modal on login). -->
-                <button type="button" id="profile-trigger-btn" class="profile-trigger-btn" onclick="openProfileModal()" aria-haspopup="dialog" aria-label="Open your profile">
+                <!-- PHASE 6A: sidebar-bottom profile entry.
+                     PHASE 6E UPDATE: the whole row (except Logout) now
+                     opens the Student Profile panel (learning
+                     intelligence overview) instead of jumping straight to
+                     the edit form - see openStudentProfilePanel() in
+                     app.js. Editing (name/class/stream) is still exactly
+                     the same #profile-modal as before, reached via the
+                     panel's own "Edit profile" button, and first-time
+                     onboarding (checkAndLoadProfile() below, when a
+                     profile is missing) still opens #profile-modal
+                     directly, unchanged. Shows the student's name +
+                     "Class · Stream" once a profile exists; falls back to
+                     their email with a "Complete your profile" hint
+                     before that (which is only ever visible for a brief
+                     moment, since a missing profile also auto-opens the
+                     edit modal on login). -->
+                <button type="button" id="profile-trigger-btn" class="profile-trigger-btn" onclick="openStudentProfilePanel()" aria-haspopup="dialog" aria-label="Open your learning profile">
                     <span class="profile-trigger-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"></circle><path d="M4 20c0-4 4-6 8-6s8 2 8 6"></path></svg></span>
                     <span class="user-info">
                         <span id="user-display-name" class="user-name-text"></span>
@@ -328,6 +336,88 @@
         </div>
 
         <button id="profile-save-btn" class="start-quiz-btn" onclick="saveProfile()">Save</button>
+    </div>
+</div>
+
+<!-- STUDENT PROFILE PANEL (Phase 6E) -->
+<!-- Presentation-only: every number/label here comes straight from the
+     existing Phase 6 intelligence APIs (snapshot/mistakes/next-steps),
+     fetched and rendered by static/js/app.js's loadStudentProfilePanel()
+     and its per-section render*() helpers. No thresholds, statuses, or
+     recommendation logic are computed in this file or in app.js - this
+     panel only formats what the backend already decided. The sidebar's
+     profile-trigger-btn (see auth-logged-view above) opens THIS panel;
+     "Edit profile" below opens the existing, unmodified #profile-modal. -->
+<div id="student-profile-modal" class="modal-overlay hidden">
+    <div class="modal-card profile-panel-card" role="dialog" aria-modal="true" aria-labelledby="sp-title">
+        <div class="modal-header">
+            <h2 id="sp-title"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"></circle><path d="M4 20c0-4 4-6 8-6s8 2 8 6"></path></svg><span>Your Learning Profile</span></h2>
+            <button class="close-modal-btn" onclick="closeStudentProfilePanel()" aria-label="Close"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
+        </div>
+
+        <div class="sp-scroll-area">
+
+            <!-- 1. HEADER -->
+            <section class="sp-section sp-header-section" aria-labelledby="sp-header-heading">
+                <h3 id="sp-header-heading" class="sp-visually-hidden">Academic identity</h3>
+                <div class="sp-header-row">
+                    <div>
+                        <div id="sp-header-name" class="sp-header-name">—</div>
+                        <div id="sp-header-meta" class="sp-header-meta">—</div>
+                    </div>
+                    <button type="button" class="sp-edit-btn" onclick="openProfileModal()">Edit profile</button>
+                </div>
+            </section>
+
+            <!-- 2. LEARNING OVERVIEW -->
+            <section class="sp-section" aria-labelledby="sp-overview-heading">
+                <h3 id="sp-overview-heading" class="sp-section-title">Learning overview</h3>
+                <div id="sp-overview-body" class="sp-overview-body">
+                    <div class="sp-loading">Loading your learning overview…</div>
+                </div>
+            </section>
+
+            <!-- 3. STRENGTHS -->
+            <section class="sp-section" aria-labelledby="sp-strengths-heading">
+                <h3 id="sp-strengths-heading" class="sp-section-title">Strengths</h3>
+                <div id="sp-strengths-body" class="sp-list-body">
+                    <div class="sp-loading">Loading…</div>
+                </div>
+            </section>
+
+            <!-- 4. NEEDS PRACTICE -->
+            <section class="sp-section" aria-labelledby="sp-needs-practice-heading">
+                <h3 id="sp-needs-practice-heading" class="sp-section-title">Needs practice</h3>
+                <div id="sp-needs-practice-body" class="sp-list-body">
+                    <div class="sp-loading">Loading…</div>
+                </div>
+            </section>
+
+            <!-- 5. RECURRING MISTAKES -->
+            <section class="sp-section" aria-labelledby="sp-mistakes-heading">
+                <h3 id="sp-mistakes-heading" class="sp-section-title">Recurring mistakes</h3>
+                <div id="sp-mistakes-body" class="sp-list-body">
+                    <div class="sp-loading">Loading…</div>
+                </div>
+            </section>
+
+            <!-- 6. RECENT PROGRESS -->
+            <section class="sp-section" aria-labelledby="sp-progress-heading">
+                <h3 id="sp-progress-heading" class="sp-section-title">Recent progress</h3>
+                <div id="sp-progress-body" class="sp-overview-body">
+                    <div class="sp-loading">Loading…</div>
+                </div>
+            </section>
+
+            <!-- 7. WHAT TO DO NEXT -->
+            <section class="sp-section" aria-labelledby="sp-next-steps-heading">
+                <h3 id="sp-next-steps-heading" class="sp-section-title">What to do next</h3>
+                <div id="sp-next-steps-body" class="sp-list-body">
+                    <div class="sp-loading">Loading…</div>
+                </div>
+            </section>
+
+        </div>
     </div>
 </div>
 

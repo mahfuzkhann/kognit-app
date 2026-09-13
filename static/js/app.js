@@ -3263,3 +3263,401 @@ async function submitQuizAttempt() {
         statusEl.className = "quiz-save-status warning";
     }
 }
+
+// ==================== PHASE 6E: STUDENT PROFILE PANEL ====================
+// PRESENTATION ONLY. This section renders the existing Phase 6 backend
+// intelligence (GET /api/profile/snapshot, /api/profile/mistakes,
+// /api/profile/next-steps) - it computes NO mastery/insight/mistake/
+// recommendation logic of its own. Every status label, count, and reason
+// string shown below is copied verbatim (or trivially reformatted, e.g.
+// joining a subject+topic pair) from what those three endpoints already
+// returned. See backend/learning_snapshot.py, backend/mistake_engine.py,
+// and backend/next_step_engine.py for where that intelligence actually
+// comes from.
+//
+// The three endpoints are fetched in parallel via Promise.allSettled, not
+// Promise.all, specifically so one endpoint failing never blocks or blanks
+// the other sections (see loadStudentProfilePanelData below) - each
+// section renders independently from its own settled result.
+
+async function _spAuthedGet(url, accessToken) {
+    const headers = accessToken ? { "Authorization": `Bearer ${accessToken}` } : {};
+    const resp = await fetch(url, { headers });
+    if (!resp.ok) {
+        throw new Error(`request to ${url} failed with status ${resp.status}`);
+    }
+    return resp.json();
+}
+
+window.openStudentProfilePanel = function() {
+    if (!currentUser) {
+        // profile-trigger-btn only exists inside #auth-logged-view, so
+        // this should be unreachable while logged out - defensive no-op
+        // rather than assuming it can never happen.
+        return;
+    }
+    document.getElementById("student-profile-modal").classList.remove("hidden");
+    renderStudentProfileHeader();
+    loadStudentProfilePanelData();
+};
+
+window.closeStudentProfilePanel = function() {
+    document.getElementById("student-profile-modal").classList.add("hidden");
+};
+
+// Re-renders just the header row (name/class/stream) from the already-
+// loaded currentProfile global - same data renderProfileTrigger() in the
+// sidebar already uses, so this never issues its own network request.
+function renderStudentProfileHeader() {
+    const nameEl = document.getElementById("sp-header-name");
+    const metaEl = document.getElementById("sp-header-meta");
+    if (!nameEl || !metaEl) return;
+
+    if (currentProfile) {
+        nameEl.textContent = currentProfile.name;
+        // Class 6-8 has no stream (see PROFILE_NO_STREAM_CLASSES above) -
+        // show the class alone rather than "Class 6-8 · null".
+        metaEl.textContent = currentProfile.stream
+            ? `${currentProfile.user_class} · ${currentProfile.stream}`
+            : currentProfile.user_class;
+    } else if (currentUser) {
+        nameEl.textContent = currentUser.email;
+        metaEl.textContent = "Complete your profile to get started.";
+    }
+}
+
+async function loadStudentProfilePanelData() {
+    const { data: { session } } = await supabaseClient.auth.getSession();
+    const token = session ? session.access_token : null;
+
+    // Reset every section to its loading state on each open, so a stale
+    // result from a previous open is never shown while the fresh fetch is
+    // in flight.
+    ["sp-overview-body", "sp-strengths-body", "sp-needs-practice-body", "sp-mistakes-body", "sp-progress-body", "sp-next-steps-body"]
+        .forEach((id) => {
+            const el = document.getElementById(id);
+            if (el) el.innerHTML = `<div class="sp-loading">Loading…</div>`;
+        });
+
+    const [snapshotResult, mistakesResult, nextStepsResult] = await Promise.allSettled([
+        _spAuthedGet("/api/profile/snapshot", token),
+        _spAuthedGet("/api/profile/mistakes", token),
+        _spAuthedGet("/api/profile/next-steps", token),
+    ]);
+
+    renderLearningOverview(snapshotResult);
+    renderStrengthsSection(snapshotResult);
+    renderNeedsPracticeSection(snapshotResult);
+    renderMistakesSection(mistakesResult);
+    renderProgressSection(snapshotResult);
+    renderNextStepsSection(nextStepsResult);
+}
+
+function _spUnavailable(containerId, label) {
+    const el = document.getElementById(containerId);
+    if (!el) return;
+    el.innerHTML = `<div class="sp-unavailable-state">${escapeHtmlForMath(label)} is unavailable right now. The rest of your profile is unaffected.</div>`;
+}
+
+// ---- 2. Learning overview ----
+// Small counts only (Section: do NOT invent a global "learning score").
+function renderLearningOverview(snapshotResult) {
+    const container = document.getElementById("sp-overview-body");
+    if (!container) return;
+
+    if (snapshotResult.status !== "fulfilled") {
+        _spUnavailable("sp-overview-body", "Your learning overview");
+        return;
+    }
+
+    const snapshot = snapshotResult.value;
+    const summary = snapshot.evidence_summary || {};
+
+    if (!summary.has_quiz_evidence && !summary.has_chat_evidence) {
+        container.innerHTML = `<div class="sp-empty-state">Keep learning to build your profile. Try a quiz or ask a question to get started.</div>`;
+        return;
+    }
+
+    const progressLabel = {
+        "improving": "Improving",
+        "no_progress_detected": "Steady",
+        "insufficient_evidence": "Not enough data yet",
+    }[(snapshot.recent_progress || {}).state] || "Not enough data yet";
+
+    container.innerHTML = `
+        <div class="sp-overview-stat">
+            <div class="sp-overview-stat-value">${summary.strengths_count || 0}</div>
+            <div class="sp-overview-stat-label">Strong topics</div>
+        </div>
+        <div class="sp-overview-stat">
+            <div class="sp-overview-stat-value">${summary.needs_practice_count || 0}</div>
+            <div class="sp-overview-stat-label">Need practice</div>
+        </div>
+        <div class="sp-overview-stat">
+            <div class="sp-overview-stat-value">${escapeHtmlForMath(progressLabel)}</div>
+            <div class="sp-overview-stat-label">Recent progress</div>
+        </div>
+    `;
+}
+
+// Groups a flat strengths/needs_practice list into { subject -> [topic names] },
+// deduplicating identical (subject, topic display text) pairs - a display
+// grouping only. This does not alter, merge-score, or reinterpret the
+// underlying entries; see the known Phase 6B snapshot limitation note in
+// _spGroupBySubject's call sites below for why duplicates can still occur
+// across sources and are left exactly as the backend returned them.
+function _spGroupBySubject(entries) {
+    const groups = new Map();
+    entries.forEach((entry) => {
+        const subject = entry.subject || "General";
+        const topicLabel = entry.topic || entry.topic_key || "";
+        if (!groups.has(subject)) groups.set(subject, new Set());
+        if (topicLabel) groups.get(subject).add(topicLabel);
+    });
+    return groups;
+}
+
+// ---- 3. Strengths ----
+function renderStrengthsSection(snapshotResult) {
+    const container = document.getElementById("sp-strengths-body");
+    if (!container) return;
+
+    if (snapshotResult.status !== "fulfilled") {
+        _spUnavailable("sp-strengths-body", "Strengths");
+        return;
+    }
+
+    const strengths = snapshotResult.value.strengths || [];
+    if (strengths.length === 0) {
+        container.innerHTML = `<div class="sp-empty-state">Kognit needs a bit more learning evidence before it can show your strengths here.</div>`;
+        return;
+    }
+
+    // UI limit: at most 3 subjects, at most 4 topics per subject - a
+    // short, scannable list, never the full raw evidence set.
+    const groups = _spGroupBySubject(strengths);
+    const subjectNames = Array.from(groups.keys()).slice(0, 3);
+
+    container.innerHTML = subjectNames.map((subject) => {
+        const topics = Array.from(groups.get(subject)).slice(0, 4);
+        return `
+            <div class="sp-subject-group">
+                <div class="sp-subject-name">${escapeHtmlForMath(subject)}</div>
+                ${topics.map((t) => `<div class="sp-topic-line">${escapeHtmlForMath(t)}</div>`).join("")}
+            </div>
+        `;
+    }).join("");
+}
+
+// ---- 4. Needs practice ----
+function renderNeedsPracticeSection(snapshotResult) {
+    const container = document.getElementById("sp-needs-practice-body");
+    if (!container) return;
+
+    if (snapshotResult.status !== "fulfilled") {
+        _spUnavailable("sp-needs-practice-body", "Needs practice");
+        return;
+    }
+
+    const needsPractice = snapshotResult.value.needs_practice || [];
+    if (needsPractice.length === 0) {
+        container.innerHTML = `<div class="sp-empty-state">No topics currently need extra practice. Keep it up.</div>`;
+        return;
+    }
+
+    // UI limit: at most 5 entries.
+    container.innerHTML = needsPractice.slice(0, 5).map((entry) => {
+        const title = `${entry.subject}${entry.topic ? " — " + entry.topic : ""}`;
+        const hasSupportingChat = (entry.supporting_chat_evidence || []).length > 0;
+        const detail = hasSupportingChat
+            ? "Repeated difficulty observed across recent quiz attempts and recent conversations."
+            : "Repeated difficulty observed across recent quiz attempts.";
+        return `
+            <div class="sp-item-card">
+                <div class="sp-item-top-row">
+                    <span class="sp-item-title">${escapeHtmlForMath(title)}</span>
+                    <span class="sp-item-status-label">${escapeHtmlForMath(entry.status || "Needs Practice")}</span>
+                </div>
+                <div class="sp-item-detail">${detail}</div>
+            </div>
+        `;
+    }).join("");
+}
+
+// ---- 5. Recurring mistakes ----
+function renderMistakesSection(mistakesResult) {
+    const container = document.getElementById("sp-mistakes-body");
+    if (!container) return;
+
+    if (mistakesResult.status !== "fulfilled") {
+        _spUnavailable("sp-mistakes-body", "Recurring mistakes");
+        return;
+    }
+
+    const mistakes = mistakesResult.value.mistakes || [];
+    if (mistakes.length === 0) {
+        container.innerHTML = `<div class="sp-empty-state">No recurring mistake patterns detected yet.</div>`;
+        return;
+    }
+
+    // UI limit: at most 5 entries.
+    container.innerHTML = mistakes.slice(0, 5).map((entry) => {
+        const title = `${entry.subject}${entry.topic ? " — " + entry.topic : ""}`;
+        const parts = [`Affected ${entry.affected_attempts} quiz attempts`];
+        if (typeof entry.recent_incorrect_count === "number") {
+            parts.push(`${entry.recent_incorrect_count} recent incorrect answers`);
+        }
+        return `
+            <div class="sp-item-card">
+                <div class="sp-item-top-row">
+                    <span class="sp-item-title">${escapeHtmlForMath(title)}</span>
+                </div>
+                <div class="sp-item-detail">${escapeHtmlForMath(parts.join(" · "))}</div>
+            </div>
+        `;
+    }).join("");
+}
+
+// ---- 6. Recent progress ----
+// Respects the snapshot's own three-state semantics exactly - never
+// invents a percentage or a fourth state.
+function renderProgressSection(snapshotResult) {
+    const container = document.getElementById("sp-progress-body");
+    if (!container) return;
+
+    if (snapshotResult.status !== "fulfilled") {
+        _spUnavailable("sp-progress-body", "Recent progress");
+        return;
+    }
+
+    const progress = snapshotResult.value.recent_progress || { state: "insufficient_evidence", topics: [] };
+
+    if (progress.state === "improving") {
+        const topicNames = (progress.topics || []).map((t) => t.topic || t.topic_key).filter(Boolean).slice(0, 4);
+        const list = topicNames.length ? `: ${topicNames.map(escapeHtmlForMath).join(", ")}` : "";
+        container.innerHTML = `<div class="sp-progress-banner sp-progress-improving">You're showing improvement${list}.</div>`;
+    } else if (progress.state === "no_progress_detected") {
+        container.innerHTML = `<div class="sp-progress-banner">Your performance looks steady - no clear upward trend detected yet.</div>`;
+    } else {
+        container.innerHTML = `<div class="sp-empty-state">Not enough recent quiz activity yet to measure progress.</div>`;
+    }
+}
+
+// ---- 7. What to do next ----
+const SP_RECOMMENDATION_LABELS = {
+    "practice_topic": "Practice",
+    "review_topic": "Review",
+    "continue_topic": "Continue",
+    "take_quiz": "Take a quiz",
+};
+
+const SP_RECOMMENDATION_ACTION_LABELS = {
+    "practice_topic": "Practice in chat",
+    "review_topic": "Review in chat",
+    "continue_topic": "Continue in chat",
+    "take_quiz": "Take a quiz",
+};
+
+function renderNextStepsSection(nextStepsResult) {
+    const container = document.getElementById("sp-next-steps-body");
+    if (!container) return;
+
+    if (nextStepsResult.status !== "fulfilled") {
+        _spUnavailable("sp-next-steps-body", "Recommendations");
+        return;
+    }
+
+    const recommendations = nextStepsResult.value.recommendations || [];
+    if (recommendations.length === 0) {
+        container.innerHTML = `<div class="sp-empty-state">No recommendations yet - Kognit needs a little more learning evidence first.</div>`;
+        return;
+    }
+
+    container.innerHTML = recommendations.map((rec, index) => {
+        const typeLabel = SP_RECOMMENDATION_LABELS[rec.recommendation_type] || rec.recommendation_type;
+        const title = `${typeLabel} ${rec.topic || rec.subject || ""}`.trim();
+        const actionLabel = SP_RECOMMENDATION_ACTION_LABELS[rec.recommendation_type] || "Open";
+        return `
+            <div class="sp-recommendation-card">
+                <div class="sp-recommendation-top-row">
+                    <span class="sp-recommendation-type-label">${escapeHtmlForMath(typeLabel)}</span>
+                </div>
+                <div class="sp-recommendation-title">${escapeHtmlForMath(title)}</div>
+                <div class="sp-recommendation-reason">${escapeHtmlForMath(rec.reason || "")}</div>
+                <button type="button" class="sp-recommendation-action-btn" onclick="handleNextStepAction(${index})">${escapeHtmlForMath(actionLabel)}</button>
+            </div>
+        `;
+    }).join("");
+
+    // Stashed for the click handler below rather than re-parsed from the
+    // DOM - avoids re-escaping/unescaping subject/topic text through HTML.
+    window._spLastRecommendations = recommendations;
+}
+
+// Every action below uses ONLY existing, already-tested application
+// mechanisms (createStandaloneChat + the #user-input textarea;
+// openQuizModal + its existing #quiz-subject-select/#quiz-topic-input
+// fields) - no new navigation target, no new backend contract, and
+// nothing is auto-sent on the student's behalf. Per the Phase 6E brief:
+// if an action can't be done safely with what already exists, the
+// recommendation is still shown, just without a button - see the
+// `default:` branch below, which intentionally does nothing.
+window.handleNextStepAction = function(index) {
+    const rec = (window._spLastRecommendations || [])[index];
+    if (!rec) return;
+
+    switch (rec.recommendation_type) {
+        case "practice_topic":
+            _spOpenChatWithPrompt(`Can you help me practice ${rec.topic || rec.subject}?`);
+            break;
+        case "review_topic":
+            _spOpenChatWithPrompt(`Can you help me review ${rec.topic || rec.subject}?`);
+            break;
+        case "continue_topic":
+            _spOpenChatWithPrompt(`Let's continue studying ${rec.topic || rec.subject}.`);
+            break;
+        case "take_quiz":
+            _spOpenQuizForTopic(rec.subject, rec.topic);
+            break;
+        default:
+            // Unknown future recommendation_type - no action rather than
+            // guessing one.
+            break;
+    }
+};
+
+function _spOpenChatWithPrompt(promptText) {
+    closeStudentProfilePanel();
+    createStandaloneChat();
+    const input = document.getElementById("user-input");
+    if (input) {
+        input.value = promptText;
+        input.focus();
+    }
+    // Deliberately NOT auto-sent - the student reviews/edits before
+    // sending, same as if they had typed it themselves.
+}
+
+function _spOpenQuizForTopic(subject, topic) {
+    closeStudentProfilePanel();
+    openQuizModal();
+
+    // Best-effort subject match only: quiz-derived recommendations' subject
+    // values come from the exact same #quiz-subject-select options list
+    // (that's where the underlying quiz_attempts row's subject was
+    // originally chosen from - see generateAndStartQuiz), so an exact
+    // match is reliable for them. If no exact match is found (e.g. a
+    // chat-derived subject label that doesn't line up with the fixed
+    // per-stream subject list), the select simply keeps its normal
+    // default - never a guessed/incorrect subject.
+    const select = document.getElementById("quiz-subject-select");
+    if (select && subject) {
+        const hasExactMatch = Array.from(select.options).some((opt) => opt.value === subject);
+        if (hasExactMatch) select.value = subject;
+    }
+
+    const topicInput = document.getElementById("quiz-topic-input");
+    if (topicInput && topic) {
+        topicInput.value = topic;
+    }
+}
