@@ -28,6 +28,7 @@ from backend.database import (
 )
 from backend.learning_memory import detect_learning_signals, is_meaningful_signal_set, resolve_academic_context
 from backend.learning_snapshot import build_learning_snapshot
+from backend.next_step_engine import compute_next_steps
 from typing import Optional, Tuple
 
 logging.basicConfig(level=logging.INFO)
@@ -1687,3 +1688,83 @@ async def profile_mistakes_endpoint(
         )
 
     return {"mistakes": mistakes}
+
+
+# ---------------------------------------------------------------------------
+# Phase 6D: GET /api/profile/next-steps
+# ---------------------------------------------------------------------------
+
+@app.get("/api/profile/next-steps")
+async def profile_next_steps_endpoint(
+    user_and_token: Tuple[str, str] = Depends(get_current_user_and_token),
+):
+    """
+    PHASE 6D: Next-Step Engine - a small (at most
+    backend.next_step_engine.MAX_RECOMMENDATIONS), deterministic,
+    explainable list of recommendations derived entirely from the SAME
+    three existing evidence sources Phase 5A/5E/6C already expose - no
+    new evidence pipeline, no LLM call, no new database table. See
+    backend.next_step_engine's module docstring for the full
+    conflict-resolution/ranking/deduplication rules.
+
+    This endpoint computes NOTHING itself, matching the established
+    convention for every other /api/profile/* endpoint: it calls the
+    three existing, UNMODIFIED database functions already used by
+    profile_topics_endpoint (get_user_topic_profile), profile_insights_endpoint
+    (get_learning_insights), and profile_mistakes_endpoint
+    (get_user_topic_mistakes), and passes their results straight into
+    compute_next_steps, a pure function. No new database query was
+    required for this phase.
+
+    AUTHENTICATION/ISOLATION: identical pattern to every other
+    /api/profile/* endpoint - identity and the Supabase access token both
+    come only from the verified JWT (get_current_user_and_token), never
+    from anything client-supplied. RLS on the underlying quiz_attempts/
+    learning_evidence tables (unchanged) is what actually restricts the
+    returned rows to this student.
+
+    Deliberately independent of /api/profile/snapshot (Phase 6B) -
+    backend/learning_snapshot.py is not imported or modified by this
+    endpoint, per the Phase 6D brief's explicit instruction not to couple
+    to or modify 6B.
+
+    No Gemini call, no rate limiting needed here - three bounded, cheap,
+    RLS-scoped database reads (already paid for elsewhere in the profile
+    surface) plus a pure in-process computation.
+    """
+    user_id, user_token = user_and_token
+
+    try:
+        topics = await get_user_topic_profile(user_token=user_token, user_id=user_id)
+    except DatabaseError:
+        logger.exception(
+            "profile_next_steps_endpoint: failed to fetch topic profile (user_id=%s)", user_id
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Could not load your recommendations right now. Please try again.",
+        )
+
+    try:
+        insights = await get_learning_insights(user_token=user_token, user_id=user_id)
+    except DatabaseError:
+        logger.exception(
+            "profile_next_steps_endpoint: failed to fetch learning insights (user_id=%s)", user_id
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Could not load your recommendations right now. Please try again.",
+        )
+
+    try:
+        mistakes = await get_user_topic_mistakes(user_token=user_token, user_id=user_id)
+    except DatabaseError:
+        logger.exception(
+            "profile_next_steps_endpoint: failed to fetch mistake evidence (user_id=%s)", user_id
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Could not load your recommendations right now. Please try again.",
+        )
+
+    return {"recommendations": compute_next_steps(topics, insights, mistakes)}
