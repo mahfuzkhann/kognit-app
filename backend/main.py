@@ -23,6 +23,7 @@ from backend.database import (
     get_learning_insights,
     get_student_profile,
     upsert_student_profile,
+    get_user_topic_mistakes,
     DatabaseError,
 )
 from backend.learning_memory import detect_learning_signals, is_meaningful_signal_set, resolve_academic_context
@@ -1628,3 +1629,61 @@ async def profile_snapshot_endpoint(
         )
 
     return build_learning_snapshot(topics, insights)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6C: GET /api/profile/mistakes
+# ---------------------------------------------------------------------------
+
+@app.get("/api/profile/mistakes")
+async def profile_mistakes_endpoint(
+    user_and_token: Tuple[str, str] = Depends(get_current_user_and_token),
+):
+    """
+    PHASE 6C: Mistake Intelligence (quiz-derived only) - identifies
+    REPEATED TOPIC DIFFICULTY from quiz evidence: topics where the
+    student has gotten questions wrong across multiple separate quiz
+    attempts. See backend.mistake_engine's module docstring for exactly
+    what this does and does not claim - in particular, this reports
+    repeated difficulty at the TOPIC level only, never a specific
+    conceptual mistake/misconception (the stored evidence does not
+    support that stronger claim - see mistake_engine.py's SCOPE section).
+
+    This endpoint computes NOTHING itself, matching the established
+    convention (see profile_topics_endpoint/profile_insights_endpoint/
+    profile_snapshot_endpoint above): it calls
+    backend.database.get_user_topic_mistakes, which fetches bounded quiz
+    evidence and returns backend.mistake_engine.compute_mistake_intelligence's
+    output directly.
+
+    AUTHENTICATION/ISOLATION: identical pattern to every other
+    /api/profile/* endpoint - identity and the Supabase access token both
+    come only from the verified JWT (get_current_user_and_token), never
+    from anything client-supplied. RLS on quiz_attempts (unchanged from
+    Phase 5A) is what actually restricts the underlying rows to this
+    student.
+
+    Deliberately a SEPARATE endpoint from /api/profile/snapshot (Phase
+    6B) - 6B is intentionally NOT modified by this phase (per the Phase
+    6C brief). A future phase may decide whether/how mistake intelligence
+    should surface inside the snapshot; that decision is out of scope
+    here.
+
+    No Gemini call, no rate limiting needed here - same reasoning as
+    every other /api/profile/* endpoint: a bounded, cheap, RLS-scoped
+    database read plus a pure in-process computation.
+    """
+    user_id, user_token = user_and_token
+
+    try:
+        mistakes = await get_user_topic_mistakes(user_token=user_token, user_id=user_id)
+    except DatabaseError:
+        logger.exception(
+            "profile_mistakes_endpoint: failed to fetch mistake evidence (user_id=%s)", user_id
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Could not load your learning history right now. Please try again.",
+        )
+
+    return {"mistakes": mistakes}

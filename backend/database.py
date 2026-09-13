@@ -39,6 +39,7 @@ from backend.learning_memory import (
     build_conversation_notes,
 )
 from backend.insight_engine import ChatEvidenceRecord, compute_insights
+from backend.mistake_engine import TopicMistakeEvidence, compute_mistake_intelligence
 
 logger = logging.getLogger("kognit.database")
 
@@ -492,6 +493,187 @@ def _build_topic_profile(rows: list, user_id: str) -> list:
     # order, not a claim about importance/weakness.
     results.sort(key=lambda r: r["last_attempt_at"] or "", reverse=True)
     return results
+
+
+# ---------------------------------------------------------------------------
+# Phase 6C: GET /api/profile/mistakes read path.
+#
+# DELIBERATELY a separate query, not a refactor of get_user_topic_profile/
+# _build_topic_profile above - those remain completely untouched (Phase 6C
+# brief requirement: do not modify Phase 5A's existing code path). This
+# duplicates the same, already-verified-safe quiz_attempts SELECT and
+# (subject, topic_key) grouping shape rather than sharing a private helper
+# with 5A, because the two paths diverge immediately afterward: 5A feeds
+# grouped events into compute_topic_status (a rate/status computation);
+# 6C feeds the SAME shape of grouped events into
+# backend.mistake_engine.compute_mistake_intelligence (a count/timestamp
+# computation) - see backend/mistake_engine.py's module docstring for why
+# these are deliberately not the same algorithm.
+#
+# Reads ONLY the columns already used by get_user_topic_profile
+# (_PROFILE_TOPICS_SELECT) - never question_text, selected_index, or
+# correct_index from quiz_answers. Phase 6C's first mistake type
+# (repeated_topic_difficulty, see mistake_engine.py) needs only per-attempt
+# score/total_questions/timestamp, which quiz_attempts already provides;
+# no join against quiz_answers is required and none is performed.
+# ---------------------------------------------------------------------------
+
+MAX_MISTAKE_EVIDENCE_ROWS = 500
+"""
+Bounded by row COUNT (same rationale and same value as
+MAX_INSIGHT_EVIDENCE_ROWS below) - generous for beta-stage evidence volume
+while still being a real ceiling, not "unbounded in practice." Unlike
+get_user_topic_profile (which has no bound - see that function's own
+comments), this is a NEW query written for Phase 6C, so it follows the
+Phase 6C brief's explicit requirement to bound any newly-introduced query.
+Ordered created_at DESC before the limit is applied (then reversed back to
+ascending in _build_topic_mistake_evidence) specifically so that if a
+student's history ever exceeds this bound, it is the OLDEST evidence that
+is silently dropped, not the most recent - recency matters most for the
+recent-vs-earlier split in mistake_engine.py.
+"""
+
+
+async def get_user_topic_mistakes(user_token: str, user_id: str) -> list:
+    """
+    Fetches the authenticated student's own quiz evidence (bounded by
+    MAX_MISTAKE_EVIDENCE_ROWS, most recent first, then restored to
+    chronological order), groups it by (subject, topic_key), and returns
+    backend.mistake_engine.compute_mistake_intelligence's output - a bare
+    list of repeated_topic_difficulty mistake dicts (see that module for
+    the exact shape and thresholds).
+
+    SECURITY: identical pattern to get_user_topic_profile - forwards the
+    student's OWN Supabase access token; RLS (`auth.uid() = user_id`, see
+    quiz_attempts_select_own in 0001_quiz_persistence.sql) is what
+    actually restricts the returned rows to this student. `user_id` is
+    accepted for logging only, never used to build a query filter.
+
+    LEGACY ROWS: identical exclusion as get_user_topic_profile - rows with
+    `topic_key IS NULL` predate the Phase 5A subject/stream correction and
+    are excluded via the `topic_key=not.is.null` filter below.
+
+    Raises DatabaseError on any failure, same convention as every other
+    read/write in this module.
+    """
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise DatabaseError(
+            "Supabase is not configured on the server (SUPABASE_URL/SUPABASE_ANON_KEY missing)."
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+            resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/quiz_attempts",
+                headers=_rest_headers(user_token),
+                params={
+                    "select": _PROFILE_TOPICS_SELECT,
+                    "topic_key": "not.is.null",
+                    "order": "created_at.desc",
+                    "limit": str(MAX_MISTAKE_EVIDENCE_ROWS),
+                },
+            )
+    except httpx.RequestError:
+        logger.exception(
+            "get_user_topic_mistakes: network error fetching quiz_attempts (user_id=%s)", user_id
+        )
+        raise DatabaseError("network error fetching quiz_attempts")
+
+    if resp.status_code != 200:
+        logger.error(
+            "get_user_topic_mistakes: quiz_attempts select failed status=%d body=%s (user_id=%s)",
+            resp.status_code, resp.text[:500], user_id,
+        )
+        raise DatabaseError(f"quiz_attempts select failed with status {resp.status_code}")
+
+    try:
+        rows = resp.json()
+    except ValueError:
+        logger.error(
+            "get_user_topic_mistakes: unexpected quiz_attempts response shape (user_id=%s): %r",
+            user_id, resp.text[:500],
+        )
+        raise DatabaseError("unexpected response shape from quiz_attempts select")
+
+    if not isinstance(rows, list):
+        raise DatabaseError("unexpected response shape from quiz_attempts select")
+
+    # Restore ascending order before grouping - rows arrived DESC (see
+    # comment on MAX_MISTAKE_EVIDENCE_ROWS above for why), but
+    # _build_topic_mistake_evidence and mistake_engine's own internal sort
+    # both expect/re-verify ascending input, matching get_user_topic_profile's
+    # convention.
+    rows = list(reversed(rows))
+
+    evidence = _build_topic_mistake_evidence(rows, user_id=user_id)
+    return compute_mistake_intelligence(evidence)
+
+
+def _build_topic_mistake_evidence(rows: list, user_id: str) -> list:
+    """
+    Groups raw quiz_attempts rows by (subject, topic_key) and translates
+    each row into a backend.mastery_engine.EvidenceEvent, exactly like
+    _build_topic_profile above - but returns the raw grouped
+    TopicMistakeEvidence list instead of calling compute_topic_status, so
+    backend.mistake_engine can compute counts/timestamps from the same
+    underlying evidence without going through a status computation at
+    all. Malformed individual rows are skipped (logged), same convention
+    as _build_topic_profile.
+    """
+    groups: "OrderedDict[tuple, dict]" = OrderedDict()
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+
+        subject = row.get("subject")
+        topic = row.get("topic")
+        topic_key = row.get("topic_key")
+        score = row.get("score")
+        total_questions = row.get("total_questions")
+        created_at_raw = row.get("created_at")
+        event_id = row.get("id")
+
+        if not isinstance(subject, str) or not subject:
+            continue
+        if not isinstance(topic_key, str) or not topic_key:
+            continue
+        if not isinstance(score, int) or isinstance(score, bool):
+            continue
+        if not isinstance(total_questions, int) or isinstance(total_questions, bool) or total_questions <= 0:
+            continue
+
+        occurred_at = _parse_timestamptz(created_at_raw)
+        if occurred_at is None:
+            logger.warning(
+                "get_user_topic_mistakes: skipping row with unparseable created_at "
+                "(user_id=%s, attempt_id=%r)", user_id, event_id,
+            )
+            continue
+
+        key = (subject, topic_key)
+        group = groups.setdefault(key, {"topic": topic if isinstance(topic, str) else topic_key, "events": []})
+        if isinstance(topic, str) and topic:
+            group["topic"] = topic
+        group["events"].append(
+            EvidenceEvent(
+                score=score,
+                total_questions=total_questions,
+                occurred_at=occurred_at,
+                event_id=str(event_id) if event_id is not None else "",
+            )
+        )
+
+    return [
+        TopicMistakeEvidence(
+            subject=subject,
+            topic=group["topic"],
+            topic_key=topic_key,
+            events=group["events"],
+        )
+        for (subject, topic_key), group in groups.items()
+    ]
+
 
 # ---------------------------------------------------------------------------
 # Phase 5B/5C: chat-derived learning evidence + conversation index writes.
