@@ -42,6 +42,44 @@ WHAT THIS MODULE DELIBERATELY DOES NOT DO (Phase 6B scope guardrails):
     mastery_engine's own STATUS_IMPROVING directly (already a verified
     positive trend - see mastery_engine._shows_positive_trend) rather
     than inventing a new comparison or a fake percentage improvement.
+
+==============================================================================
+STRENGTHS/NEEDS-PRACTICE RECONCILIATION (hardening fix, pre-Phase-7)
+==============================================================================
+
+CANONICAL TOPIC IDENTITY AND QUIZ AUTHORITY: a topic's identity is always
+(subject, topic_key) - never topic_key alone (two different subjects can
+otherwise coincidentally share a topic_key) and never the raw `topic`
+display string (which is not normalized the way topic_key is - see
+backend.database.normalize_topic_key - so two entries for the identical
+topic_key can carry differently-cased/spaced `topic` text).
+
+If Phase 5A quiz evidence has ANY opinion about a given (subject,
+topic_key) - i.e. it appears anywhere in `topics` at all, regardless of
+which status - that opinion is authoritative for whether the topic can be
+presented as a Strength:
+  - Strong/Mastered topics are always Strengths. A matching Phase 5E
+    emerging_strength insight for the SAME (subject, topic_key) is merged
+    into that SAME single entry as supporting_chat_evidence (never a
+    second, separate Strengths row for the same topic - see
+    _build_strengths).
+  - A topic quiz has classified as anything ELSE (Needs Practice,
+    Developing, Improving, Insufficient Evidence) can NEVER independently
+    become a Strengths entry from chat evidence alone, even a
+    high-confidence emerging_strength insight - quiz is authoritative for
+    any topic it has evidence about at all. This is the direct fix for
+    the cross-section contradiction where a topic could previously appear
+    in BOTH Strengths (chat-derived) and Needs Practice (quiz-derived)
+    simultaneously.
+  - Only when quiz has NO evidence at all for a (subject, topic_key) -
+    it does not appear in `topics` in any status - can a sufficiently
+    confident chat emerging_strength insight independently create a
+    Strengths entry (unchanged behavior from before this fix).
+
+_needs_practice below is intentionally UNCHANGED by this fix: Phase 5A
+weak-status topics were never affected by chat evidence and still are
+not - only the Strengths side needed reconciling, since that was the only
+side that could independently disagree with an authoritative quiz status.
 """
 
 from typing import Optional
@@ -121,51 +159,111 @@ def _insight_group_key(insight_entry: dict) -> Optional[str]:
     return None
 
 
-def _quiz_strengths(topics: list) -> list:
+def _index_topics_by_identity(topics: list) -> dict:
     """
-    Strengths from Phase 5A quiz evidence: topics currently Strong or
-    Mastered. mastery_engine.MIN_EVIDENCE already guarantees at least 2
-    attempts before either status can ever be reached - no single-event
-    strength claim is possible here.
+    (subject, topic_key) -> topic entry, for every well-formed Phase 5A
+    topic regardless of status. The single place _build_strengths asks
+    "does quiz evidence have an opinion about this topic AT ALL" - see
+    module docstring's STRENGTHS/NEEDS-PRACTICE RECONCILIATION section.
+    Malformed entries (missing subject/topic_key) are skipped, same
+    convention as the rest of this module.
+    """
+    index = {}
+    for entry in topics:
+        if not _is_dict(entry):
+            continue
+        subject = entry.get("subject")
+        topic_key = _topic_group_key(entry)
+        if not isinstance(subject, str) or not subject.strip() or topic_key is None:
+            continue
+        index[(subject, topic_key)] = entry
+    return index
 
-    `topics` arrives pre-sorted most-recently-practiced-first (see
-    backend.database._build_topic_profile) - that order is preserved
-    here rather than re-sorted, since "most recently practiced strength"
-    is a reasonable default surface order.
+
+def _matching_emerging_strength_insights(subject: str, topic_key: str, insights: list) -> list:
+    """
+    Phase 5E emerging_strength insights for the EXACT same (subject,
+    topic_key) - deliberately a direct field comparison on both subject
+    and topic_key (not the topic_key-only _insight_group_key helper used
+    elsewhere in this file for needs_practice's supporting evidence),
+    specifically so a topic_key that happens to coincide across two
+    different subjects can never cross-contaminate a Strengths merge -
+    see module docstring's CANONICAL TOPIC IDENTITY note. Any confidence
+    tier is accepted here (unlike the chat-only path below) because quiz
+    evidence already substantiates the claim being supported; this is
+    supplementary evidence only.
+    """
+    return [
+        {
+            "insight_type": entry.get("insight_type"),
+            "confidence": entry.get("confidence"),
+            "evidence_count": entry.get("evidence_count"),
+            "last_observed_at": entry.get("last_observed_at"),
+        }
+        for entry in insights
+        if _is_dict(entry)
+        and entry.get("insight_type") == INSIGHT_EMERGING_STRENGTH
+        and entry.get("subject") == subject
+        and entry.get("topic_key") == topic_key
+    ]
+
+
+def _build_strengths(topics: list, insights: list, topics_index: dict) -> list:
+    """
+    Canonical Strengths: at most ONE entry per (subject, topic_key) -
+    see module docstring's STRENGTHS/NEEDS-PRACTICE RECONCILIATION
+    section for the full rule. Summary:
+
+      1. Every Strong/Mastered quiz topic is a Strengths entry. A
+         matching emerging_strength insight for the identical (subject,
+         topic_key) is merged into THAT SAME entry as
+         supporting_chat_evidence - never a second, separate entry for
+         the same topic (fixes the previous quiz+chat duplicate-strength
+         case).
+      2. A sufficiently-confident chat-only emerging_strength insight
+         only becomes an independent Strengths entry when quiz has NO
+         evidence at all for that (subject, topic_key) - i.e. it is
+         entirely absent from `topics_index`. A topic quiz has classified
+         as Needs Practice/Developing/Improving/Insufficient Evidence
+         never gets an independent chat-driven Strengths entry (fixes the
+         previous Strengths-vs-Needs-Practice contradiction).
+
+    `topics`/`insights` arrive pre-sorted most-recent-first from their
+    respective source functions; that relative order is preserved within
+    each of the two passes below (quiz-confirmed strengths first, then
+    chat-only strengths), matching this module's existing convention of
+    never re-sorting evidence it did not compute.
     """
     strengths = []
+
     for entry in topics:
         if not _is_dict(entry):
             continue
         if entry.get("status") not in _STRONG_QUIZ_STATUSES:
             continue
-        strengths.append({
+
+        subject = entry.get("subject")
+        topic_key = _topic_group_key(entry)
+        supporting = (
+            _matching_emerging_strength_insights(subject, topic_key, insights)
+            if isinstance(subject, str) and topic_key is not None
+            else []
+        )
+
+        strength_entry = {
             "source": "quiz",
-            "subject": entry.get("subject"),
+            "subject": subject,
             "topic": entry.get("topic"),
             "topic_key": entry.get("topic_key"),
             "status": entry.get("status"),
             "correct_rate": entry.get("correct_rate"),
             "attempt_count": entry.get("attempt_count"),
             "last_attempt_at": entry.get("last_attempt_at"),
-        })
-    return strengths
+        }
+        if supporting:
+            strength_entry["supporting_chat_evidence"] = supporting
+        strengths.append(strength_entry)
 
-
-def _chat_strengths(insights: list) -> list:
-    """
-    Strengths from Phase 5E chat evidence: emerging_strength insights
-    whose confidence clears _STRENGTH_MIN_INSIGHT_CONFIDENCE.
-    insight_engine.MIN_EVENTS_FOR_INSIGHT already guarantees at least 2
-    qualifying events before ANY insight (of any type) is emitted - the
-    confidence filter here is an additional, deliberately stricter bar
-    specific to declaring something a "strength" (see module-level
-    constant docstring above).
-
-    `insights` arrives pre-sorted most-recently-observed-first (see
-    insight_engine.compute_insights) - preserved, not re-sorted.
-    """
-    strengths = []
     for entry in insights:
         if not _is_dict(entry):
             continue
@@ -173,16 +271,31 @@ def _chat_strengths(insights: list) -> list:
             continue
         if entry.get("confidence") not in _STRENGTH_MIN_INSIGHT_CONFIDENCE:
             continue
+
+        subject = entry.get("subject")
+        topic_key = entry.get("topic_key")
+        if not isinstance(subject, str) or not subject.strip():
+            continue
+        if not isinstance(topic_key, str) or not topic_key.strip():
+            continue
+        if (subject, topic_key) in topics_index:
+            # Quiz already has an opinion about this exact (subject,
+            # topic_key) - either already merged above (Strong/Mastered)
+            # or authoritatively NOT a strength (any other status).
+            # Either way, no independent chat-only entry here.
+            continue
+
         strengths.append({
             "source": "chat",
-            "subject": entry.get("subject"),
+            "subject": subject,
             "topic": entry.get("topic"),
-            "topic_key": entry.get("topic_key"),
+            "topic_key": topic_key,
             "insight_type": entry.get("insight_type"),
             "confidence": entry.get("confidence"),
             "evidence_count": entry.get("evidence_count"),
             "last_observed_at": entry.get("last_observed_at"),
         })
+
     return strengths
 
 
@@ -319,7 +432,8 @@ def build_learning_snapshot(topics: list, insights: list) -> dict:
     Returns:
         {
             "strengths": [...],          # quiz- and/or chat-derived, see
-                                          # _quiz_strengths/_chat_strengths
+                                          # _build_strengths - at most one
+                                          # entry per (subject, topic_key)
             "needs_practice": [...],     # quiz-derived, mastery status
                                           # never overridden by chat
             "recent_progress": {...},    # see _recent_progress
@@ -329,7 +443,8 @@ def build_learning_snapshot(topics: list, insights: list) -> dict:
     topics = topics if isinstance(topics, list) else []
     insights = insights if isinstance(insights, list) else []
 
-    strengths = _quiz_strengths(topics) + _chat_strengths(insights)
+    topics_index = _index_topics_by_identity(topics)
+    strengths = _build_strengths(topics, insights, topics_index)
     needs_practice = _needs_practice(topics, insights)
     recent_progress = _recent_progress(topics)
 

@@ -274,3 +274,162 @@ class TestEvidenceSummaryNeverExposesRawContent:
         summary = snapshot["evidence_summary"]
         for value in summary.values():
             assert isinstance(value, (int, bool))
+
+
+class TestStrengthsNeedsPracticeReconciliation:
+    """
+    Hardening fix, pre-Phase-7 (P1 #3): the same (subject, topic_key) must
+    never appear in both Strengths and Needs Practice, and must never
+    produce a duplicate Strengths entry when both quiz and chat evidence
+    exist for it. Four required regression scenarios (A-D).
+    """
+
+    def test_a_quiz_weak_plus_chat_emerging_strength_yields_only_needs_practice(self):
+        # A: quiz weak + chat emerging_strength => only Needs Practice
+        # presentation - no Strengths entry for this topic at all.
+        topics = [_topic(status=STATUS_NEEDS_PRACTICE, subject="Math", topic_key="algebra")]
+        insights = [_insight(
+            insight_type=INSIGHT_EMERGING_STRENGTH, confidence=INSIGHT_CONFIDENCE_HIGH,
+            subject="Math", topic_key="algebra",
+        )]
+        snapshot = ls.build_learning_snapshot(topics, insights)
+        assert snapshot["strengths"] == []
+        assert len(snapshot["needs_practice"]) == 1
+        assert snapshot["needs_practice"][0]["topic_key"] == "algebra"
+
+    def test_a_developing_plus_chat_emerging_strength_yields_only_needs_practice(self):
+        # Same as A but for the other weak status, Developing.
+        topics = [_topic(status=STATUS_DEVELOPING, subject="Math", topic_key="algebra", correct_rate=0.6)]
+        insights = [_insight(
+            insight_type=INSIGHT_EMERGING_STRENGTH, confidence=INSIGHT_CONFIDENCE_HIGH,
+            subject="Math", topic_key="algebra",
+        )]
+        snapshot = ls.build_learning_snapshot(topics, insights)
+        assert snapshot["strengths"] == []
+        assert len(snapshot["needs_practice"]) == 1
+
+    def test_b_quiz_strong_plus_chat_emerging_strength_yields_one_canonical_entry(self):
+        # B: quiz strong + chat emerging_strength => ONE canonical
+        # Strengths topic, with the chat insight merged in as supporting
+        # evidence on that same entry - never a second, separate row.
+        topics = [_topic(status=STATUS_STRONG, subject="Math", topic_key="algebra")]
+        insights = [_insight(
+            insight_type=INSIGHT_EMERGING_STRENGTH, confidence=INSIGHT_CONFIDENCE_HIGH,
+            subject="Math", topic_key="algebra",
+        )]
+        snapshot = ls.build_learning_snapshot(topics, insights)
+        assert len(snapshot["strengths"]) == 1
+        entry = snapshot["strengths"][0]
+        assert entry["source"] == "quiz"
+        assert entry["status"] == STATUS_STRONG
+        assert len(entry["supporting_chat_evidence"]) == 1
+        assert entry["supporting_chat_evidence"][0]["insight_type"] == INSIGHT_EMERGING_STRENGTH
+        assert snapshot["needs_practice"] == []
+
+    def test_b_mastered_plus_chat_emerging_strength_yields_one_canonical_entry(self):
+        topics = [_topic(status=STATUS_MASTERED, subject="Math", topic_key="algebra")]
+        insights = [_insight(
+            insight_type=INSIGHT_EMERGING_STRENGTH, confidence=INSIGHT_CONFIDENCE_MEDIUM,
+            subject="Math", topic_key="algebra",
+        )]
+        snapshot = ls.build_learning_snapshot(topics, insights)
+        assert len(snapshot["strengths"]) == 1
+        assert snapshot["strengths"][0]["status"] == STATUS_MASTERED
+        assert len(snapshot["strengths"][0]["supporting_chat_evidence"]) == 1
+
+    def test_c_different_subjects_same_topic_key_remain_separate(self):
+        # C: different subjects with the same topic_key must remain
+        # separate - a chat emerging_strength for "Physics/algebra" must
+        # NOT merge into or suppress a "Math/algebra" quiz entry, and must
+        # independently create its own Strengths entry since quiz has no
+        # opinion about Physics/algebra at all.
+        topics = [_topic(status=STATUS_STRONG, subject="Math", topic_key="algebra")]
+        insights = [_insight(
+            insight_type=INSIGHT_EMERGING_STRENGTH, confidence=INSIGHT_CONFIDENCE_HIGH,
+            subject="Physics", topic_key="algebra",
+        )]
+        snapshot = ls.build_learning_snapshot(topics, insights)
+        assert len(snapshot["strengths"]) == 2
+        subjects = {(s["subject"], s["topic_key"]) for s in snapshot["strengths"]}
+        assert subjects == {("Math", "algebra"), ("Physics", "algebra")}
+        # The Math/algebra entry must not have picked up the Physics
+        # insight as supporting evidence.
+        math_entry = next(s for s in snapshot["strengths"] if s["subject"] == "Math")
+        assert "supporting_chat_evidence" not in math_entry
+
+    def test_c_weak_quiz_topic_not_affected_by_same_topic_key_different_subject_strength(self):
+        # The mirror case: a Needs Practice topic in one subject must not
+        # be affected by an emerging_strength insight for the identical
+        # topic_key under a DIFFERENT subject.
+        topics = [_topic(status=STATUS_NEEDS_PRACTICE, subject="Math", topic_key="algebra")]
+        insights = [_insight(
+            insight_type=INSIGHT_EMERGING_STRENGTH, confidence=INSIGHT_CONFIDENCE_HIGH,
+            subject="Physics", topic_key="algebra",
+        )]
+        snapshot = ls.build_learning_snapshot(topics, insights)
+        assert len(snapshot["needs_practice"]) == 1
+        assert snapshot["needs_practice"][0]["subject"] == "Math"
+        # Physics/algebra has no quiz evidence at all, so the chat
+        # insight independently becomes its own Strengths entry.
+        assert len(snapshot["strengths"]) == 1
+        assert snapshot["strengths"][0]["subject"] == "Physics"
+
+    def test_d_differently_cased_topic_display_text_is_still_the_same_logical_topic(self):
+        # D: matching is done on topic_key (already normalized at write
+        # time by backend.database.normalize_topic_key), never on the raw
+        # `topic` display string - so differently-cased/spaced display
+        # text for the identical topic_key must still be recognized as
+        # the same logical topic and merge into one canonical entry.
+        topics = [_topic(status=STATUS_STRONG, subject="Math", topic="Algebra", topic_key="algebra")]
+        insights = [_insight(
+            insight_type=INSIGHT_EMERGING_STRENGTH, confidence=INSIGHT_CONFIDENCE_HIGH,
+            subject="Math", topic="  algebra   basics", topic_key="algebra",
+        )]
+        snapshot = ls.build_learning_snapshot(topics, insights)
+        assert len(snapshot["strengths"]) == 1
+        assert snapshot["strengths"][0]["topic_key"] == "algebra"
+        assert len(snapshot["strengths"][0]["supporting_chat_evidence"]) == 1
+
+    def test_insufficient_evidence_quiz_topic_not_promoted_by_chat_strength(self):
+        # A quiz topic with only Insufficient Evidence still counts as
+        # "quiz has an opinion" and must not gain an independent
+        # chat-driven Strengths entry.
+        topics = [_topic(status=STATUS_INSUFFICIENT_EVIDENCE, subject="Math", topic_key="algebra", attempt_count=1)]
+        insights = [_insight(
+            insight_type=INSIGHT_EMERGING_STRENGTH, confidence=INSIGHT_CONFIDENCE_HIGH,
+            subject="Math", topic_key="algebra",
+        )]
+        snapshot = ls.build_learning_snapshot(topics, insights)
+        assert snapshot["strengths"] == []
+        assert snapshot["needs_practice"] == []
+
+    def test_improving_quiz_topic_not_promoted_by_chat_strength_into_second_entry(self):
+        # Improving is a positive but non-Strong/Mastered status - quiz
+        # has an opinion, so chat cannot independently add a strength
+        # entry, but Improving itself is also not a Strengths status, so
+        # the correct outcome is zero strengths for this topic.
+        topics = [_topic(status=STATUS_IMPROVING, subject="Math", topic_key="algebra", correct_rate=0.6)]
+        insights = [_insight(
+            insight_type=INSIGHT_EMERGING_STRENGTH, confidence=INSIGHT_CONFIDENCE_HIGH,
+            subject="Math", topic_key="algebra",
+        )]
+        snapshot = ls.build_learning_snapshot(topics, insights)
+        assert snapshot["strengths"] == []
+
+    def test_no_duplicate_topic_in_both_strengths_and_needs_practice_property(self):
+        # General property check across a richer mixed fixture: no
+        # (subject, topic_key) may ever appear in both lists at once.
+        topics = [
+            _topic(status=STATUS_NEEDS_PRACTICE, subject="Math", topic_key="algebra"),
+            _topic(status=STATUS_STRONG, subject="Physics", topic_key="force & motion"),
+            _topic(status=STATUS_DEVELOPING, subject="Chemistry", topic_key="stoichiometry", correct_rate=0.6),
+        ]
+        insights = [
+            _insight(insight_type=INSIGHT_EMERGING_STRENGTH, confidence=INSIGHT_CONFIDENCE_HIGH, subject="Math", topic_key="algebra"),
+            _insight(insight_type=INSIGHT_EMERGING_STRENGTH, confidence=INSIGHT_CONFIDENCE_HIGH, subject="Physics", topic_key="force & motion"),
+            _insight(insight_type=INSIGHT_EMERGING_STRENGTH, confidence=INSIGHT_CONFIDENCE_MEDIUM, subject="Chemistry", topic_key="stoichiometry"),
+        ]
+        snapshot = ls.build_learning_snapshot(topics, insights)
+        strength_keys = {(s["subject"], s["topic_key"]) for s in snapshot["strengths"]}
+        needs_practice_keys = {(n["subject"], n["topic_key"]) for n in snapshot["needs_practice"]}
+        assert strength_keys.isdisjoint(needs_practice_keys)

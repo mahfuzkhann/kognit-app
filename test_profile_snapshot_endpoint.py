@@ -107,15 +107,31 @@ class TestResponseShape:
 
     def test_quiz_and_chat_evidence_combine_correctly(self, client):
         _override_auth_as("user-1")
+        # SAMPLE_INSIGHT is subject-wide (topic_key=None) - see
+        # test_learning_snapshot.py's own subject-wide-exclusion coverage
+        # for why that can never independently become a Strengths entry
+        # (hardening fix, pre-Phase-7: an unidentified topic must never be
+        # guessed into a Strengths row). Using a topic-specific insight
+        # for an UNRELATED topic here instead, so this test continues to
+        # exercise "one quiz strength + one independent chat strength."
+        chat_only_strength_insight = {
+            "subject": "Biology", "topic": "Cell Division", "topic_key": "cell division",
+            "insight_type": "emerging_strength", "confidence": "high",
+            "evidence_count": 4, "first_observed_at": "2026-08-01T10:00:00+00:00",
+            "last_observed_at": "2026-08-20T10:00:00+00:00",
+        }
         p1, p2, _, _ = _mock_both(
             topics_return=[SAMPLE_TOPIC_STRONG, SAMPLE_TOPIC_NEEDS_PRACTICE],
-            insights_return=[SAMPLE_INSIGHT],
+            insights_return=[chat_only_strength_insight],
         )
         with p1, p2:
             resp = client.get("/api/profile/snapshot")
         body = resp.json()
-        # 1 quiz strength (Strong) + 1 chat strength (high-confidence emerging_strength).
+        # 1 quiz strength (Physics, Strong) + 1 independent chat strength
+        # (Biology - quiz has zero evidence for that topic).
         assert len(body["strengths"]) == 2
+        subjects = {s["subject"] for s in body["strengths"]}
+        assert subjects == {"Physics", "Biology"}
         assert len(body["needs_practice"]) == 1
         assert body["needs_practice"][0]["subject"] == "Chemistry"
 

@@ -491,6 +491,18 @@ window.handleLogout = async function() {
     // reasoning as clearing `projects`/localStorage above.
     currentProfile = null;
 
+    // Hardening fix, pre-Phase-7 (P1 #2): clear every piece of Student
+    // Profile panel state (DOM contents + the cached recommendation
+    // array used by its action buttons) and invalidate any in-flight
+    // panel data request, exactly like opening/closing the panel already
+    // does - so a previous student's learning intelligence can never
+    // resurface for whoever uses this browser tab next. Also closes the
+    // panel defensively in case it was somehow left open.
+    if (document.getElementById("student-profile-modal")) {
+        closeStudentProfilePanel();
+        _spResetStudentProfileState();
+    }
+
     loadProjectsFromLocalStorage();
     alert("Logged out successfully!");
 };
@@ -3289,6 +3301,39 @@ async function _spAuthedGet(url, accessToken) {
     return resp.json();
 }
 
+// ---- Hardening fixes, pre-Phase-7 (P1 #2 / P3 #5) ----
+//
+// _spGeneration is a monotonically-increasing counter identifying "the
+// current Student Profile panel load." Every call to
+// openStudentProfilePanel() takes a fresh generation number; every
+// asynchronous resumption point in loadStudentProfilePanelData() checks
+// it against the CURRENT value before touching the DOM. If a newer
+// generation has since started (panel was closed and reopened, or the
+// student logged out/in again) an older, now-stale generation's result
+// is silently discarded rather than overwriting fresher content - this
+// is the local, dependency-free request-generation guard requested for
+// P3 #5, and it is also the mechanism P1 #2's immediate-clear step relies
+// on to guarantee a late-arriving OLD response can never repaint stale
+// data after a newer load (or a logout) has already reset the panel.
+let _spGeneration = 0;
+
+// The single place that resets every Student Profile-related piece of
+// client-side state: DOM section contents, and the window-level
+// _spLastRecommendations cache used by the next-step action buttons.
+// Called synchronously (no await before it) from three places:
+// opening the panel, closing the panel, and logging out - see each call
+// site below for why. Bumping _spGeneration here is what invalidates any
+// already-in-flight request from a previous generation.
+function _spResetStudentProfileState() {
+    _spGeneration += 1;
+    window._spLastRecommendations = [];
+    ["sp-overview-body", "sp-strengths-body", "sp-needs-practice-body", "sp-mistakes-body", "sp-progress-body", "sp-next-steps-body"]
+        .forEach((id) => {
+            const el = document.getElementById(id);
+            if (el) el.innerHTML = `<div class="sp-loading">Loading…</div>`;
+        });
+}
+
 window.openStudentProfilePanel = function() {
     if (!currentUser) {
         // profile-trigger-btn only exists inside #auth-logged-view, so
@@ -3297,12 +3342,40 @@ window.openStudentProfilePanel = function() {
         return;
     }
     document.getElementById("student-profile-modal").classList.remove("hidden");
+    // Clear any previous student's rendered content SYNCHRONOUSLY, before
+    // anything asynchronous (including the session lookup) runs - fixes
+    // P1 #2: previously this reset happened only after `await
+    // supabaseClient.auth.getSession()` resolved, leaving a real window
+    // where a just-logged-in student could briefly see whatever was left
+    // over from the last time the panel was open (a previous student's
+    // data, on a shared/reused browser tab).
+    _spResetStudentProfileState();
     renderStudentProfileHeader();
-    loadStudentProfilePanelData();
+    loadStudentProfilePanelData(_spGeneration);
 };
 
 window.closeStudentProfilePanel = function() {
     document.getElementById("student-profile-modal").classList.add("hidden");
+    // Invalidate the active generation on close too (P3 #5's "closing
+    // the panel invalidates the active generation" requirement) - an
+    // in-flight request from this session can no longer paint anything
+    // even if it resolves after the panel is closed and later reopened.
+    _spGeneration += 1;
+};
+
+// Reused by the Student Profile panel's "Edit profile" button (see
+// templates/index.html). Hardening fix, pre-Phase-7 (P1 #1): the panel
+// and the existing Phase 6A edit modal (#profile-modal) share the same
+// modal-overlay z-index, and the panel appears later in the DOM, so it
+// was painting on top of the edit modal, making "Edit profile" appear to
+// do nothing. Closing the panel before opening the edit modal removes
+// the stacking conflict entirely without touching either modal's markup,
+// z-index, or the existing Phase 6A editor itself - openProfileModal()
+// and everything it does (prefill, save, cancel) is completely reused,
+// unmodified.
+window.editProfileFromStudentPanel = function() {
+    closeStudentProfilePanel();
+    openProfileModal();
 };
 
 // Re-renders just the header row (name/class/stream) from the already-
@@ -3326,24 +3399,26 @@ function renderStudentProfileHeader() {
     }
 }
 
-async function loadStudentProfilePanelData() {
+async function loadStudentProfilePanelData(myGeneration) {
     const { data: { session } } = await supabaseClient.auth.getSession();
-    const token = session ? session.access_token : null;
 
-    // Reset every section to its loading state on each open, so a stale
-    // result from a previous open is never shown while the fresh fetch is
-    // in flight.
-    ["sp-overview-body", "sp-strengths-body", "sp-needs-practice-body", "sp-mistakes-body", "sp-progress-body", "sp-next-steps-body"]
-        .forEach((id) => {
-            const el = document.getElementById(id);
-            if (el) el.innerHTML = `<div class="sp-loading">Loading…</div>`;
-        });
+    // P1 #2 / P3 #5: if the panel was closed+reopened, or the student
+    // logged out, while this await was in flight, _spGeneration has since
+    // moved on - abandon this load entirely rather than rendering
+    // possibly-wrong-user data into a panel state nothing here still owns.
+    if (myGeneration !== _spGeneration) return;
+
+    const token = session ? session.access_token : null;
 
     const [snapshotResult, mistakesResult, nextStepsResult] = await Promise.allSettled([
         _spAuthedGet("/api/profile/snapshot", token),
         _spAuthedGet("/api/profile/mistakes", token),
         _spAuthedGet("/api/profile/next-steps", token),
     ]);
+
+    // Re-check after the second (and longest) await too - the generation
+    // could have advanced while these three requests were in flight.
+    if (myGeneration !== _spGeneration) return;
 
     renderLearningOverview(snapshotResult);
     renderStrengthsSection(snapshotResult);
@@ -3400,21 +3475,66 @@ function renderLearningOverview(snapshotResult) {
     `;
 }
 
-// Groups a flat strengths/needs_practice list into { subject -> [topic names] },
-// deduplicating identical (subject, topic display text) pairs - a display
-// grouping only. This does not alter, merge-score, or reinterpret the
-// underlying entries; see the known Phase 6B snapshot limitation note in
-// _spGroupBySubject's call sites below for why duplicates can still occur
-// across sources and are left exactly as the backend returned them.
+// Groups a flat strengths/needs_practice list into { subject -> [topic display labels] },
+// deduplicating by CANONICAL topic identity - (subject, topic_key) - not
+// by the raw display string (hardening fix, pre-Phase-7, P2 #4).
+// topic_key is already normalized at write time by the backend (see
+// backend.database.normalize_topic_key: trim + collapse whitespace +
+// casefold), so two entries for the identical logical topic can still
+// carry differently-cased/spaced `topic` display text - deduplicating on
+// that raw text instead of topic_key could show what looks like two
+// different topics for one duplicated entry. This function does NOT
+// reimplement or duplicate normalize_topic_key itself - it only compares
+// topic_key values the backend already normalized, never re-normalizes
+// a display string on its own (that would risk silently disagreeing with
+// the backend's own rule).
+//
+// Different subjects remain separate even when topic_key coincides,
+// since the grouping key is the (subject, topic_key) PAIR, not topic_key
+// alone.
+//
+// If topic_key is missing on an entry (should not happen for
+// backend-sourced strengths/needs_practice, but handled defensively),
+// the entry falls back to being keyed by its own display text alone
+// within that subject, rather than guessing a shared identity with any
+// other entry - "if topic_key is unavailable, do not guess" (same
+// principle already applied throughout the backend).
 function _spGroupBySubject(entries) {
-    const groups = new Map();
+    const groups = new Map(); // subject -> Map(identityKey -> displayLabel)
+
     entries.forEach((entry) => {
         const subject = entry.subject || "General";
-        const topicLabel = entry.topic || entry.topic_key || "";
-        if (!groups.has(subject)) groups.set(subject, new Set());
-        if (topicLabel) groups.get(subject).add(topicLabel);
+        const rawTopic = typeof entry.topic === "string" ? entry.topic.trim() : "";
+        const topicKey = typeof entry.topic_key === "string" ? entry.topic_key.trim() : "";
+        const displayLabel = rawTopic || topicKey;
+        if (!displayLabel) return;
+
+        // Canonical identity when topic_key exists; otherwise fall back
+        // to the display label itself so we never invent a false match
+        // with an unrelated entry that also lacks a topic_key.
+        const identityKey = topicKey || `__no_topic_key__:${displayLabel}`;
+
+        if (!groups.has(subject)) groups.set(subject, new Map());
+        const subjectGroup = groups.get(subject);
+        if (!subjectGroup.has(identityKey)) {
+            subjectGroup.set(identityKey, displayLabel);
+        }
+        // First-seen display label wins (entries arrive quiz-strengths-
+        // first, then chat-only strengths - see backend/learning_snapshot.py
+        // - so a quiz-sourced spelling is preferred over a chat-sourced
+        // one when both exist for the same canonical topic, which is the
+        // more authoritative source per the same hierarchy already
+        // applied server-side).
     });
-    return groups;
+
+    // Adapted to the same Map<subject, Set<label>>-shaped return value
+    // the render functions already expect, now built from deduplicated-
+    // by-identity display labels.
+    const result = new Map();
+    groups.forEach((subjectGroup, subject) => {
+        result.set(subject, new Set(subjectGroup.values()));
+    });
+    return result;
 }
 
 // ---- 3. Strengths ----

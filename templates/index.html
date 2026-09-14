@@ -347,7 +347,11 @@
      recommendation logic are computed in this file or in app.js - this
      panel only formats what the backend already decided. The sidebar's
      profile-trigger-btn (see auth-logged-view above) opens THIS panel;
-     "Edit profile" below opens the existing, unmodified #profile-modal. -->
+     "Edit profile" below closes this panel first, then opens the
+     existing, unmodified #profile-modal - see editProfileFromStudentPanel()
+     in app.js (hardening fix, pre-Phase-7: the two modals previously
+     shared a stacking layer, so opening the edit modal without closing
+     this panel first left it hidden behind the still-open panel). -->
 <div id="student-profile-modal" class="modal-overlay hidden">
     <div class="modal-card profile-panel-card" role="dialog" aria-modal="true" aria-labelledby="sp-title">
         <div class="modal-header">
@@ -365,7 +369,7 @@
                         <div id="sp-header-name" class="sp-header-name">—</div>
                         <div id="sp-header-meta" class="sp-header-meta">—</div>
                     </div>
-                    <button type="button" class="sp-edit-btn" onclick="openProfileModal()">Edit profile</button>
+                    <button type="button" class="sp-edit-btn" onclick="editProfileFromStudentPanel()">Edit profile</button>
                 </div>
             </section>
 
