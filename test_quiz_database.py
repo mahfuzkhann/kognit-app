@@ -402,3 +402,102 @@ class TestGetUserTopicProfile:
         result = asyncio.run(database.get_user_topic_profile(user_token="t", user_id="u"))
         assert result[0]["subject"] == "Chemistry"
         assert result[1]["subject"] == "Physics"
+
+    # -----------------------------------------------------------------
+    # Phase 7A regression guardrails.
+    #
+    # These tests exist for exactly one reason: to fail loudly if someone
+    # later adds a global LIMIT/pagination to this query. Phase 7A's
+    # inspection (see Kognit_Master_Context / Phase 7A Step 2 report)
+    # proved that mastery_engine.compute_topic_status's Mastered check
+    # depends on the OVERALL rate across ALL available evidence for a
+    # topic - a global LIMIT truncates the oldest rows before grouping,
+    # which can silently flip a real "Improving" topic to a false
+    # "Mastered" one (dropping an old low score inflates the average),
+    # or make an old, low-volume topic disappear entirely if another
+    # subject's newer quizzes crowd it out of a shared row window.
+    #
+    # DO NOT "fix" a failure here by adjusting mastery_engine.py's
+    # thresholds - a failure here means a LIMIT was (re)introduced on
+    # this query and must be removed, not that the algorithm is wrong.
+    # -----------------------------------------------------------------
+
+    def test_query_requests_no_limit_or_pagination(self, monkeypatch):
+        """Documents and enforces the Phase 7A decision: this query must
+        remain a plain, unbounded select. If a future change adds a
+        `limit`/`offset`/range-header style bound here, this test must
+        fail - that is the point of the test, not a bug to silence."""
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["params"] = dict(request.url.params)
+            seen["range_header"] = request.headers.get("range")
+            return httpx.Response(200, json=[])
+
+        _patch_async_client(monkeypatch, _make_transport(handler))
+        asyncio.run(database.get_user_topic_profile(user_token="t", user_id="u"))
+        assert "limit" not in seen["params"]
+        assert "offset" not in seen["params"]
+        assert seen["range_header"] is None
+
+    def test_dropping_oldest_event_must_not_be_allowed_to_flip_mastery(self, monkeypatch):
+        """Concrete numeric case from the Phase 7A Step 2 semantic review:
+        3/10, 9/10, 9/10, 9/10 (oldest first) is "Improving" (75% overall
+        - below the 85% Mastered bar) under complete history. If a caller
+        ever truncated the oldest (3/10) row before this reached
+        mastery_engine, the remaining 9/10, 9/10, 9/10 would compute to
+        90% overall + last-two >= 85% -> a false "Mastered". This test
+        proves get_user_topic_profile currently returns ALL FOUR events
+        to the mastery engine (status == "Improving", attempt_count == 4),
+        not the truncated three."""
+        rows = [
+            {"id": "a1", "subject": "Physics", "topic": "Force & Motion", "topic_key": "force & motion",
+             "total_questions": 10, "score": 3, "created_at": "2026-05-01T10:00:00+00:00"},
+            {"id": "a2", "subject": "Physics", "topic": "Force & Motion", "topic_key": "force & motion",
+             "total_questions": 10, "score": 9, "created_at": "2026-06-01T10:00:00+00:00"},
+            {"id": "a3", "subject": "Physics", "topic": "Force & Motion", "topic_key": "force & motion",
+             "total_questions": 10, "score": 9, "created_at": "2026-07-01T10:00:00+00:00"},
+            {"id": "a4", "subject": "Physics", "topic": "Force & Motion", "topic_key": "force & motion",
+             "total_questions": 10, "score": 9, "created_at": "2026-08-01T10:00:00+00:00"},
+        ]
+        _patch_async_client(monkeypatch, _make_transport(self._rows_response(rows)))
+        result = asyncio.run(database.get_user_topic_profile(user_token="t", user_id="u"))
+        assert len(result) == 1
+        topic = result[0]
+        assert topic["attempt_count"] == 4
+        assert topic["total_correct"] == 30
+        assert topic["total_questions"] == 40
+        assert topic["correct_rate"] == pytest.approx(0.75)
+        assert topic["status"] == "Improving"
+        assert topic["status"] != "Mastered"
+
+    def test_old_low_volume_topic_survives_alongside_heavy_other_subject(self, monkeypatch):
+        """Cross-topic starvation guardrail: an old topic with only 2
+        attempts must retain its complete evidence (and therefore its
+        correct status) even when the same student has a large number of
+        newer attempts in a completely different subject. This is only
+        meaningful because get_user_topic_profile issues ONE unbounded,
+        un-partitioned query across all of a student's subjects/topics -
+        a global LIMIT on that query is exactly what would let the
+        Chemistry volume below push the old Physics evidence out of the
+        window (see test above and the Phase 7A Step 2 report)."""
+        rows = [
+            {"id": f"chem{i}", "subject": "Chemistry", "topic": "Atomic Structure", "topic_key": "atomic structure",
+             "total_questions": 10, "score": 8,
+             "created_at": f"2026-08-{10 + i:02d}T10:00:00+00:00"}
+            for i in range(20)
+        ] + [
+            {"id": "phys1", "subject": "Physics", "topic": "Old Topic", "topic_key": "old topic",
+             "total_questions": 10, "score": 2, "created_at": "2026-01-01T10:00:00+00:00"},
+            {"id": "phys2", "subject": "Physics", "topic": "Old Topic", "topic_key": "old topic",
+             "total_questions": 10, "score": 3, "created_at": "2026-01-08T10:00:00+00:00"},
+        ]
+        _patch_async_client(monkeypatch, _make_transport(self._rows_response(rows)))
+        result = asyncio.run(database.get_user_topic_profile(user_token="t", user_id="u"))
+        by_subject = {r["subject"]: r for r in result}
+        assert "Physics" in by_subject, (
+            "Old, low-volume topic must not disappear because another "
+            "subject has many newer attempts."
+        )
+        assert by_subject["Physics"]["attempt_count"] == 2
+        assert by_subject["Physics"]["status"] == "Needs Practice"
