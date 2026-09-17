@@ -41,6 +41,62 @@ _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 MODEL_NAME = "gemini-3.6-flash"
 
+# Phase 7B (evaluation subsystem) prompt-versioning support.
+#
+# Bumped by hand whenever CHAT_SYSTEM_INSTRUCTION_RULES below changes in a
+# way that could affect answer behavior. The evaluation runner logs this
+# alongside a SHA-256 hash of the constant itself (see
+# evaluation/prompt_identity.py) - the hash is what actually proves the
+# prompt content, since this label only helps if someone remembers to bump
+# it. Neither of these has any effect on production behavior; main.py never
+# reads this constant.
+CHAT_PROMPT_VERSION = "2026-09-16-a"
+
+# Extracted, byte-identical, from generate_ai_response()'s previously
+# inline system_instruction f-string (Phase 7B production-metadata-capture
+# work). This is the STATIC part of the chat system instruction - the part
+# that never varies per request. The per-request academic_clause (board/
+# class/stream), PDF-context block, and Socratic-mode suffix remain built
+# dynamically inside generate_ai_response(), exactly as before.
+#
+# This exists so the evaluation subsystem (evaluation/prompt_identity.py)
+# can import and hash the actual production prompt content directly,
+# rather than duplicating this text inside evaluation/ - hashing the full
+# per-request system_instruction would produce a different hash for every
+# single request (since it embeds student-specific class/stream/PDF text),
+# which would not be a meaningful "prompt version" signal at all.
+CHAT_SYSTEM_INSTRUCTION_RULES = (
+    "STRICT ACADEMIC & VISION RULES:\n"
+    "1. IMAGE ANALYSIS: If an image is provided, carefully read handwritten questions, printed equations, or diagrams. Solve step-by-step.\n"
+    "2. PDF CONTEXT: If a PDF document text context is provided below, prioritize answering questions based on that document content.\n"
+    "3. HYPER-LOCAL CQ FORMAT: When answering Creative Questions (সৃজনশীল) or solutions, strictly format using (ক) জ্ঞানমূলক, (খ) অনুধাবনমূলক, (গ) প্রয়োগমূলক, and (ঘ) উচ্চতর দক্ষতার standard exam rules.\n"
+    "4. FORMULA NOTATION: Wrap inline math in $ ... $ and main equations in $$ ... $$. "
+    "CRITICAL: Only pure mathematical notation belongs inside $ ... $ or $$ ... $$ - "
+    "variables, numbers, operators, and standard math symbols (e.g. FV, PV, i, n, +, =, /). "
+    "NEVER put Bangla or English words, labels, or explanations inside math delimiters - "
+    "this breaks Bangla text rendering. Write all Bangla/English labels, explanations, "
+    "and descriptions as normal Markdown text OUTSIDE the $ ... $ / $$ ... $$ delimiters.\n"
+    "5. Tone must be encouraging, clear, precise, and aligned with the student's curriculum.\n"
+    "6. LANGUAGE: Students write in Bangla, English, Banglish (Bangla typed in Latin "
+    "script), or a natural mix of these, sometimes with typos or informal phrasing. "
+    "Understand the question as intended without asking the student to rephrase it in a "
+    "'proper' language first. Respond primarily in whichever language the student's "
+    "message is dominantly in - if they write mostly Banglish or Bangla, reply in natural "
+    "Bangla; if they write mostly English, reply in English. Keep standard English "
+    "technical/subject terms (e.g. 'gross profit ratio', 'acceleration') as-is even inside "
+    "a Bangla reply where that is how the term is normally taught, rather than forcing an "
+    "awkward translation. If the student explicitly asks for a specific language, use it.\n"
+    "7. HANDLING UNCLEAR QUESTIONS: If a question is short, informal, or loosely phrased "
+    "but its academic intent is reasonably clear from context (subject, board, class, "
+    "prior chat history, or an attached PDF/image), answer it directly using the most "
+    "reasonable interpretation - do not refuse or ask for clarification merely because the "
+    "phrasing is casual, mixed-language, or contains minor typos. Only ask ONE short, "
+    "specific clarifying question when the request is genuinely ambiguous in a way that "
+    "would change the answer (e.g. it's unclear which chapter, which of two problems, or "
+    "which subject is meant). Never invent facts, textbook page numbers, or details you are "
+    "not given in order to avoid asking that clarifying question."
+)
+
 # User-facing fallback messages. Never expose str(exception) to the client -
 # that can leak internal details (stack traces, provider error text, etc).
 GENERIC_CHAT_ERROR = (
@@ -361,6 +417,23 @@ def _log_usage(usage, attempt: int, elapsed: float, mode: str, image: bool, pdf:
     )
 
 
+from dataclasses import dataclass
+
+
+@dataclass
+class AIGenerationResult:
+    """Returned by generate_ai_response() only when return_metadata=True
+    (Phase 7B evaluation subsystem). Never constructed or consumed by any
+    production caller - backend/main.py always calls with the default
+    return_metadata=False and receives a plain str, unchanged."""
+    text: str
+    is_error: bool
+    usage_metadata: Optional[object] = None
+    resolved_model_version: Optional[str] = None
+    response_id: Optional[str] = None
+    elapsed_seconds: Optional[float] = None
+
+
 def generate_ai_response(
     prompt: str,
     mode: str = "direct",
@@ -369,8 +442,32 @@ def generate_ai_response(
     stream: Optional[str] = None,
     image_bytes: bytes = None,
     pdf_context: str = "",
-    history: list = None
-) -> str:
+    history: list = None,
+    return_metadata: bool = False
+):
+    # return_metadata (Phase 7B evaluation subsystem addition): additive,
+    # backward-compatible. Defaults to False, so every existing call site
+    # (backend/main.py) is completely unaffected and this function still
+    # returns a bare str exactly as before. When True, returns an
+    # AIGenerationResult carrying the same text plus usage/timing/model
+    # metadata the evaluation runner needs - captured from data this
+    # function already computes internally (see _log_usage below), never
+    # duplicated or re-derived elsewhere.
+    def _wrap(text: str, *, is_error: bool, usage_metadata=None,
+              resolved_model_version: Optional[str] = None,
+              response_id: Optional[str] = None,
+              elapsed_seconds: Optional[float] = None):
+        if not return_metadata:
+            return text
+        return AIGenerationResult(
+            text=text,
+            is_error=is_error,
+            usage_metadata=usage_metadata,
+            resolved_model_version=resolved_model_version,
+            response_id=response_id,
+            elapsed_seconds=elapsed_seconds,
+        )
+
     # ISSUE 1 FIX (Phase 6A final correction): user_class/stream now come
     # from the student's own Profile (backend/main.py:
     # _get_academic_context) and can genuinely be None - either because
@@ -388,35 +485,7 @@ def generate_ai_response(
 
     system_instruction = (
         f"You are Kognit, an expert academic AI tutor for students in {board}, {academic_clause}.\n"
-        "STRICT ACADEMIC & VISION RULES:\n"
-        "1. IMAGE ANALYSIS: If an image is provided, carefully read handwritten questions, printed equations, or diagrams. Solve step-by-step.\n"
-        "2. PDF CONTEXT: If a PDF document text context is provided below, prioritize answering questions based on that document content.\n"
-        "3. HYPER-LOCAL CQ FORMAT: When answering Creative Questions (সৃজনশীল) or solutions, strictly format using (ক) জ্ঞানমূলক, (খ) অনুধাবনমূলক, (গ) প্রয়োগমূলক, and (ঘ) উচ্চতর দক্ষতার standard exam rules.\n"
-        "4. FORMULA NOTATION: Wrap inline math in $ ... $ and main equations in $$ ... $$. "
-        "CRITICAL: Only pure mathematical notation belongs inside $ ... $ or $$ ... $$ - "
-        "variables, numbers, operators, and standard math symbols (e.g. FV, PV, i, n, +, =, /). "
-        "NEVER put Bangla or English words, labels, or explanations inside math delimiters - "
-        "this breaks Bangla text rendering. Write all Bangla/English labels, explanations, "
-        "and descriptions as normal Markdown text OUTSIDE the $ ... $ / $$ ... $$ delimiters.\n"
-        "5. Tone must be encouraging, clear, precise, and aligned with the student's curriculum.\n"
-        "6. LANGUAGE: Students write in Bangla, English, Banglish (Bangla typed in Latin "
-        "script), or a natural mix of these, sometimes with typos or informal phrasing. "
-        "Understand the question as intended without asking the student to rephrase it in a "
-        "'proper' language first. Respond primarily in whichever language the student's "
-        "message is dominantly in - if they write mostly Banglish or Bangla, reply in natural "
-        "Bangla; if they write mostly English, reply in English. Keep standard English "
-        "technical/subject terms (e.g. 'gross profit ratio', 'acceleration') as-is even inside "
-        "a Bangla reply where that is how the term is normally taught, rather than forcing an "
-        "awkward translation. If the student explicitly asks for a specific language, use it.\n"
-        "7. HANDLING UNCLEAR QUESTIONS: If a question is short, informal, or loosely phrased "
-        "but its academic intent is reasonably clear from context (subject, board, class, "
-        "prior chat history, or an attached PDF/image), answer it directly using the most "
-        "reasonable interpretation - do not refuse or ask for clarification merely because the "
-        "phrasing is casual, mixed-language, or contains minor typos. Only ask ONE short, "
-        "specific clarifying question when the request is genuinely ambiguous in a way that "
-        "would change the answer (e.g. it's unclear which chapter, which of two problems, or "
-        "which subject is meant). Never invent facts, textbook page numbers, or details you are "
-        "not given in order to avoid asking that clarifying question."
+        + CHAT_SYSTEM_INSTRUCTION_RULES
     )
 
     if pdf_context:
@@ -468,7 +537,7 @@ def generate_ai_response(
                 "generate_ai_response: could not decode uploaded image (mode=%s, board=%s, user_class=%s)",
                 mode, board, user_class
             )
-            return IMAGE_DECODE_ERROR
+            return _wrap(IMAGE_DECODE_ERROR, is_error=True)
         contents.append(img)
     logger.info("generate_ai_response timing: image_decode=%.3fs", time.perf_counter() - t_stage_start)
 
@@ -514,10 +583,17 @@ def generate_ai_response(
                     "(mode=%s, board=%s, user_class=%s)",
                     attempt, MAX_ATTEMPTS, elapsed, mode, board, user_class
                 )
-                return BLOCKED_RESPONSE_ERROR
+                return _wrap(BLOCKED_RESPONSE_ERROR, is_error=True, elapsed_seconds=elapsed)
 
             _log_usage(response.usage_metadata, attempt, elapsed, mode, bool(image_bytes), bool(pdf_context))
-            return result_text
+            return _wrap(
+                result_text,
+                is_error=False,
+                usage_metadata=response.usage_metadata,
+                resolved_model_version=getattr(response, "model_version", None),
+                response_id=getattr(response, "response_id", None),
+                elapsed_seconds=elapsed,
+            )
 
         except genai_errors.ClientError as e:
             elapsed = time.perf_counter() - t_attempt_start
@@ -527,7 +603,7 @@ def generate_ai_response(
                     "generate_ai_response quota exhausted attempt=%d elapsed=%.3fs (mode=%s, board=%s, user_class=%s)",
                     attempt, elapsed, mode, board, user_class
                 )
-                return QUOTA_EXHAUSTED_ERROR
+                return _wrap(QUOTA_EXHAUSTED_ERROR, is_error=True, elapsed_seconds=elapsed)
             if e.code in TRANSIENT_RETRYABLE_CLIENT_HTTP_CODES and attempt < MAX_ATTEMPTS_BUCKET_B:
                 # Bucket B (409 Aborted-equivalent).
                 retry_delay = random.uniform(
@@ -548,7 +624,7 @@ def generate_ai_response(
                 "generate_ai_response client error code=%s attempt=%d/%d elapsed=%.3fs (mode=%s, board=%s, user_class=%s)",
                 e.code, attempt, MAX_ATTEMPTS_BUCKET_B, elapsed, mode, board, user_class
             )
-            return GENERIC_CHAT_ERROR
+            return _wrap(GENERIC_CHAT_ERROR, is_error=True, elapsed_seconds=elapsed)
 
         except genai_errors.ServerError as e:
             # Bucket B: genuine transient provider failure (5xx).
@@ -570,7 +646,7 @@ def generate_ai_response(
                 "generate_ai_response failed after %d attempts with server error code=%s (mode=%s, board=%s, user_class=%s)",
                 MAX_ATTEMPTS_BUCKET_B, e.code, mode, board, user_class
             )
-            return GENERIC_CHAT_ERROR
+            return _wrap(GENERIC_CHAT_ERROR, is_error=True, elapsed_seconds=elapsed)
 
         except (httpx.TimeoutException, httpx.ConnectError) as e:
             # Bucket A: OUR OWN client-side deadline fired (or we could not
@@ -592,7 +668,7 @@ def generate_ai_response(
                 attempt, MAX_ATTEMPTS_BUCKET_A, attempt_timeout, elapsed, mode, board, user_class,
                 RETRY_ON_CLIENT_TIMEOUT, MAX_ATTEMPTS_BUCKET_A
             )
-            return GENERIC_CHAT_ERROR
+            return _wrap(GENERIC_CHAT_ERROR, is_error=True, elapsed_seconds=elapsed)
 
         except Exception:
             # Bucket E: unexpected/programming error.
@@ -601,10 +677,10 @@ def generate_ai_response(
                 "generate_ai_response failed unexpectedly attempt=%d elapsed=%.3fs (mode=%s, board=%s, user_class=%s)",
                 attempt, elapsed, mode, board, user_class
             )
-            return GENERIC_CHAT_ERROR
+            return _wrap(GENERIC_CHAT_ERROR, is_error=True, elapsed_seconds=elapsed)
 
     # Not reachable (the loop always returns), kept as a defensive fallback.
-    return GENERIC_CHAT_ERROR
+    return _wrap(GENERIC_CHAT_ERROR, is_error=True)
 
 
 # ---------------------------------------------------------------------------
