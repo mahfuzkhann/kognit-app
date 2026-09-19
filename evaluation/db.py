@@ -29,7 +29,14 @@ from pathlib import Path
 # version of this constant a future caller happens to be running.
 EVALUATION_SCHEMA_VERSION = "1"
 
+# Phase 7C: version for the SEPARATE research benchmark schema
+# (evaluation/schema/research_schema.sql). Independent from
+# EVALUATION_SCHEMA_VERSION above - the two schemas evolve on their own
+# timelines and live in separate database files.
+RESEARCH_SCHEMA_VERSION = "1"
+
 _SCHEMA_SQL_PATH = Path(__file__).parent / "schema" / "schema.sql"
+_RESEARCH_SCHEMA_SQL_PATH = Path(__file__).parent / "schema" / "research_schema.sql"
 
 
 def utc_now_iso() -> str:
@@ -63,22 +70,37 @@ def get_connection(db_path: str | Path) -> sqlite3.Connection:
     return conn
 
 
-def initialize_schema(conn: sqlite3.Connection) -> None:
-    """Apply evaluation/schema/schema.sql to the given connection.
+def initialize_schema(
+    conn: sqlite3.Connection,
+    schema_path: str | Path | None = None,
+    schema_version: str | None = None,
+) -> None:
+    """Apply a schema SQL file to the given connection. Defaults to
+    evaluation/schema/schema.sql (Phase 7B, Answer Quality) - both new
+    parameters are optional and additive, so every existing Phase 7B
+    call site (which passes neither) is completely unaffected.
 
-    Idempotent: every CREATE TABLE/INDEX/TRIGGER in schema.sql uses
-    "IF NOT EXISTS", so calling this against an already-initialized
+    Phase 7C passes evaluation/schema/research_schema.sql and
+    RESEARCH_SCHEMA_VERSION explicitly to initialize a SEPARATE research
+    benchmark database - kept as a distinct file/schema per the approved
+    architecture's explicit instruction not to mix the research
+    benchmark into the NCTB Answer Quality benchmark.
+
+    Idempotent: every CREATE TABLE/INDEX/TRIGGER in either schema file
+    uses "IF NOT EXISTS", so calling this against an already-initialized
     database is a safe no-op for existing objects.
 
     Also writes/refreshes the schema_metadata row so the database file
     can self-report which schema version it was initialized with.
     """
-    sql = _SCHEMA_SQL_PATH.read_text(encoding="utf-8")
+    path = Path(schema_path) if schema_path is not None else _SCHEMA_SQL_PATH
+    version = schema_version if schema_version is not None else EVALUATION_SCHEMA_VERSION
+    sql = path.read_text(encoding="utf-8")
     conn.executescript(sql)
     conn.execute(
         "INSERT INTO schema_metadata (key, value) VALUES ('schema_version', ?) "
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        (EVALUATION_SCHEMA_VERSION,),
+        (version,),
     )
     conn.commit()
 

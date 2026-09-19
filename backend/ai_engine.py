@@ -423,15 +423,24 @@ from dataclasses import dataclass
 @dataclass
 class AIGenerationResult:
     """Returned by generate_ai_response() only when return_metadata=True
-    (Phase 7B evaluation subsystem). Never constructed or consumed by any
-    production caller - backend/main.py always calls with the default
-    return_metadata=False and receives a plain str, unchanged."""
+    (Phase 7B evaluation subsystem; also used by Phase 7C research
+    integration in backend/main.py). Never constructed or consumed by
+    any caller using the default return_metadata=False, which always
+    gets a plain str, unchanged."""
     text: str
     is_error: bool
     usage_metadata: Optional[object] = None
     resolved_model_version: Optional[str] = None
     response_id: Optional[str] = None
     elapsed_seconds: Optional[float] = None
+    grounding_metadata: Optional[object] = None
+    # Phase 7C: the raw google.genai.types.GroundingMetadata from the
+    # response, when enable_research=True. Always None when
+    # enable_research=False (the default) or on any error path -
+    # normalization into Kognit's provider-neutral ResearchResult
+    # happens in backend/research_models.py, never here; this function
+    # never interprets grounding content, only passes through what the
+    # SDK returned.
 
 
 def generate_ai_response(
@@ -443,20 +452,27 @@ def generate_ai_response(
     image_bytes: bytes = None,
     pdf_context: str = "",
     history: list = None,
-    return_metadata: bool = False
+    return_metadata: bool = False,
+    enable_research: bool = False
 ):
-    # return_metadata (Phase 7B evaluation subsystem addition): additive,
-    # backward-compatible. Defaults to False, so every existing call site
-    # (backend/main.py) is completely unaffected and this function still
-    # returns a bare str exactly as before. When True, returns an
-    # AIGenerationResult carrying the same text plus usage/timing/model
-    # metadata the evaluation runner needs - captured from data this
-    # function already computes internally (see _log_usage below), never
-    # duplicated or re-derived elsewhere.
+    # return_metadata (Phase 7B): see AIGenerationResult docstring.
+    #
+    # enable_research (Phase 7C): additive, backward-compatible, defaults
+    # to False. When True, adds Gemini's built-in Google Search grounding
+    # tool to this call - Kognit does NOT scrape or run its own search;
+    # Gemini decides whether/how to search and returns grounding_metadata
+    # describing what it did. This function never interprets that
+    # metadata - it is only captured (when return_metadata=True) and
+    # passed through raw on AIGenerationResult.grounding_metadata for
+    # backend/research_models.py to normalize. Every existing call site
+    # (backend/main.py's non-research path) uses the default False and
+    # is completely unaffected - no tools are added to the config at all
+    # in that case, byte-identical to pre-Phase-7C behavior.
     def _wrap(text: str, *, is_error: bool, usage_metadata=None,
               resolved_model_version: Optional[str] = None,
               response_id: Optional[str] = None,
-              elapsed_seconds: Optional[float] = None):
+              elapsed_seconds: Optional[float] = None,
+              grounding_metadata=None):
         if not return_metadata:
             return text
         return AIGenerationResult(
@@ -466,6 +482,7 @@ def generate_ai_response(
             resolved_model_version=resolved_model_version,
             response_id=response_id,
             elapsed_seconds=elapsed_seconds,
+            grounding_metadata=grounding_metadata,
         )
 
     # ISSUE 1 FIX (Phase 6A final correction): user_class/stream now come
@@ -554,11 +571,18 @@ def generate_ai_response(
         # per-attempt timeout below is always the one actually in effect.
         # retry_options is deliberately never set - see "SINGLE RETRY
         # AUTHORITY" comment above.
-        config = types.GenerateContentConfig(
+        # Phase 7C: the Google Search grounding tool is added ONLY when
+        # enable_research=True - the config object for a normal (non-
+        # research) call is built exactly as before, with no tools=[]
+        # key at all, so this change cannot affect any existing request.
+        config_kwargs = dict(
             system_instruction=system_instruction,
             thinking_config=types.ThinkingConfig(thinking_level=CHAT_THINKING_LEVEL),
             http_options=types.HttpOptions(timeout=_seconds_to_ms(attempt_timeout)),
         )
+        if enable_research:
+            config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+        config = types.GenerateContentConfig(**config_kwargs)
 
         try:
             # CHAT-04: multi-turn chat session so prior turns in THIS chat
@@ -586,6 +610,18 @@ def generate_ai_response(
                 return _wrap(BLOCKED_RESPONSE_ERROR, is_error=True, elapsed_seconds=elapsed)
 
             _log_usage(response.usage_metadata, attempt, elapsed, mode, bool(image_bytes), bool(pdf_context))
+            grounding_metadata = None
+            if enable_research:
+                # Best-effort, never fabricated: candidates[0] and its
+                # grounding_metadata attribute are read defensively - an
+                # unexpected empty candidates list or a response shape
+                # without this attribute results in None, handled
+                # explicitly downstream (research_models.py treats a
+                # None grounding_metadata on a research-requested call
+                # as 'failed', never as 'used').
+                candidates = getattr(response, "candidates", None) or []
+                if candidates:
+                    grounding_metadata = getattr(candidates[0], "grounding_metadata", None)
             return _wrap(
                 result_text,
                 is_error=False,
@@ -593,6 +629,7 @@ def generate_ai_response(
                 resolved_model_version=getattr(response, "model_version", None),
                 response_id=getattr(response, "response_id", None),
                 elapsed_seconds=elapsed,
+                grounding_metadata=grounding_metadata,
             )
 
         except genai_errors.ClientError as e:

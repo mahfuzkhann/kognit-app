@@ -1182,6 +1182,78 @@ const UI_ICONS = {
     spark: `<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 5.4L19 10l-5.4 1.6L12 17l-1.6-5.4L5 10l5.4-1.6L12 3z"></path></svg>`
 };
 
+// PHASE 7C: renders a compact "Sources" section for a research-grounded
+// answer. Returns null (renders nothing) unless research.grounding_status
+// === "used" AND at least one source exists - a failed/not-used/absent
+// research result never produces a Sources section or any "researched"
+// indicator, per the explicit "no fake research UI" requirement.
+//
+// Defense in depth on URL safety: backend/research_models.py already
+// drops any unsafe-scheme URL before this ever reaches the client, but
+// this function re-validates independently rather than trusting that -
+// an href is only ever set from a string that passes this same
+// http(s)-with-host check performed server-side, so a future backend
+// bug cannot alone result in an unsafe href being rendered.
+function isClientSafeCitationUrl(url) {
+    if (!url || typeof url !== "string") return false;
+    try {
+        const parsed = new URL(url);
+        return (parsed.protocol === "http:" || parsed.protocol === "https:") && !!parsed.host;
+    } catch (e) {
+        return false;
+    }
+}
+
+function buildResearchSourcesSection(research) {
+    if (!research || research.grounding_status !== "used") return null;
+    const sources = Array.isArray(research.sources) ? research.sources : [];
+    if (sources.length === 0) return null;
+
+    const section = document.createElement("div");
+    section.className = "research-sources";
+
+    const label = document.createElement("div");
+    label.className = "research-sources-label";
+    label.textContent = "Sources";
+    section.appendChild(label);
+
+    const list = document.createElement("ul");
+    list.className = "research-sources-list";
+
+    sources.forEach((source) => {
+        const item = document.createElement("li");
+        item.className = "research-source-item";
+
+        if (isClientSafeCitationUrl(source.url)) {
+            const link = document.createElement("a");
+            link.href = source.url;               // validated above
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";      // never leak window.opener to an external source
+            link.textContent = source.title || source.domain || source.url; // textContent = auto-escaped
+            item.appendChild(link);
+        } else {
+            // A source with no safe URL still gets its title/domain shown
+            // (never silently dropped from view) but never as a clickable
+            // link - avoids ever rendering a broken or unsafe link.
+            const span = document.createElement("span");
+            span.textContent = source.title || source.domain || "Source";
+            item.appendChild(span);
+        }
+
+        if (source.domain) {
+            const domainSpan = document.createElement("span");
+            domainSpan.className = "research-source-domain";
+            domainSpan.textContent = ` (${source.domain})`; // textContent = auto-escaped
+            item.appendChild(domainSpan);
+        }
+
+        list.appendChild(item);
+    });
+
+    section.appendChild(list);
+    return section;
+}
+
 function createBotMessageElement(rawText, meta = {}) {
     const wrapper = document.createElement("div");
     wrapper.className = "bot-message";
@@ -1196,6 +1268,16 @@ function createBotMessageElement(rawText, meta = {}) {
     const { text: protectedText, segments } = protectMathSegments(rawText);
     contentDiv.innerHTML = restoreProtectedMathSegments(marked.parse(protectedText), segments);
     wrapper.appendChild(contentDiv);
+
+    // PHASE 7C: a compact Sources section, appended only for a genuinely
+    // research-grounded answer (see buildResearchSourcesSection above for
+    // the exact, narrow condition). Placed after the answer content and
+    // before the toolbar - the answer stays primary, sources are a
+    // secondary, easily-scannable addition, never a separate dashboard.
+    const sourcesSection = buildResearchSourcesSection(meta.research);
+    if (sourcesSection) {
+        wrapper.appendChild(sourcesSection);
+    }
 
     wrapper.appendChild(buildBotToolbar(rawText, meta));
 
@@ -1417,7 +1499,7 @@ async function regenerateBotMessage(meta, btnEl) {
 
         // Replace in place (same array index) - never insert a duplicate
         // user or bot message, and never shift later messages' indices.
-        chat.messages[meta.msgIndex] = { role: "bot", text: replyText };
+        chat.messages[meta.msgIndex] = { role: "bot", text: replyText, research: data.research || null };
         saveProjectsToStorage();
 
         if (activeProjectId === meta.projId && activeChatId === meta.chatId) {
@@ -1714,7 +1796,7 @@ async function submitUserMessageAndAppendReplyInner(meta, msg, finalText, chat, 
         const data = await response.json();
         const replyText = data.reply || "No response received.";
 
-        chat.messages.push({ role: "bot", text: replyText });
+        chat.messages.push({ role: "bot", text: replyText, research: data.research || null });
         saveProjectsToStorage();
         maybeGenerateAiTitle(proj, chat);
 
@@ -2005,7 +2087,8 @@ function loadChat(projId, chatId) {
                     projId: projId,
                     chatId: chatId,
                     msgIndex: index,
-                    feedback: msg.feedback || null
+                    feedback: msg.feedback || null,
+                    research: msg.research || null
                 }));
             }
         });
@@ -2938,7 +3021,7 @@ window.sendMessage = async function() {
 
         let newBotMsgIndex = -1;
         if (targetChat) {
-            targetChat.messages.push({ role: "bot", text: replyText });
+            targetChat.messages.push({ role: "bot", text: replyText, research: data.research || null });
             newBotMsgIndex = targetChat.messages.length - 1;
             saveProjectsToStorage();
 
@@ -2952,7 +3035,8 @@ window.sendMessage = async function() {
             const botDiv = createBotMessageElement(replyText, {
                 projId: requestProjectId,
                 chatId: requestChatId,
-                msgIndex: newBotMsgIndex
+                msgIndex: newBotMsgIndex,
+                research: data.research || null
             });
             chatBox.appendChild(botDiv);
 

@@ -12,7 +12,9 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from backend.ai_engine import generate_ai_response, generate_quiz_questions, generate_chat_title
+from backend.ai_engine import generate_ai_response, generate_quiz_questions, generate_chat_title, MODEL_NAME
+from backend.research_decision import decide_research
+from backend.research_models import normalize_grounding_metadata, research_result_to_dict
 from backend.rag_engine import extract_text_from_pdf, PDFExtractionError
 from backend.database import (
     save_quiz_attempt,
@@ -799,17 +801,62 @@ async def chat_endpoint(
         # off the main async event loop, so one slow/stuck AI call no longer
         # blocks every other concurrent request. ai_engine.py itself is
         # unchanged - this is purely how main.py invokes it.
-        response = await run_in_threadpool(
-            generate_ai_response,
-            prompt=prompt,
-            mode=mode,
-            board=DEFAULT_BOARD,
-            user_class=user_class,
-            stream=stream,
-            image_bytes=image_bytes,
-            pdf_context=pdf_context,
-            history=conversation_history
-        )
+        #
+        # PHASE 7C: research_decision.decide_research() is a cheap, local,
+        # synchronous heuristic (no I/O) - safe to call inline. It decides
+        # ONLY whether to enable Gemini's Google Search grounding tool for
+        # THIS call; it is never treated as proof research happened - that
+        # proof only ever comes from the response's own grounding_metadata,
+        # normalized below. When research is not requested, this call is
+        # byte-identical to the pre-Phase-7C code path (same kwargs, no
+        # return_metadata/enable_research at all).
+        research_decision = decide_research(prompt)
+        research_payload = None
+
+        if research_decision.research_requested:
+            t_research_start = time.perf_counter()
+            ai_result = await run_in_threadpool(
+                generate_ai_response,
+                prompt=prompt,
+                mode=mode,
+                board=DEFAULT_BOARD,
+                user_class=user_class,
+                stream=stream,
+                image_bytes=image_bytes,
+                pdf_context=pdf_context,
+                history=conversation_history,
+                return_metadata=True,
+                enable_research=True,
+            )
+            research_latency = time.perf_counter() - t_research_start
+            response = ai_result.text
+            if not ai_result.is_error:
+                # Only normalize/attach research metadata on a genuine
+                # successful answer - an error string (quota exhausted,
+                # blocked response, etc.) never gets a research payload
+                # attached, so Kognit can never imply an error reply was
+                # web-grounded.
+                research_result = normalize_grounding_metadata(
+                    ai_result.grounding_metadata,
+                    provider="google",
+                    provider_model=MODEL_NAME,
+                    research_latency_seconds=research_latency,
+                    decision_reason=research_decision.reason,
+                    decision_category=research_decision.category,
+                )
+                research_payload = research_result_to_dict(research_result)
+        else:
+            response = await run_in_threadpool(
+                generate_ai_response,
+                prompt=prompt,
+                mode=mode,
+                board=DEFAULT_BOARD,
+                user_class=user_class,
+                stream=stream,
+                image_bytes=image_bytes,
+                pdf_context=pdf_context,
+                history=conversation_history
+            )
         t_after_ai = time.perf_counter()
         logger.info(
             "chat_endpoint timing: parse=%.3fs ai_total=%.3fs request_total=%.3fs "
@@ -885,7 +932,10 @@ async def chat_endpoint(
                 "chat_endpoint: learning-memory extraction failed - chat response is unaffected"
             )
 
-        return {"reply": response}
+        result = {"reply": response}
+        if research_payload is not None:
+            result["research"] = research_payload
+        return result
     except Exception:
         logger.exception(
             "Unexpected error in /api/chat after %.3fs",
