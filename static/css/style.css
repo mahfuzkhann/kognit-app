@@ -6,8 +6,8 @@
 }
 
 body {
-    background-color: #000000;
-    color: #ffffff;
+    background-color: var(--color-background);
+    color: var(--color-text-primary);
     height: 100vh; /* fallback for browsers without dvh support */
     height: 100dvh; /* tracks the real visible viewport on mobile, where
                         the address/toolbar can show or hide; 100vh alone
@@ -34,8 +34,8 @@ body {
    onclick handlers, so no JS/HTML behavior changes. */
 .sidebar {
     width: 272px;
-    background-color: #080808;
-    border-right: 1px solid #1e1e1e;
+    background-color: var(--color-surface);
+    border-right: 1px solid var(--gray-930);
     display: flex;
     flex-direction: column;
     padding: 14px;
@@ -54,8 +54,8 @@ body {
 
 .btn-primary {
     width: 100%;
-    background: #ffffff;
-    color: #000000;
+    background: var(--color-text-primary);
+    color: var(--color-background);
     border: none;
     padding: 9px 8px;
     border-radius: 7px;
@@ -66,14 +66,14 @@ body {
 }
 
 .btn-primary:hover {
-    background: #e0e0e0;
+    background: var(--gray-100);
 }
 
 .btn-secondary {
     width: 100%;
-    background: #121212;
-    color: #cccccc;
-    border: 1px solid #222222;
+    background: var(--gray-958);
+    color: var(--color-text-tertiary);
+    border: 1px solid var(--color-border);
     padding: 9px 8px;
     border-radius: 7px;
     font-weight: 500;
@@ -83,16 +83,16 @@ body {
 }
 
 .btn-secondary:hover {
-    background: #1a1a1a;
-    color: #ffffff;
-    border-color: #333333;
+    background: var(--color-border-subtle);
+    color: var(--color-text-primary);
+    border-color: var(--color-border-strong);
 }
 
 .btn-quiz {
     width: 100%;
     background: transparent;
-    color: #a5b4fc;
-    border: 1px solid #262247;
+    color: var(--indigo-300);
+    border: 1px solid var(--indigo-925);
     padding: 8px;
     border-radius: 7px;
     font-weight: 600;
@@ -106,8 +106,8 @@ body {
 }
 
 .btn-quiz:hover {
-    background: #1e1b4b;
-    color: #ffffff;
+    background: var(--indigo-950);
+    color: var(--color-text-primary);
 }
 
 .history-section {
@@ -122,7 +122,7 @@ body {
     font-size: 10.5px;
     text-transform: uppercase;
     letter-spacing: 0.8px;
-    color: #5c5c5c;
+    color: var(--gray-700);
     font-weight: 600;
     padding: 0 4px;
 }
@@ -155,16 +155,16 @@ body {
     cursor: pointer;
     font-weight: 600;
     font-size: 12.5px;
-    color: #d4d4d4;
+    color: var(--gray-220);
 }
 
 .project-header:hover {
-    background: #131313;
+    background: var(--gray-955);
 }
 
 .project-card.active-project .project-header {
-    background: #141414;
-    color: #ffffff;
+    background: var(--color-surface-hover);
+    color: var(--color-text-primary);
 }
 
 .project-title-wrapper {
@@ -182,7 +182,7 @@ body {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    color: #777777;
+    color: var(--gray-550);
     transition: transform 0.15s ease;
     flex-shrink: 0;
 }
@@ -204,7 +204,7 @@ body {
     display: inline-flex;
     align-items: center;
     flex-shrink: 0;
-    color: #888888;
+    color: var(--color-text-muted);
 }
 
 .chat-item-icon {
@@ -212,7 +212,7 @@ body {
     align-items: center;
     margin-right: 6px;
     flex-shrink: 0;
-    color: #777777;
+    color: var(--gray-550);
     vertical-align: -2px;
 }
 
@@ -228,7 +228,7 @@ body {
     gap: 1px;
     padding-left: 11px;
     margin: 2px 0 4px 9px;
-    border-left: 1px solid #1a1a1a;
+    border-left: 1px solid var(--color-border-subtle);
 }
 
 /* FEATURE 1: collapsed project - its nested chats are fully hidden. */
@@ -260,14 +260,14 @@ body {
     border-radius: 6px;
     cursor: pointer;
     font-size: 12px;
-    color: #888888;
+    color: var(--color-text-muted);
     transition: 0.15s;
     min-height: 30px;
 }
 
 .chat-item:hover, .chat-item.active {
-    background: #1a1a1a;
-    color: #ffffff;
+    background: var(--color-border-subtle);
+    color: var(--color-text-primary);
 }
 
 .chat-title-text {
@@ -295,7 +295,7 @@ body {
 .action-btn {
     background: transparent;
     border: none;
-    color: #777777;
+    color: var(--gray-550);
     cursor: pointer;
     padding: 3px 4px;
     border-radius: 4px;
@@ -306,13 +306,13 @@ body {
 }
 
 .action-btn:hover {
-    color: #ffffff;
-    background: #262626;
+    color: var(--color-text-primary);
+    background: var(--gray-910);
 }
 
 .action-btn.delete-btn:hover {
-    color: #ff5555;
-    background: #280000;
+    color: var(--red-500);
+    background: var(--red-900);
 }
 
 /* FEATURE 3: pin/unpin. The pin action button itself still only appears on
@@ -323,13 +323,13 @@ body {
    renderChatItem() in app.js) is what makes pinned state recognizable
    without hovering. */
 .pin-btn.pinned {
-    color: #fbbf24;
+    color: var(--amber-400);
 }
 
 .rename-input {
-    background: #111111;
-    border: 1px solid #444444;
-    color: #ffffff;
+    background: var(--color-surface-raised);
+    border: 1px solid var(--gray-800);
+    color: var(--color-text-primary);
     font-size: 12px;
     padding: 3px 6px;
     border-radius: 4px;
@@ -356,7 +356,7 @@ body {
     justify-content: space-between;
     align-items: center;
     padding-bottom: 12px;
-    border-bottom: 1px solid #1a1a1a;
+    border-bottom: 1px solid var(--color-border-subtle);
     gap: 15px;
 }
 
@@ -364,12 +364,12 @@ body {
     font-size: 24px;
     font-weight: 700;
     letter-spacing: -0.5px;
-    color: #ffffff;
+    color: var(--color-text-primary);
 }
 
 .tagline {
     font-size: 12px;
-    color: #777777;
+    color: var(--gray-550);
     margin-top: 2px;
 }
 
@@ -380,9 +380,9 @@ body {
 }
 
 .context-dropdown {
-    background: #0d0d0d;
-    color: #cccccc;
-    border: 1px solid #222222;
+    background: var(--color-surface-secondary);
+    color: var(--color-text-tertiary);
+    border: 1px solid var(--color-border);
     padding: 6px 10px;
     border-radius: 6px;
     font-size: 12px;
@@ -391,7 +391,7 @@ body {
 }
 
 .context-dropdown:hover {
-    border-color: #444444;
+    border-color: var(--gray-800);
 }
 
 /* Mode Switcher */
@@ -402,9 +402,9 @@ body {
 
 .mode-btn {
     flex: 1;
-    background: #0d0d0d;
-    border: 1px solid #222222;
-    color: #888888;
+    background: var(--color-surface-secondary);
+    border: 1px solid var(--color-border);
+    color: var(--color-text-muted);
     padding: 10px;
     border-radius: 8px;
     cursor: pointer;
@@ -414,9 +414,9 @@ body {
 }
 
 .mode-btn.active {
-    background: #ffffff;
-    color: #000000;
-    border-color: #ffffff;
+    background: var(--color-text-primary);
+    color: var(--color-background);
+    border-color: var(--color-text-primary);
     font-weight: 600;
 }
 
@@ -427,8 +427,8 @@ body {
                        intrinsic height inside .main-content's column flex layout;
                        without this, long content grows the box instead of
                        scrolling inside it (root cause of BUG 1) */
-    background: #080808;
-    border: 1px solid #1a1a1a;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border-subtle);
     border-radius: 12px;
     overflow-y: auto;
     overflow-x: hidden;
@@ -458,14 +458,14 @@ body {
 }
 
 .empty-chat-greeting-icon {
-    color: #333333;
+    color: var(--color-border-strong);
     display: flex;
 }
 
 .empty-chat-greeting-text {
     font-size: 15px;
     font-weight: 500;
-    color: #888888;
+    color: var(--color-text-muted);
     max-width: 380px;
     line-height: 1.5;
 }
@@ -473,9 +473,9 @@ body {
 /* ========== OVERFLOW FIX: .bot-message and children ========== */
 
 .bot-message {
-    background: #111111;
-    border: 1px solid #222222;
-    border-left: 3px solid #ffffff;
+    background: var(--color-surface-raised);
+    border: 1px solid var(--color-border);
+    border-left: 3px solid var(--color-text-primary);
     padding: 14px 18px;
     border-radius: 8px;
     /* PHASE 6: readability cap. The old flat 90% let a single line of text
@@ -489,7 +489,7 @@ body {
     min-width: 0;
     align-self: flex-start;
     line-height: 1.6;
-    color: #dddddd;
+    color: var(--color-text-secondary);
     font-size: 14px;
     word-wrap: break-word;
     overflow-wrap: break-word;
@@ -548,8 +548,8 @@ body {
 .bot-message blockquote {
     margin: 0 0 10px 0;
     padding: 2px 0 2px 12px;
-    border-left: 2px solid #333333;
-    color: #aaaaaa;
+    border-left: 2px solid var(--color-border-strong);
+    color: var(--gray-350);
 }
 
 .bot-message table {
@@ -559,7 +559,7 @@ body {
 .bot-message hr {
     margin: 14px 0;
     border: none;
-    border-top: 1px solid #262626;
+    border-top: 1px solid var(--gray-910);
 }
 
 /* Code blocks and pre-formatted text must wrap long lines */
@@ -750,7 +750,7 @@ body {
 /* ========== END OVERFLOW FIX ========== */
 
 .user-message {
-    background: #1e1e1e;
+    background: var(--gray-930);
     padding: 12px 18px;
     border-radius: 8px;
     /* PHASE 6: same reasoning as .bot-message's cap above - keeps the
@@ -758,7 +758,7 @@ body {
        absolute width on wide viewports. */
     max-width: min(80%, 620px);
     align-self: flex-end;
-    color: #ffffff;
+    color: var(--color-text-primary);
     font-size: 14px;
     display: flex;
     flex-direction: column;
@@ -771,7 +771,7 @@ body {
     max-width: 100%;
     max-height: 250px;
     border-radius: 6px;
-    border: 1px solid #333333;
+    border: 1px solid var(--color-border-strong);
     object-fit: contain;
 }
 
@@ -780,8 +780,8 @@ body {
     display: flex;
     align-items: center;
     gap: 12px;
-    background: #0d0d0d;
-    border: 1px solid #222222;
+    background: var(--color-surface-secondary);
+    border: 1px solid var(--color-border);
     padding: 8px 12px;
     border-radius: 8px;
 }
@@ -801,15 +801,15 @@ body {
     height: 100%;
     object-fit: cover;
     border-radius: 6px;
-    border: 1px solid #333333;
+    border: 1px solid var(--color-border-strong);
 }
 
 .remove-img-btn {
     position: absolute;
     top: -6px;
     right: -6px;
-    background: #ffffff;
-    color: #000000;
+    background: var(--color-text-primary);
+    color: var(--color-background);
     border: none;
     border-radius: 50%;
     width: 18px;
@@ -822,7 +822,7 @@ body {
 
 .preview-text {
     font-size: 12px;
-    color: #888888;
+    color: var(--color-text-muted);
 }
 
 /* Input Bar & Icon Buttons */
@@ -836,9 +836,9 @@ body {
     display: flex;
     align-items: center;
     justify-content: center;
-    background: #0d0d0d;
-    border: 1px solid #222222;
-    color: #aaaaaa;
+    background: var(--color-surface-secondary);
+    border: 1px solid var(--color-border);
+    color: var(--gray-350);
     width: 44px;
     height: 44px;
     border-radius: 8px;
@@ -848,9 +848,9 @@ body {
 }
 
 .icon-btn:hover {
-    color: #ffffff;
-    border-color: #555555;
-    background: #141414;
+    color: var(--color-text-primary);
+    border-color: var(--gray-750);
+    background: var(--color-surface-hover);
 }
 
 /* ==========================================================
@@ -875,9 +875,9 @@ body {
     display: flex;
     align-items: center;
     justify-content: center;
-    background: #0d0d0d;
-    border: 1px solid #222222;
-    color: #aaaaaa;
+    background: var(--color-surface-secondary);
+    border: 1px solid var(--color-border);
+    color: var(--gray-350);
     width: 44px;
     height: 44px;
     border-radius: 8px;
@@ -887,18 +887,18 @@ body {
 }
 
 .composer-plus-btn:hover {
-    color: #ffffff;
-    border-color: #555555;
-    background: #141414;
+    color: var(--color-text-primary);
+    border-color: var(--gray-750);
+    background: var(--color-surface-hover);
 }
 
 /* Rotate the "+" into an "x"-ish cross when the menu is open, as a
    lightweight visual acknowledgement of state - no extra icon swap
    needed since a 45deg-rotated plus already reads as a close glyph. */
 .composer-plus-btn[aria-expanded="true"] {
-    color: #ffffff;
-    border-color: #555555;
-    background: #1a1a1a;
+    color: var(--color-text-primary);
+    border-color: var(--gray-750);
+    background: var(--color-border-subtle);
     transform: rotate(45deg);
 }
 
@@ -914,8 +914,8 @@ body {
     bottom: calc(100% + 8px);
     left: 0;
     min-width: 210px;
-    background: #111111;
-    border: 1px solid #262626;
+    background: var(--color-surface-raised);
+    border: 1px solid var(--gray-910);
     border-radius: 10px;
     padding: 6px;
     display: flex;
@@ -936,7 +936,7 @@ body {
     width: 100%;
     background: transparent;
     border: none;
-    color: #e0e0e0;
+    color: var(--gray-100);
     padding: 9px 10px;
     border-radius: 6px;
     font-size: 13px;
@@ -948,16 +948,16 @@ body {
 
 .composer-menu-item svg {
     flex-shrink: 0;
-    color: #999999;
+    color: var(--gray-400);
 }
 
 .composer-menu-item:hover:not(:disabled) {
-    background: #1e1e1e;
-    color: #ffffff;
+    background: var(--gray-930);
+    color: var(--color-text-primary);
 }
 
 .composer-menu-item:hover:not(:disabled) svg {
-    color: #ffffff;
+    color: var(--color-text-primary);
 }
 
 .composer-menu-item:disabled {
@@ -968,8 +968,8 @@ body {
 .composer-menu-badge {
     margin-left: auto;
     font-size: 10px;
-    color: #777777;
-    border: 1px solid #333333;
+    color: var(--gray-550);
+    border: 1px solid var(--color-border-strong);
     border-radius: 999px;
     padding: 2px 7px;
     white-space: nowrap;
@@ -977,11 +977,11 @@ body {
 
 #user-input {
     flex: 1;
-    background: #0d0d0d;
-    border: 1px solid #222222;
+    background: var(--color-surface-secondary);
+    border: 1px solid var(--color-border);
     border-radius: 8px;
     padding: 12px 16px;
-    color: #ffffff;
+    color: var(--color-text-primary);
     font-size: 14px;
     outline: none;
     min-height: 44px;
@@ -994,13 +994,13 @@ body {
 }
 
 #user-input:focus {
-    border-color: #555555;
+    border-color: var(--gray-750);
 }
 
 #send-btn {
-    background: #ffffff;
+    background: var(--color-text-primary);
     border: none;
-    color: #000000;
+    color: var(--color-background);
     padding: 0 20px;
     height: 44px;
     border-radius: 8px;
@@ -1012,7 +1012,7 @@ body {
 }
 
 #send-btn:hover {
-    background: #dddddd;
+    background: var(--color-text-secondary);
 }
 
 /* Quiz Modal Overlay & UI */
@@ -1035,8 +1035,8 @@ body {
 }
 
 .modal-card {
-    background: #0f0f12;
-    border: 1px solid #22222a;
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--gray-915);
     border-radius: 12px;
     width: 90%;
     max-width: 580px;
@@ -1051,13 +1051,13 @@ body {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    border-bottom: 1px solid #22222a;
+    border-bottom: 1px solid var(--gray-915);
     padding-bottom: 12px;
 }
 
 .modal-header h2 {
     font-size: 18px;
-    color: #ffffff;
+    color: var(--color-text-primary);
     display: flex;
     align-items: center;
     gap: 8px;
@@ -1066,7 +1066,7 @@ body {
 .close-modal-btn {
     background: transparent;
     border: none;
-    color: #888888;
+    color: var(--color-text-muted);
     cursor: pointer;
     display: flex;
     align-items: center;
@@ -1075,7 +1075,7 @@ body {
 }
 
 .close-modal-btn:hover {
-    color: #ffffff;
+    color: var(--color-text-primary);
 }
 
 .modal-body {
@@ -1090,7 +1090,7 @@ body {
 
 .modal-desc {
     font-size: 13px;
-    color: #888888;
+    color: var(--color-text-muted);
 }
 
 .form-group {
@@ -1102,22 +1102,22 @@ body {
 .form-group label {
     font-size: 12px;
     font-weight: 600;
-    color: #cccccc;
+    color: var(--color-text-tertiary);
 }
 
 .form-group input, .form-group select {
-    background: #18181f;
-    border: 1px solid #2e2e38;
+    background: var(--color-surface-input);
+    border: 1px solid var(--color-border-input);
     border-radius: 6px;
     padding: 10px;
-    color: #ffffff;
+    color: var(--color-text-primary);
     font-size: 13px;
     outline: none;
 }
 
 .start-quiz-btn {
-    background: #4f46e5;
-    color: #ffffff;
+    background: var(--color-accent-quiz);
+    color: var(--color-text-primary);
     border: none;
     padding: 12px;
     border-radius: 8px;
@@ -1128,19 +1128,19 @@ body {
 }
 
 .start-quiz-btn:hover {
-    background: #4338ca;
+    background: var(--color-accent-quiz-hover);
 }
 
 /* Active Quiz Components */
 .quiz-progress-bar {
     font-size: 12px;
-    color: #a5b4fc;
+    color: var(--indigo-300);
     font-weight: 600;
 }
 
 .quiz-q-title {
     font-size: 15px;
-    color: #ffffff;
+    color: var(--color-text-primary);
     margin-bottom: 12px;
     line-height: 1.4;
 }
@@ -1152,9 +1152,9 @@ body {
 }
 
 .quiz-opt-btn {
-    background: #18181f;
-    border: 1px solid #2e2e38;
-    color: #dddddd;
+    background: var(--color-surface-input);
+    border: 1px solid var(--color-border-input);
+    color: var(--color-text-secondary);
     padding: 12px;
     border-radius: 6px;
     text-align: left;
@@ -1164,14 +1164,14 @@ body {
 }
 
 .quiz-opt-btn:hover {
-    border-color: #4f46e5;
-    background: #20202c;
+    border-color: var(--color-accent-quiz);
+    background: var(--gray-935);
 }
 
 .quiz-opt-btn.selected {
-    background: #3730a3;
-    border-color: #6366f1;
-    color: #ffffff;
+    background: var(--indigo-800);
+    border-color: var(--indigo-500);
+    color: var(--color-text-primary);
 }
 
 /* Quiz Results */
@@ -1190,7 +1190,7 @@ body {
 .score-text {
     font-size: 20px;
     font-weight: 700;
-    color: #4ade80;
+    color: var(--color-success);
     margin-top: 6px;
 }
 
@@ -1199,16 +1199,16 @@ body {
    ("Saving..."); .success/.warning color it once we know the outcome. */
 .quiz-save-status {
     font-size: 12px;
-    color: #94a3b8;
+    color: var(--gray-450);
     margin-top: 4px;
 }
 
 .quiz-save-status.success {
-    color: #4ade80;
+    color: var(--color-success);
 }
 
 .quiz-save-status.warning {
-    color: #f87171;
+    color: var(--color-error);
 }
 
 .result-details-list {
@@ -1221,8 +1221,8 @@ body {
 }
 
 .result-item {
-    background: #18181f;
-    border: 1px solid #2e2e38;
+    background: var(--color-surface-input);
+    border: 1px solid var(--color-border-input);
     padding: 10px 12px;
     border-radius: 6px;
     font-size: 12px;
@@ -1232,7 +1232,7 @@ body {
 }
 
 .result-explanation {
-    color: #a1a1aa;
+    color: var(--gray-420);
     font-style: italic;
     margin-top: 4px;
 }
@@ -1249,7 +1249,7 @@ body {
 .export-btn {
     background: rgba(255, 255, 255, 0.08);
     border: 1px solid rgba(255, 255, 255, 0.15);
-    color: #e2e8f0;
+    color: var(--gray-150);
     padding: 6px 12px;
     border-radius: 8px;
     font-size: 12px;
@@ -1267,13 +1267,13 @@ body {
 }
 
 .share-btn {
-    background: #3b82f6;
+    background: var(--color-accent);
     border: none;
     color: white;
 }
 
 .share-btn:hover {
-    background: #2563eb;
+    background: var(--color-accent-hover);
 }
 
 
@@ -1299,7 +1299,7 @@ body {
     left: 10px;
     display: flex;
     align-items: center;
-    color: #777777;
+    color: var(--gray-550);
     pointer-events: none;
 }
 
@@ -1309,20 +1309,20 @@ body {
     background: rgba(255, 255, 255, 0.05);
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 8px;
-    color: #e2e8f0;
+    color: var(--gray-150);
     font-size: 13px;
     outline: none;
     transition: all 0.2s ease;
 }
 
 #sidebar-search-input:focus {
-    border-color: #3b82f6;
+    border-color: var(--color-accent);
     background: rgba(255, 255, 255, 0.08);
 }
 
 .no-results {
     padding: 15px;
-    color: #94a3b8;
+    color: var(--gray-450);
     font-size: 13px;
     text-align: center;
     font-style: italic;
@@ -1338,7 +1338,7 @@ body {
 .btn-auth-login {
     width: 100%;
     padding: 9px;
-    background: #3b82f6;
+    background: var(--color-accent);
     color: white;
     border: none;
     border-radius: 8px;
@@ -1353,7 +1353,7 @@ body {
 }
 
 .btn-auth-login:hover {
-    background: #2563eb;
+    background: var(--color-accent-hover);
 }
 
 .user-profile-bar {
@@ -1400,13 +1400,13 @@ body {
     flex-shrink: 0;
     border-radius: 50%;
     background: rgba(255, 255, 255, 0.08);
-    color: #cbd5e1;
+    color: var(--gray-300);
 }
 
 .user-name-text {
     font-size: 12px;
     font-weight: 600;
-    color: #e2e8f0;
+    color: var(--gray-150);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1415,7 +1415,7 @@ body {
 
 .user-meta-text {
     font-size: 11px;
-    color: #888888;
+    color: var(--color-text-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1441,9 +1441,9 @@ body {
 }
 
 .pill-btn {
-    background: #18181f;
-    border: 1px solid #2e2e38;
-    color: #cbd5e1;
+    background: var(--color-surface-input);
+    border: 1px solid var(--color-border-input);
+    color: var(--gray-300);
     padding: 9px 14px;
     border-radius: 999px;
     font-size: 12px;
@@ -1453,24 +1453,24 @@ body {
 }
 
 .pill-btn:hover {
-    border-color: #4f46e5;
+    border-color: var(--color-accent-quiz);
 }
 
 .pill-btn:focus-visible {
-    outline: 2px solid #6366f1;
+    outline: 2px solid var(--indigo-500);
     outline-offset: 2px;
 }
 
 .pill-btn.selected {
-    background: #3730a3;
-    border-color: #6366f1;
-    color: #ffffff;
+    background: var(--indigo-800);
+    border-color: var(--indigo-500);
+    color: var(--color-text-primary);
 }
 
 .btn-auth-logout {
     background: rgba(239, 68, 68, 0.2);
     border: 1px solid rgba(239, 68, 68, 0.4);
-    color: #f87171;
+    color: var(--color-error);
     border-radius: 6px;
     padding: 4px 8px;
     cursor: pointer;
@@ -1496,9 +1496,9 @@ body {
     justify-content: center;
     gap: 10px;
     padding: 10px;
-    background: #ffffff;
-    color: #1e293b;
-    border: 1px solid #cbd5e1;
+    background: var(--color-text-primary);
+    color: var(--slate-800);
+    border: 1px solid var(--gray-300);
     border-radius: 8px;
     font-weight: 600;
     font-size: 14px;
@@ -1512,7 +1512,7 @@ body {
 }
 
 .btn-google-auth:hover {
-    background: #f1f5f9;
+    background: var(--slate-100);
 }
 
 .auth-divider {
@@ -1520,7 +1520,7 @@ body {
     align-items: center;
     text-align: center;
     margin: 15px 0;
-    color: #64748b;
+    color: var(--slate-500);
     font-size: 12px;
 }
 
@@ -1536,7 +1536,7 @@ body {
 }
 
 .auth-error-msg {
-    color: #f87171;
+    color: var(--color-error);
     font-size: 12px;
     margin-bottom: 10px;
 }
@@ -1548,12 +1548,12 @@ body {
 .auth-toggle-text {
     text-align: center;
     font-size: 12px;
-    color: #94a3b8;
+    color: var(--gray-450);
     margin-top: 15px;
 }
 
 .auth-toggle-text a {
-    color: #3b82f6;
+    color: var(--color-accent);
     text-decoration: none;
     font-weight: 600;
     margin-left: 4px;
@@ -1580,8 +1580,8 @@ body {
    sitting inline in a flex row (unlike .remove-img-btn, which
    is absolutely positioned over an image thumbnail). */
 .remove-attachment-btn {
-    background: #ffffff;
-    color: #000000;
+    background: var(--color-text-primary);
+    color: var(--color-background);
     border: none;
     border-radius: 50%;
     width: 20px;
@@ -1598,7 +1598,7 @@ body {
 .pdf-status-icon {
     display: flex;
     align-items: center;
-    color: #cccccc;
+    color: var(--color-text-tertiary);
     flex-shrink: 0;
 }
 
@@ -1615,7 +1615,7 @@ body {
     margin: 10px 0 0 auto;
     background: rgba(255, 255, 255, 0.08);
     border: 1px solid rgba(255, 255, 255, 0.15);
-    color: #cccccc;
+    color: var(--color-text-tertiary);
     padding: 4px 10px;
     border-radius: 6px;
     font-size: 11px;
@@ -1626,7 +1626,7 @@ body {
 
 .copy-answer-btn:hover {
     background: rgba(255, 255, 255, 0.18);
-    color: #ffffff;
+    color: var(--color-text-primary);
 }
 
 .copy-answer-btn:disabled {
@@ -1660,7 +1660,7 @@ body {
     gap: 4px;
     background: rgba(255, 255, 255, 0.08);
     border: 1px solid rgba(255, 255, 255, 0.15);
-    color: #cccccc;
+    color: var(--color-text-tertiary);
     padding: 4px 8px;
     border-radius: 6px;
     font-size: 11px;
@@ -1676,7 +1676,7 @@ body {
 
 .toolbar-btn:hover:not(:disabled) {
     background: rgba(255, 255, 255, 0.18);
-    color: #ffffff;
+    color: var(--color-text-primary);
 }
 
 .toolbar-btn:disabled {
@@ -1685,14 +1685,14 @@ body {
 }
 
 .toolbar-btn.active-like {
-    color: #4ade80;
-    border-color: #4ade80;
+    color: var(--color-success);
+    border-color: var(--color-success);
     background: rgba(74, 222, 128, 0.12);
 }
 
 .toolbar-btn.active-dislike {
-    color: #f87171;
-    border-color: #f87171;
+    color: var(--color-error);
+    border-color: var(--color-error);
     background: rgba(248, 113, 113, 0.12);
 }
 
@@ -1722,11 +1722,11 @@ body {
     width: 100%;
     min-height: 44px;
     max-height: 240px;
-    background: #141414;
-    border: 1px solid #444444;
+    background: var(--color-surface-hover);
+    border: 1px solid var(--gray-800);
     border-radius: 8px;
     padding: 10px 12px;
-    color: #ffffff;
+    color: var(--color-text-primary);
     font-size: 14px;
     font-family: inherit;
     resize: vertical;
@@ -1734,7 +1734,7 @@ body {
 }
 
 .user-edit-textarea:focus {
-    border-color: #777777;
+    border-color: var(--gray-550);
 }
 
 .user-edit-actions {
@@ -1755,23 +1755,23 @@ body {
 }
 
 .user-edit-btn.save-btn {
-    background: #ffffff;
-    color: #000000;
+    background: var(--color-text-primary);
+    color: var(--color-background);
 }
 
 .user-edit-btn.save-btn:hover {
-    background: #dddddd;
+    background: var(--color-text-secondary);
 }
 
 .user-edit-btn.cancel-btn {
     background: rgba(255, 255, 255, 0.08);
-    color: #cccccc;
+    color: var(--color-text-tertiary);
     border: 1px solid rgba(255, 255, 255, 0.15);
 }
 
 .user-edit-btn.cancel-btn:hover {
     background: rgba(255, 255, 255, 0.18);
-    color: #ffffff;
+    color: var(--color-text-primary);
 }
 
 /* ============================================================
@@ -1872,7 +1872,7 @@ body {
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.6px;
-    color: #888888;
+    color: var(--color-text-muted);
 }
 
 .sp-visually-hidden {
@@ -1885,7 +1885,7 @@ body {
 }
 
 .sp-header-section {
-    border-bottom: 1px solid #22222a;
+    border-bottom: 1px solid var(--gray-915);
     padding-bottom: 18px;
 }
 
@@ -1899,19 +1899,19 @@ body {
 .sp-header-name {
     font-size: 18px;
     font-weight: 700;
-    color: #ffffff;
+    color: var(--color-text-primary);
 }
 
 .sp-header-meta {
     font-size: 13px;
-    color: #999999;
+    color: var(--gray-400);
     margin-top: 2px;
 }
 
 .sp-edit-btn {
-    background: #18181f;
-    border: 1px solid #2e2e38;
-    color: #cbd5e1;
+    background: var(--color-surface-input);
+    border: 1px solid var(--color-border-input);
+    color: var(--gray-300);
     padding: 8px 14px;
     border-radius: 8px;
     font-size: 12px;
@@ -1922,36 +1922,36 @@ body {
 }
 
 .sp-edit-btn:hover {
-    border-color: #4f46e5;
-    color: #ffffff;
+    border-color: var(--color-accent-quiz);
+    color: var(--color-text-primary);
 }
 
 .sp-edit-btn:focus-visible {
-    outline: 2px solid #6366f1;
+    outline: 2px solid var(--indigo-500);
     outline-offset: 2px;
 }
 
 .sp-loading {
     font-size: 13px;
-    color: #777777;
+    color: var(--gray-550);
     font-style: italic;
 }
 
 .sp-empty-state {
     font-size: 13px;
-    color: #888888;
+    color: var(--color-text-muted);
     line-height: 1.5;
-    background: #0d0d10;
-    border: 1px dashed #2a2a33;
+    background: var(--gray-968);
+    border: 1px dashed var(--gray-890);
     border-radius: 8px;
     padding: 12px 14px;
 }
 
 .sp-unavailable-state {
     font-size: 13px;
-    color: #a1a1aa;
-    background: #18181f;
-    border: 1px solid #2e2e38;
+    color: var(--gray-420);
+    background: var(--color-surface-input);
+    border: 1px solid var(--color-border-input);
     border-radius: 8px;
     padding: 10px 14px;
 }
@@ -1964,8 +1964,8 @@ body {
 }
 
 .sp-overview-stat {
-    background: #18181f;
-    border: 1px solid #2e2e38;
+    background: var(--color-surface-input);
+    border: 1px solid var(--color-border-input);
     border-radius: 8px;
     padding: 10px 14px;
     min-width: 120px;
@@ -1975,12 +1975,12 @@ body {
 .sp-overview-stat-value {
     font-size: 20px;
     font-weight: 700;
-    color: #ffffff;
+    color: var(--color-text-primary);
 }
 
 .sp-overview-stat-label {
     font-size: 11px;
-    color: #999999;
+    color: var(--gray-400);
     margin-top: 2px;
 }
 
@@ -1989,15 +1989,15 @@ body {
     line-height: 1.5;
     padding: 12px 14px;
     border-radius: 8px;
-    border: 1px solid #2e2e38;
-    background: #18181f;
-    color: #dddddd;
+    border: 1px solid var(--color-border-input);
+    background: var(--color-surface-input);
+    color: var(--color-text-secondary);
 }
 
 .sp-progress-banner.sp-progress-improving {
     border-color: rgba(74, 222, 128, 0.4);
     background: rgba(74, 222, 128, 0.08);
-    color: #bbf7d0;
+    color: var(--green-200);
 }
 
 /* Strengths / Needs practice: grouped by subject, matching the
@@ -2011,12 +2011,12 @@ body {
 .sp-subject-name {
     font-size: 13px;
     font-weight: 700;
-    color: #e5e7eb;
+    color: var(--gray-180);
 }
 
 .sp-topic-line {
     font-size: 13px;
-    color: #b8b8c0;
+    color: var(--gray-260);
     padding-left: 14px;
     position: relative;
 }
@@ -2025,14 +2025,14 @@ body {
     content: "•";
     position: absolute;
     left: 0;
-    color: #6366f1;
+    color: var(--indigo-500);
 }
 
 /* Needs practice / mistakes: each entry is a small card with a status
    label - text-based, never color-only (Accessibility section). */
 .sp-item-card {
-    background: #18181f;
-    border: 1px solid #2e2e38;
+    background: var(--color-surface-input);
+    border: 1px solid var(--color-border-input);
     border-radius: 8px;
     padding: 10px 14px;
     display: flex;
@@ -2051,7 +2051,7 @@ body {
 .sp-item-title {
     font-size: 13px;
     font-weight: 600;
-    color: #ffffff;
+    color: var(--color-text-primary);
 }
 
 .sp-item-status-label {
@@ -2059,19 +2059,19 @@ body {
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.4px;
-    color: #fbbf24;
+    color: var(--amber-400);
 }
 
 .sp-item-detail {
     font-size: 12px;
-    color: #999999;
+    color: var(--gray-400);
     line-height: 1.4;
 }
 
 /* Next-step recommendations. */
 .sp-recommendation-card {
-    background: #18181f;
-    border: 1px solid #2e2e38;
+    background: var(--color-surface-input);
+    border: 1px solid var(--color-border-input);
     border-radius: 8px;
     padding: 12px 14px;
     display: flex;
@@ -2092,18 +2092,18 @@ body {
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.4px;
-    color: #a5b4fc;
+    color: var(--indigo-300);
 }
 
 .sp-recommendation-title {
     font-size: 13px;
     font-weight: 600;
-    color: #ffffff;
+    color: var(--color-text-primary);
 }
 
 .sp-recommendation-reason {
     font-size: 12px;
-    color: #999999;
+    color: var(--gray-400);
     line-height: 1.4;
 }
 
@@ -2112,7 +2112,7 @@ body {
     margin-top: 2px;
     background: rgba(99, 102, 241, 0.12);
     border: 1px solid rgba(99, 102, 241, 0.4);
-    color: #c7d2fe;
+    color: var(--indigo-200);
     padding: 6px 12px;
     border-radius: 6px;
     font-size: 12px;
@@ -2123,11 +2123,11 @@ body {
 
 .sp-recommendation-action-btn:hover {
     background: rgba(99, 102, 241, 0.22);
-    border-color: #6366f1;
+    border-color: var(--indigo-500);
 }
 
 .sp-recommendation-action-btn:focus-visible {
-    outline: 2px solid #6366f1;
+    outline: 2px solid var(--indigo-500);
     outline-offset: 2px;
 }
 
@@ -2151,14 +2151,14 @@ body {
 .research-sources {
     margin-top: 10px;
     padding-top: 10px;
-    border-top: 1px solid #222222;
+    border-top: 1px solid var(--color-border);
 }
 
 .research-sources-label {
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.6px;
-    color: #888888;
+    color: var(--color-text-muted);
     font-weight: 600;
     margin-bottom: 6px;
 }
@@ -2174,13 +2174,13 @@ body {
 
 .research-source-item {
     font-size: 12px;
-    color: #aaaaaa;
+    color: var(--gray-350);
     line-height: 1.4;
     overflow-wrap: break-word;
 }
 
 .research-source-item a {
-    color: #7ab8ff;
+    color: var(--blue-300);
     text-decoration: none;
 }
 
@@ -2189,6 +2189,342 @@ body {
 }
 
 .research-source-domain {
-    color: #666666;
+    color: var(--color-text-faint);
     font-size: 11px;
+}
+
+/* ============================================================
+   PHASE 8C / 8D / 8G — SHELL, DRAWER, EMPTY STATE, A11Y
+   ============================================================
+   Appended as a distinct, clearly-bounded section. Everything
+   above this line is the pre-Phase-8 stylesheet with its colour
+   literals swapped for tokens (a value-for-value migration that
+   changed no rendered colour). Everything below is new Phase 8
+   behaviour. Keeping the boundary explicit makes this phase
+   reviewable and, if needed, revertible in one block.
+   ============================================================ */
+
+/* ---- Focus visibility (8G) --------------------------------
+   Previously there was no consistent focus indicator on custom
+   controls, so keyboard users could lose track of their position
+   entirely. :focus-visible is used rather than :focus so mouse
+   users never see a ring they did not ask for. */
+:focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
+    border-radius: var(--radius-sm);
+}
+
+.btn-primary:focus-visible,
+.btn-secondary:focus-visible,
+.btn-quiz:focus-visible,
+.mode-btn:focus-visible,
+.export-btn:focus-visible,
+.toolbar-btn:focus-visible,
+.action-btn:focus-visible,
+.composer-plus-btn:focus-visible,
+.composer-menu-item:focus-visible,
+.profile-trigger-btn:focus-visible,
+.btn-auth-login:focus-visible,
+.btn-auth-logout:focus-visible,
+.sidebar-toggle-btn:focus-visible,
+#send-btn:focus-visible,
+#user-input:focus-visible,
+#sidebar-search-input:focus-visible {
+    box-shadow: var(--focus-ring);
+}
+
+/* Screen-reader-only helper for labels that must exist in the
+   accessibility tree but not on screen. */
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* ---- Send control (8D) ------------------------------------
+   Icon + label together rather than icon-only. An icon-only send
+   control saves a few pixels but removes a visible affordance for
+   a student who has never used the product; the label is hidden
+   only on narrow viewports where horizontal space is genuinely
+   scarce, and the accessible name (aria-label) is always present. */
+.send-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-sm);
+}
+
+.send-btn-icon {
+    flex-shrink: 0;
+}
+
+/* ---- Sidebar toggle / mobile drawer (8C) ------------------- */
+.sidebar-toggle-btn {
+    display: none; /* desktop: sidebar is always visible, no trigger needed */
+    align-items: center;
+    justify-content: center;
+    width: var(--touch-target-min);
+    height: var(--touch-target-min);
+    margin-right: var(--space-sm);
+    background: transparent;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    color: var(--color-text-tertiary);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background var(--duration-fast) var(--ease-standard),
+                color var(--duration-fast) var(--ease-standard);
+}
+
+.sidebar-toggle-btn:hover {
+    background: var(--color-surface-hover);
+    color: var(--color-text-primary);
+}
+
+.sidebar-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    z-index: var(--z-drawer-overlay);
+    opacity: 0;
+    transition: opacity var(--duration-normal) var(--ease-standard);
+}
+
+@media (max-width: 768px) {
+    .sidebar-toggle-btn {
+        display: inline-flex;
+    }
+
+    /* The drawer. Off-canvas by default; translateX rather than
+       display/width so it animates on the compositor and, more
+       importantly, so the sidebar's DOM and every app.js render
+       path into it stay exactly as they are on desktop. */
+    .sidebar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        width: min(var(--sidebar-width-drawer), 86vw);
+        max-width: 86vw;
+        padding: var(--space-lg);
+        transform: translateX(-100%);
+        transition: transform var(--duration-slow) var(--ease-standard);
+        z-index: var(--z-drawer);
+        box-shadow: none;
+        /* Respect notches / rounded corners in landscape. */
+        padding-left: max(var(--space-lg), env(safe-area-inset-left));
+    }
+
+    body.sidebar-open .sidebar {
+        transform: translateX(0);
+        box-shadow: var(--shadow-elevated);
+    }
+
+    .sidebar-overlay {
+        display: block;
+        pointer-events: none;
+    }
+
+    body.sidebar-open .sidebar-overlay {
+        opacity: 1;
+        pointer-events: auto;
+    }
+
+    /* The drawer is an overlay, so the conversation keeps the full
+       width underneath it - this is the actual fix for the
+       permanently-cramped mobile chat column. */
+    .main-content {
+        max-width: 100%;
+        padding: var(--space-lg) var(--space-lg) var(--space-md);
+        gap: var(--space-md);
+    }
+
+    /* Prevent the page behind the drawer from scrolling while it is
+       open, without changing body layout (position:fixed here would
+       lose scroll position). */
+    body.sidebar-open {
+        overflow: hidden;
+    }
+
+    .navbar {
+        gap: var(--space-md);
+        padding-bottom: var(--space-md);
+    }
+
+    .tagline {
+        display: none; /* redundant next to the logo on a small screen */
+    }
+
+    /* Touch targets. Several icon-only controls sat below the
+       reliable-tap threshold before this. */
+    .action-btn,
+    .remove-attachment-btn,
+    .close-modal-btn,
+    .btn-auth-logout {
+        min-width: 40px;
+        min-height: 40px;
+    }
+
+    .send-btn-label {
+        display: none; /* icon carries it; aria-label still names it */
+    }
+
+    #send-btn {
+        min-width: var(--touch-target-min);
+        padding: 0 var(--space-lg);
+    }
+
+    /* Modals get near-full-screen room rather than a floating card
+       squeezed into a phone viewport. */
+    .modal-card {
+        width: 100%;
+        max-width: 100%;
+        max-height: 92dvh;
+        overflow-y: auto;
+        padding: var(--space-xl);
+    }
+
+    .auth-card {
+        max-width: 100% !important;
+    }
+}
+
+/* Landscape phones: vertical space is the scarce axis. */
+@media (max-width: 900px) and (max-height: 480px) {
+    .modal-card {
+        max-height: 96dvh;
+    }
+}
+
+/* ---- Empty state / centered composer (8D) ------------------
+   Only the composer's POSITION changes between states. The
+   composer itself, the mode selector and every handler stay
+   identical, so there is no second composer implementation to
+   keep in sync. */
+.composer-spacer {
+    display: none;
+}
+
+.main-content.is-empty-chat .composer-spacer {
+    display: block;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+.main-content.is-empty-chat .chat-box {
+    flex: 1 1 auto;
+    justify-content: flex-end;
+    background: transparent;
+    border-color: transparent;
+    overflow: visible;
+}
+
+.main-content.is-empty-chat .empty-chat-greeting {
+    flex: 0 0 auto;
+    padding-bottom: var(--space-sm);
+}
+
+/* ---- Content width (8E groundwork) ------------------------
+   Long academic answers become hard to track across an overly
+   wide measure. This caps the ANSWER measure without narrowing
+   the conversation container, so tables/code/math can still use
+   the full width via their own overflow rules below. */
+.bot-message-content {
+    max-width: var(--reading-max-width);
+}
+
+/* ---- Overflow safety for rich answer content (8E) ----------
+   A wide table or long code line must scroll inside its own box,
+   never widen the page. Horizontal page overflow on mobile was a
+   real risk before this. */
+.bot-message-content table {
+    display: block;
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+.bot-message-content pre {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    max-width: 100%;
+}
+
+.bot-message-content img {
+    max-width: 100%;
+    height: auto;
+}
+
+/* MathJax SVG output can exceed the container on long display
+   equations; scroll the equation rather than the page. */
+.bot-message-content mjx-container[display="true"] {
+    overflow-x: auto;
+    overflow-y: hidden;
+    max-width: 100%;
+}
+
+/* ---- Confirmation dialog (8G) ------------------------------ */
+.confirm-card {
+    max-width: var(--modal-width-sm) !important;
+    gap: var(--space-lg);
+}
+
+.confirm-title {
+    font-size: var(--font-size-xl);
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-primary);
+}
+
+.confirm-desc {
+    font-size: var(--font-size-md);
+    line-height: var(--line-height-normal);
+    color: var(--color-text-muted);
+}
+
+.confirm-actions {
+    display: flex;
+    gap: var(--space-md);
+    justify-content: flex-end;
+}
+
+.btn-confirm-cancel,
+.btn-confirm-danger {
+    padding: var(--space-md) var(--space-xl);
+    border-radius: var(--radius-lg);
+    font-size: var(--font-size-md);
+    font-weight: var(--font-weight-semibold);
+    cursor: pointer;
+    min-height: 40px;
+    transition: background var(--duration-fast) var(--ease-standard),
+                border-color var(--duration-fast) var(--ease-standard);
+}
+
+.btn-confirm-cancel {
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    color: var(--color-text-tertiary);
+}
+
+.btn-confirm-cancel:hover {
+    background: var(--color-surface-hover);
+    color: var(--color-text-primary);
+}
+
+.btn-confirm-danger {
+    background: var(--color-error);
+    border: 1px solid var(--color-error);
+    color: var(--color-text-inverse);
+}
+
+.btn-confirm-danger:hover {
+    background: var(--red-500);
+    border-color: var(--red-500);
 }

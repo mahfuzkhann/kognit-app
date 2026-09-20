@@ -1,0 +1,12 @@
+{
+  "name": "kognit-frontend-tests",
+  "private": true,
+  "type": "module",
+  "description": "Phase 8 frontend behaviour tests. Runs the real template and ui-core.js in jsdom.",
+  "scripts": {
+    "test": "node test_ui_core.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^26.0.0"
+  }
+}

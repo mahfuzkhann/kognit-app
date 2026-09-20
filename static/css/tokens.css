@@ -1,0 +1,240 @@
+/* ============================================================
+   KOGNIT DESIGN TOKENS — PHASE 8B
+   ============================================================
+   This file is the single source of truth for Kognit's visual
+   primitives. It was introduced by migrating the ~30 hardcoded
+   hex literals, 8 radius values and ad-hoc spacing that were
+   previously scattered through style.css.
+
+   MIGRATION RULE (important for future edits):
+   Every token below was created with the EXACT value that was
+   already in use at that spot. Phase 8B deliberately changed no
+   rendered color. That means a git-diff of style.css from this
+   phase should be reviewable as "literal -> var()" and nothing
+   else. Any intentional visual change belongs in a later,
+   separate commit so it is reviewable on its own.
+
+   STRUCTURE
+   1. Neutral scale  - raw values, named by lightness, no meaning
+   2. Brand/status   - raw values, named by role
+   3. Semantic       - what the UI actually references
+   4. Typography / spacing / radii / shadow / layout / motion
+
+   Prefer referencing a SEMANTIC token (--color-surface) over a
+   scale token (--gray-900) in component CSS. The scale exists so
+   the semantic layer has something honest to point at, not as a
+   general-purpose utility palette.
+   ============================================================ */
+
+:root {
+    /* ---- 1. NEUTRAL SCALE (raw, no semantics) ---------------- */
+    --gray-1000: #000000;
+    --gray-980:  #080808;
+    --gray-970:  #0d0d0d;
+    --gray-965:  #0f0f12;
+    --gray-960:  #111111;
+    --gray-950:  #141414;
+    --gray-945:  #18181f;
+    --gray-940:  #1a1a1a;
+    --gray-930:  #1e1e1e;
+    --gray-920:  #222222;
+    --gray-915:  #22222a;
+    --gray-910:  #262626;
+    --gray-880:  #2e2e38;
+    --gray-850:  #333333;
+    --gray-800:  #444444;
+    --gray-750:  #555555;
+    --gray-600:  #666666;
+    --gray-550:  #777777;
+    --gray-500:  #888888;
+    --gray-450:  #94a3b8;
+    --gray-400:  #999999;
+    --gray-350:  #aaaaaa;
+    --gray-300:  #cbd5e1;
+    --gray-280:  #cccccc;
+    --gray-200:  #dddddd;
+    --gray-150:  #e2e8f0;
+    --gray-100:  #e0e0e0;
+    --gray-0:    #ffffff;
+
+    /* ---- 2. BRAND + STATUS (raw, by role) -------------------- */
+    --blue-500:    #3b82f6;
+    --blue-600:    #2563eb;
+    --indigo-300:  #a5b4fc;
+    --indigo-500:  #6366f1;
+    --indigo-600:  #4f46e5;
+    --indigo-700:  #4338ca;
+    --indigo-800:  #3730a3;
+    --indigo-900:  #312e81;
+    --indigo-950:  #1e1b4b;
+    --green-400:   #4ade80;
+    --red-400:     #f87171;
+    --red-500:     #ff5555;
+    --red-900:     #280000;
+
+    /* ---- 3. SEMANTIC COLOR ----------------------------------- */
+    --color-background:         var(--gray-1000);
+    --color-surface:            var(--gray-980);
+    --color-surface-secondary:  var(--gray-970);
+    --color-surface-elevated:   var(--gray-965);
+    --color-surface-raised:     var(--gray-960);
+    --color-surface-hover:      var(--gray-950);
+    --color-surface-input:      var(--gray-945);
+
+    --color-border:             var(--gray-920);
+    --color-border-subtle:      var(--gray-940);
+    --color-border-strong:      var(--gray-850);
+    --color-border-input:       var(--gray-880);
+
+    --color-text-primary:       var(--gray-0);
+    --color-text-secondary:     var(--gray-200);
+    --color-text-tertiary:      var(--gray-280);
+    --color-text-muted:         var(--gray-500);
+    --color-text-faint:         var(--gray-600);
+    --color-text-inverse:       var(--gray-1000);
+
+    --color-accent:             var(--blue-500);
+    --color-accent-hover:       var(--blue-600);
+    --color-accent-quiz:        var(--indigo-600);
+    --color-accent-quiz-hover:  var(--indigo-700);
+
+    --color-success:            var(--green-400);
+    --color-error:              var(--red-400);
+    --color-warning:            #fbbf24;
+
+    /* Focus ring. PHASE 8G: previously no consistent focus token
+       existed at all - focus styling was browser-default or absent
+       on custom controls. */
+    --color-focus:              var(--blue-500);
+    --focus-ring:               0 0 0 2px var(--color-background),
+                                0 0 0 4px var(--color-focus);
+
+    /* ---- 4. TYPOGRAPHY --------------------------------------- */
+    /* Noto Sans Bengali leads the stack deliberately: Kognit's
+       primary market is Bangla-medium students and Bengali glyphs
+       must not fall back to a system font that renders them
+       inconsistently alongside Latin text and LaTeX. */
+    --font-family-base: "Noto Sans Bengali", -apple-system, BlinkMacSystemFont,
+                        "Segoe UI", Roboto, sans-serif;
+    --font-family-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo,
+                        Consolas, "Liberation Mono", monospace;
+
+    --font-size-xs:      11px;
+    --font-size-sm:      12px;
+    --font-size-md:      13px;
+    --font-size-base:    14px;
+    --font-size-lg:      15px;
+    --font-size-xl:      18px;
+    --font-size-2xl:     20px;
+    --font-size-display: 24px;
+
+    --line-height-tight:   1.3;
+    --line-height-normal:  1.5;
+    --line-height-relaxed: 1.7;
+
+    --font-weight-normal:   400;
+    --font-weight-medium:   500;
+    --font-weight-semibold: 600;
+    --font-weight-bold:     700;
+
+    /* ---- 5. SPACING ------------------------------------------ */
+    --space-2xs: 2px;
+    --space-xs:  4px;
+    --space-sm:  6px;
+    --space-md:  8px;
+    --space-lg:  12px;
+    --space-xl:  16px;
+    --space-2xl: 20px;
+    --space-3xl: 24px;
+
+    /* ---- 6. RADII -------------------------------------------- */
+    --radius-sm:   4px;
+    --radius-md:   6px;
+    --radius-lg:   8px;
+    --radius-xl:   12px;
+    --radius-pill: 999px;
+    --radius-full: 50%;
+
+    /* ---- 7. SHADOW ------------------------------------------- */
+    --shadow-subtle:   0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-medium:   0 4px 12px rgba(0, 0, 0, 0.5);
+    --shadow-elevated: 0 20px 40px rgba(0, 0, 0, 0.6);
+
+    /* ---- 8. LAYOUT ------------------------------------------- */
+    --sidebar-width:          272px;
+    --sidebar-width-laptop:   240px;
+    --sidebar-width-tablet:   220px;
+    --sidebar-width-drawer:   288px;
+    --content-max-width:      900px;
+    --reading-max-width:      720px;
+    --modal-width-sm:         380px;
+    --modal-width-md:         580px;
+
+    /* Minimum touch target. PHASE 8G: 44px is the smallest target
+       size that remains reliably tappable; several icon-only
+       controls were below this before Phase 8. */
+    --touch-target-min: 44px;
+
+    /* ---- 9. MOTION ------------------------------------------- */
+    /* Short and consistent on purpose. Motion in Kognit signals a
+       state change; it never decorates. Anything longer than
+       --duration-slow would start to feel like waiting. */
+    --duration-instant: 0.1s;
+    --duration-fast:    0.15s;
+    --duration-normal:  0.2s;
+    --duration-slow:    0.28s;
+    --ease-standard:    cubic-bezier(0.2, 0, 0.2, 1);
+
+    --z-sidebar:        100;
+    --z-drawer-overlay: 900;
+    --z-drawer:         950;
+    --z-modal:          1000;
+    --z-toast:          1100;
+
+    /* ---- 10. PHASE 8B SECOND-PASS SCALE ----------------------
+       One-off literals found in style.css during migration. Added
+       with their exact original values so the migration stayed
+       visually neutral. Several are candidates for consolidation
+       into the main scale once a designer reviews them. */
+    --gray-968: #0d0d10;
+    --gray-958: #121212;
+    --gray-955: #131313;
+    --gray-935: #20202c;
+    --gray-890: #2a2a33;
+    --indigo-925: #262247;
+    --indigo-200: #c7d2fe;
+    --gray-700: #5c5c5c;
+    --slate-500: #64748b;
+    --slate-800: #1e293b;
+    --slate-100: #f1f5f9;
+    --gray-180: #e5e7eb;
+    --gray-220: #d4d4d4;
+    --gray-260: #b8b8c0;
+    --gray-420: #a1a1aa;
+    --blue-300: #7ab8ff;
+    --green-200: #bbf7d0;
+    --amber-400: #fbbf24;
+}
+
+/* PHASE 8G: reduced-motion support. Kognit's motion is already
+   limited to short state-change transitions, so this zeroes their
+   duration rather than removing the rules - the end state is
+   identical, it just arrives immediately. Nothing here changes
+   layout, so no functionality depends on motion being present. */
+@media (prefers-reduced-motion: reduce) {
+    :root {
+        --duration-instant: 0.01ms;
+        --duration-fast:    0.01ms;
+        --duration-normal:  0.01ms;
+        --duration-slow:    0.01ms;
+    }
+
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+}

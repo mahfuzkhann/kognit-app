@@ -665,6 +665,16 @@ let _profileModalIsOnboarding = false;
 window.openProfileModal = function(opts = {}) {
     _profileModalIsOnboarding = !!opts.onboarding;
 
+    // PHASE 8G: first-run onboarding is the one case where this modal
+    // must not be dismissible - a student who escapes out of it ends up
+    // with an account that has no class/stream, which every downstream
+    // academic-context call depends on (see backend/main.py
+    // _get_academic_context). The shared Escape/overlay-dismiss handler
+    // in ui-core.js reads this attribute; normal profile editing
+    // (onboarding false) stays freely dismissible exactly as before.
+    document.getElementById("profile-modal")
+        .setAttribute("data-required", _profileModalIsOnboarding ? "true" : "false");
+
     document.getElementById("profile-modal").classList.remove("hidden");
     document.getElementById("profile-error-msg").classList.add("hidden");
     document.getElementById("profile-modal-title-text").textContent =
@@ -2488,6 +2498,15 @@ function openComposerMenu() {
     if (menu) menu.classList.remove("hidden");
     if (btn) btn.setAttribute("aria-expanded", "true");
 }
+
+// PHASE 8G: exposed so the shared Escape handler in ui-core.js can close
+// this menu through the SAME function the rest of this file uses, keeping
+// the button's aria-expanded bookkeeping correct. Deliberately a thin
+// re-export rather than duplicated logic in ui-core.js - one closer, one
+// place to change it.
+window.closeComposerMenuIfOpen = function() {
+    if (isComposerMenuOpen()) closeComposerMenu();
+};
 
 window.toggleComposerMenu = function(event) {
     // Stop propagation so the document-level "click outside closes the
