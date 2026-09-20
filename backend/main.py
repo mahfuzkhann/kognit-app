@@ -9,10 +9,10 @@ import httpx
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Request, Form, File, UploadFile, Header, HTTPException, Depends, BackgroundTasks
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from backend.ai_engine import generate_ai_response, generate_quiz_questions, generate_chat_title, MODEL_NAME
+from backend.ai_engine import stream_ai_response, GENERIC_CHAT_ERROR, generate_ai_response, generate_quiz_questions, generate_chat_title, MODEL_NAME
 from backend.research_decision import decide_research
 from backend.research_models import normalize_grounding_metadata, research_result_to_dict
 from backend.rag_engine import extract_text_from_pdf, PDFExtractionError
@@ -743,6 +743,61 @@ async def _get_academic_context(user_token: str, user_id: str) -> Tuple[Optional
     return profile.get("user_class"), profile.get("stream")
 
 
+
+# ---------------------------------------------------------------------------
+# PHASE 8E: shared learning-memory extraction
+# ---------------------------------------------------------------------------
+# Extracted VERBATIM from chat_endpoint so the streaming endpoint runs the
+# exact same Phase 5B/5C extraction rather than a second copy that could drift.
+# The original inline comments are preserved because they document real
+# behavioural decisions - notably why this block keeps its own try/except.
+def _schedule_learning_memory(
+    *, prompt, conversation_history, background_tasks, user_token, user_id, chat_id, source
+):
+    """Detect learning signals and schedule persistence. Never raises.
+
+    Keeps its OWN try/except for the reason documented inside: a failure here
+    happens AFTER a successful Gemini call and must never turn an answer the
+    student already has into a generic error.
+    """
+    try:
+        detected_signals = detect_learning_signals(prompt, conversation_history)
+        if is_meaningful_signal_set(detected_signals):
+            # PHASE 5C ACTIVATION: pass the current message and its own
+            # bounded history so resolve_academic_context can perform
+            # its deterministic subject detection/inheritance (see
+            # backend/learning_memory.py) - this is real activation
+            # now, not always-Unknown as in the original 5B/5C wiring.
+            context = resolve_academic_context(prompt=prompt, history=conversation_history)
+            if context.confidence in ("known", "probable") and background_tasks is not None:
+                for signal in detected_signals:
+                    background_tasks.add_task(
+                        _background_persist_chat_evidence,
+                        user_token=user_token,
+                        user_id=user_id,
+                        subject=context.subject,
+                        topic=context.topic,
+                        signal_type=signal.signal_type,
+                        signal_strength=signal.signal_strength,
+                        # BUGFIX: this was previously omitted entirely,
+                        # which meant save_chat_learning_evidence always
+                        # hardcoded "known" regardless of what was
+                        # actually resolved here - a genuine "probable"
+                        # (inherited-context) resolution was silently
+                        # written to the database as "known". Forwarding
+                        # context.confidence unchanged is the fix -
+                        # this can only ever be "known" or "probable"
+                        # at this point, since the `if` above already
+                        # excludes "unknown".
+                        attribution_confidence=context.confidence,
+                        chat_id=chat_id,
+                    )
+    except Exception:
+        logger.exception(
+            "%s: learning-memory extraction failed - chat response is unaffected", source
+        )
+
+
 @app.post("/api/chat")
 async def chat_endpoint(
     prompt: str = Form(...),
@@ -895,42 +950,15 @@ async def chat_endpoint(
         # inherited subject match still correctly resolves to Unknown,
         # and nothing is persisted in that case - this is the honest,
         # intended behavior, not a gap.
-        try:
-            detected_signals = detect_learning_signals(prompt, conversation_history)
-            if is_meaningful_signal_set(detected_signals):
-                # PHASE 5C ACTIVATION: pass the current message and its own
-                # bounded history so resolve_academic_context can perform
-                # its deterministic subject detection/inheritance (see
-                # backend/learning_memory.py) - this is real activation
-                # now, not always-Unknown as in the original 5B/5C wiring.
-                context = resolve_academic_context(prompt=prompt, history=conversation_history)
-                if context.confidence in ("known", "probable") and background_tasks is not None:
-                    for signal in detected_signals:
-                        background_tasks.add_task(
-                            _background_persist_chat_evidence,
-                            user_token=user_token,
-                            user_id=user_id,
-                            subject=context.subject,
-                            topic=context.topic,
-                            signal_type=signal.signal_type,
-                            signal_strength=signal.signal_strength,
-                            # BUGFIX: this was previously omitted entirely,
-                            # which meant save_chat_learning_evidence always
-                            # hardcoded "known" regardless of what was
-                            # actually resolved here - a genuine "probable"
-                            # (inherited-context) resolution was silently
-                            # written to the database as "known". Forwarding
-                            # context.confidence unchanged is the fix -
-                            # this can only ever be "known" or "probable"
-                            # at this point, since the `if` above already
-                            # excludes "unknown".
-                            attribution_confidence=context.confidence,
-                            chat_id=chat_id,
-                        )
-        except Exception:
-            logger.exception(
-                "chat_endpoint: learning-memory extraction failed - chat response is unaffected"
-            )
+        _schedule_learning_memory(
+            prompt=prompt,
+            conversation_history=conversation_history,
+            background_tasks=background_tasks,
+            user_token=user_token,
+            user_id=user_id,
+            chat_id=chat_id,
+            source="chat_endpoint",
+        )
 
         result = {"reply": response}
         if research_payload is not None:
@@ -942,6 +970,193 @@ async def chat_endpoint(
             time.perf_counter() - t_request_start
         )
         return {"reply": "Sorry, something went wrong handling your request. Please try again."}
+
+
+# ---------------------------------------------------------------------------
+# PHASE 8E: POST /api/chat/stream
+# ---------------------------------------------------------------------------
+# ADDITIVE. /api/chat above is completely unchanged and remains the fallback:
+# if anything about streaming misbehaves, the frontend can be pointed back at
+# it with a one-line change and lose nothing but progressive rendering.
+#
+# TRANSPORT CHOICE - why NDJSON over StreamingResponse, not SSE:
+#   * The client already POSTs multipart/form-data (image uploads). EventSource
+#     cannot POST at all, so SSE would have forced either a second upload
+#     endpoint or a base64 detour - real complexity for no gain.
+#   * fetch() + ReadableStream reads this fine, and the frontend is already
+#     using fetch() for /api/chat.
+#   * One JSON object per line is trivially parseable and cannot be corrupted
+#     by answer content, because json.dumps escapes every newline inside the
+#     payload. A raw-text stream would have no safe delimiter - Bengali text,
+#     LaTeX and Markdown fences all contain characters a naive delimiter would
+#     collide with.
+#
+# EVENT CONTRACT (one JSON object per line):
+#   {"type":"start",    "context":"thinking"|"research"|"document"|"document_web"}
+#   {"type":"delta",    "text":"<incremental piece>"}
+#   {"type":"done",     "reply":"<full final answer>", "research":{...}|null}
+#   {"type":"error",    "reply":"<student-facing message>"}
+# Exactly one terminal event (done|error) is always sent.
+
+@app.post("/api/chat/stream")
+async def chat_stream_endpoint(
+    prompt: str = Form(...),
+    mode: str = Form("direct"),
+    image: Optional[UploadFile] = File(None),
+    history: str = Form("[]"),
+    chat_id: str = Form(""),
+    background_tasks: BackgroundTasks = None,
+    user_and_token: Tuple[str, str] = Depends(_rate_limited_chat)
+):
+    # Auth and rate limiting are enforced by the SAME dependency the
+    # non-streaming endpoint uses (_rate_limited_chat -> get_current_user_and_token),
+    # so a 401/429 is still a real HTTP status BEFORE any streaming starts -
+    # never a 200 with an error buried in the stream body.
+    image_bytes = None
+    if image:
+        image_bytes = await image.read()
+        if len(image_bytes) > MAX_IMAGE_UPLOAD_SIZE_BYTES:
+            max_mb = MAX_IMAGE_UPLOAD_SIZE_BYTES // (1024 * 1024)
+            raise HTTPException(status_code=413, detail=f"Image exceeds the {max_mb}MB limit.")
+
+    user_id, user_token = user_and_token
+    t_request_start = time.perf_counter()
+
+    if not chat_id:
+        logger.warning("chat_stream_endpoint: request received with no chat_id - proceeding without PDF context")
+    pdf_context = active_pdf_contexts.get(user_id, {}).get(chat_id, "") if chat_id else ""
+    conversation_history = parse_and_validate_history(history)
+
+    # Identical academic-context resolution to /api/chat: profile-derived,
+    # server-side, never client-supplied.
+    user_class, stream_value = await _get_academic_context(user_token=user_token, user_id=user_id)
+
+    research_decision = decide_research(prompt)
+    enable_research = research_decision.research_requested
+
+    # Loading copy must describe what is ACTUALLY happening. The frontend
+    # renders this; it never guesses. "document" is only ever sent when this
+    # chat genuinely has PDF context attached.
+    if enable_research and pdf_context:
+        context_label = "document_web"
+    elif enable_research:
+        context_label = "research"
+    elif pdf_context:
+        context_label = "document"
+    else:
+        context_label = "thinking"
+
+    def _line(payload: dict) -> bytes:
+        return (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+
+    async def event_stream():
+        yield _line({"type": "start", "context": context_label})
+
+        final_text = ""
+        grounding_metadata = None
+        terminal_sent = False
+
+        try:
+            # stream_ai_response is a synchronous generator wrapping a blocking
+            # SDK call. iterate_in_threadpool keeps it off the event loop, the
+            # same reasoning as run_in_threadpool in /api/chat - one slow
+            # Gemini stream must not block every other request.
+            from starlette.concurrency import iterate_in_threadpool
+
+            gen = stream_ai_response(
+                prompt=prompt,
+                mode=mode,
+                board=DEFAULT_BOARD,
+                user_class=user_class,
+                stream=stream_value,
+                image_bytes=image_bytes,
+                pdf_context=pdf_context,
+                history=conversation_history,
+                enable_research=enable_research,
+            )
+
+            async for chunk in iterate_in_threadpool(gen):
+                if chunk.kind == "text":
+                    yield _line({"type": "delta", "text": chunk.text})
+                elif chunk.kind == "done":
+                    final_text = chunk.text
+                    grounding_metadata = chunk.grounding_metadata
+                elif chunk.kind == "error":
+                    terminal_sent = True
+                    yield _line({"type": "error", "reply": chunk.text})
+                    return
+
+            if not final_text:
+                terminal_sent = True
+                yield _line({"type": "error", "reply": GENERIC_CHAT_ERROR})
+                return
+
+            # Research metadata is normalized through the EXISTING Phase 7C
+            # models - raw provider grounding structures never reach the
+            # client. A research-requested call whose response carried no
+            # usable grounding_metadata normalizes to "failed"/not-used and
+            # therefore yields no sources, rather than fabricating any.
+            research_payload = None
+            if enable_research:
+                try:
+                    research_result = normalize_grounding_metadata(
+                        grounding_metadata,
+                        research_requested=True,
+                        research_latency_seconds=None,
+                        decision_reason=research_decision.reason,
+                        decision_category=research_decision.category,
+                    )
+                    research_payload = research_result_to_dict(research_result)
+                except Exception:
+                    logger.exception(
+                        "chat_stream_endpoint: research normalization failed - "
+                        "answer is unaffected, sources omitted"
+                    )
+                    research_payload = None
+
+            _schedule_learning_memory(
+                prompt=prompt,
+                conversation_history=conversation_history,
+                background_tasks=background_tasks,
+                user_token=user_token,
+                user_id=user_id,
+                chat_id=chat_id,
+                source="chat_stream_endpoint",
+            )
+
+            logger.info(
+                "chat_stream_endpoint timing: request_total=%.3fs (mode=%s, has_image=%s, "
+                "has_pdf=%s, research=%s, history_len=%d, chat_id=%s)",
+                time.perf_counter() - t_request_start, mode, bool(image_bytes),
+                bool(pdf_context), enable_research, len(conversation_history), chat_id or "(none)"
+            )
+
+            terminal_sent = True
+            yield _line({"type": "done", "reply": final_text, "research": research_payload})
+
+        except Exception:
+            logger.exception("chat_stream_endpoint: unexpected failure mid-stream")
+            if not terminal_sent:
+                # The client must never be left waiting on a stream that
+                # stopped producing. If partial text was already delivered,
+                # finalize with it rather than discarding what the student
+                # can already see.
+                if final_text:
+                    yield _line({"type": "done", "reply": final_text, "research": None})
+                else:
+                    yield _line({"type": "error", "reply": GENERIC_CHAT_ERROR})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            # Stops nginx and similar proxies buffering the whole body, which
+            # would silently defeat streaming in production.
+            "X-Accel-Buffering": "no",
+        },
+    )
+
 
 @app.post("/api/chat/title")
 async def chat_title_endpoint(

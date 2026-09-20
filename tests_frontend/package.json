@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Phase 8 frontend behaviour tests. Runs the real template and ui-core.js in jsdom.",
   "scripts": {
-    "test": "node test_ui_core.mjs"
+    "test": "node test_ui_core.mjs && node test_stream_render.mjs"
   },
   "devDependencies": {
     "jsdom": "^26.0.0"

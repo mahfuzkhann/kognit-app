@@ -2528,3 +2528,82 @@ body {
     background: var(--red-500);
     border-color: var(--red-500);
 }
+
+/* ---- Streaming answer states (8E) --------------------------
+   .stream-pending is the not-yet-safe tail of a streamed answer
+   (an unterminated equation or code fence) shown as literal text
+   until its closing delimiter arrives. Styled almost identically
+   to body text on purpose - it is real content arriving, not a
+   placeholder, and making it look different would draw the eye
+   to a transient state. */
+.stream-pending {
+    white-space: pre-wrap;
+    opacity: 0.85;
+}
+
+/* The status line shown before the first token arrives. Its TEXT
+   comes from the backend's "start" event, so it always describes
+   what is actually happening. */
+.streaming-status {
+    color: var(--color-text-muted);
+    font-size: var(--font-size-md);
+}
+
+/* ---- Post-quiz learning takeaway (8F) ----------------------
+   Quiet by design. This sits between the score and the detailed
+   per-question breakdown, and must read as a calm summary rather
+   than a verdict on the student. No badges, no score colouring,
+   no progress bars - the brief is explicit that learning
+   intelligence must not become gamification. */
+.quiz-takeaway {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-lg);
+    padding: var(--space-lg);
+    background: var(--color-surface-input);
+    border: 1px solid var(--color-border-input);
+    border-radius: var(--radius-lg);
+}
+
+.quiz-takeaway-block {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+}
+
+.quiz-takeaway-heading {
+    font-size: var(--font-size-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.7px;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-muted);
+}
+
+.quiz-takeaway-list {
+    margin: 0;
+    padding-left: var(--space-xl);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+}
+
+.quiz-takeaway-list li {
+    font-size: var(--font-size-md);
+    line-height: var(--line-height-normal);
+    color: var(--color-text-secondary);
+}
+
+.quiz-takeaway-topic {
+    font-size: var(--font-size-base);
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-primary);
+}
+
+/* The evidence line. Muted because it is supporting detail, but
+   present because a recommendation a student cannot interrogate
+   is one they have no reason to trust. */
+.quiz-takeaway-reason {
+    font-size: var(--font-size-sm);
+    line-height: var(--line-height-normal);
+    color: var(--color-text-muted);
+}

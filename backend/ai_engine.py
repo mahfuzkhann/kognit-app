@@ -443,48 +443,58 @@ class AIGenerationResult:
     # SDK returned.
 
 
-def generate_ai_response(
-    prompt: str,
-    mode: str = "direct",
-    board: str = "NCTB",
-    user_class: Optional[str] = None,
-    stream: Optional[str] = None,
-    image_bytes: bytes = None,
-    pdf_context: str = "",
-    history: list = None,
-    return_metadata: bool = False,
-    enable_research: bool = False
-):
-    # return_metadata (Phase 7B): see AIGenerationResult docstring.
-    #
-    # enable_research (Phase 7C): additive, backward-compatible, defaults
-    # to False. When True, adds Gemini's built-in Google Search grounding
-    # tool to this call - Kognit does NOT scrape or run its own search;
-    # Gemini decides whether/how to search and returns grounding_metadata
-    # describing what it did. This function never interprets that
-    # metadata - it is only captured (when return_metadata=True) and
-    # passed through raw on AIGenerationResult.grounding_metadata for
-    # backend/research_models.py to normalize. Every existing call site
-    # (backend/main.py's non-research path) uses the default False and
-    # is completely unaffected - no tools are added to the config at all
-    # in that case, byte-identical to pre-Phase-7C behavior.
-    def _wrap(text: str, *, is_error: bool, usage_metadata=None,
-              resolved_model_version: Optional[str] = None,
-              response_id: Optional[str] = None,
-              elapsed_seconds: Optional[float] = None,
-              grounding_metadata=None):
-        if not return_metadata:
-            return text
-        return AIGenerationResult(
-            text=text,
-            is_error=is_error,
-            usage_metadata=usage_metadata,
-            resolved_model_version=resolved_model_version,
-            response_id=response_id,
-            elapsed_seconds=elapsed_seconds,
-            grounding_metadata=grounding_metadata,
-        )
 
+# ---------------------------------------------------------------------------
+# PHASE 8E: SHARED GENERATION CORE
+# ---------------------------------------------------------------------------
+# generate_ai_response() (non-streaming) and stream_ai_response() (streaming)
+# must produce IDENTICAL prompts, system instructions, image handling, PDF
+# context truncation and history. Duplicating any of that would guarantee the
+# two paths drift apart - a streamed answer would silently stop matching the
+# non-streamed one, which is exactly the class of bug that is invisible until
+# a student reports it.
+#
+# So the prompt-building body was EXTRACTED verbatim from generate_ai_response
+# into _build_chat_request() below. It was not rewritten: the only change is
+# that the image-decode failure path raises _ChatRequestBuildError instead of
+# returning a wrapped error string, because the two adapters need to translate
+# that failure into their own response shapes.
+
+
+class _ChatRequestBuildError(Exception):
+    """Raised by _build_chat_request when the request cannot be assembled at
+    all (currently only an undecodable uploaded image). Carries the
+    student-facing message the caller should surface."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.message = message
+
+
+@dataclass
+class _ChatRequest:
+    """Everything needed to issue one Gemini chat call, streaming or not."""
+    system_instruction: str
+    contents: list
+    gemini_history: list
+
+
+def _build_chat_request(
+    prompt: str,
+    mode: str,
+    board: str,
+    user_class: Optional[str],
+    stream: Optional[str],
+    image_bytes: Optional[bytes],
+    pdf_context: str,
+    history: Optional[list],
+) -> "_ChatRequest":
+    """Build the system instruction, contents and history for a chat call.
+
+    Pure and side-effect-free apart from logging. Shared by both adapters so
+    a streamed answer and a non-streamed answer are generated from exactly
+    the same inputs.
+    """
     # ISSUE 1 FIX (Phase 6A final correction): user_class/stream now come
     # from the student's own Profile (backend/main.py:
     # _get_academic_context) and can genuinely be None - either because
@@ -554,7 +564,7 @@ def generate_ai_response(
                 "generate_ai_response: could not decode uploaded image (mode=%s, board=%s, user_class=%s)",
                 mode, board, user_class
             )
-            return _wrap(IMAGE_DECODE_ERROR, is_error=True)
+            raise _ChatRequestBuildError(IMAGE_DECODE_ERROR)
         contents.append(img)
     logger.info("generate_ai_response timing: image_decode=%.3fs", time.perf_counter() - t_stage_start)
 
@@ -562,6 +572,75 @@ def generate_ai_response(
 
     # CHAT-04: history is built once - identical on every retry attempt below.
     gemini_history = _build_gemini_history(history or [])
+
+    return _ChatRequest(
+        system_instruction=system_instruction,
+        contents=contents,
+        gemini_history=gemini_history,
+    )
+
+
+
+
+def generate_ai_response(
+    prompt: str,
+    mode: str = "direct",
+    board: str = "NCTB",
+    user_class: Optional[str] = None,
+    stream: Optional[str] = None,
+    image_bytes: bytes = None,
+    pdf_context: str = "",
+    history: list = None,
+    return_metadata: bool = False,
+    enable_research: bool = False
+):
+    # return_metadata (Phase 7B): see AIGenerationResult docstring.
+    #
+    # enable_research (Phase 7C): additive, backward-compatible, defaults
+    # to False. When True, adds Gemini's built-in Google Search grounding
+    # tool to this call - Kognit does NOT scrape or run its own search;
+    # Gemini decides whether/how to search and returns grounding_metadata
+    # describing what it did. This function never interprets that
+    # metadata - it is only captured (when return_metadata=True) and
+    # passed through raw on AIGenerationResult.grounding_metadata for
+    # backend/research_models.py to normalize. Every existing call site
+    # (backend/main.py's non-research path) uses the default False and
+    # is completely unaffected - no tools are added to the config at all
+    # in that case, byte-identical to pre-Phase-7C behavior.
+    def _wrap(text: str, *, is_error: bool, usage_metadata=None,
+              resolved_model_version: Optional[str] = None,
+              response_id: Optional[str] = None,
+              elapsed_seconds: Optional[float] = None,
+              grounding_metadata=None):
+        if not return_metadata:
+            return text
+        return AIGenerationResult(
+            text=text,
+            is_error=is_error,
+            usage_metadata=usage_metadata,
+            resolved_model_version=resolved_model_version,
+            response_id=response_id,
+            elapsed_seconds=elapsed_seconds,
+            grounding_metadata=grounding_metadata,
+        )
+
+    try:
+        _req = _build_chat_request(
+            prompt=prompt,
+            mode=mode,
+            board=board,
+            user_class=user_class,
+            stream=stream,
+            image_bytes=image_bytes,
+            pdf_context=pdf_context,
+            history=history,
+        )
+    except _ChatRequestBuildError as exc:
+        return _wrap(exc.message, is_error=True)
+
+    system_instruction = _req.system_instruction
+    contents = _req.contents
+    gemini_history = _req.gemini_history
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         t_attempt_start = time.perf_counter()
@@ -1043,3 +1122,209 @@ def generate_chat_title(history: list, board: str = "NCTB") -> Optional[str]:
     except Exception:
         logger.exception("generate_chat_title failed (board=%s) - caller will keep the existing title", board)
         return None
+
+# ---------------------------------------------------------------------------
+# PHASE 8E: STREAMING ADAPTER
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class StreamChunk:
+    """One event from stream_ai_response().
+
+    kind:
+      "text"  - an incremental piece of the answer. `text` is the delta only.
+      "done"  - terminal success. `text` is the FULL final answer;
+                grounding_metadata carries research metadata (or None).
+      "error" - terminal failure. `text` is the student-facing message.
+
+    Exactly one terminal event ("done" or "error") is always emitted, so a
+    consumer can never be left waiting forever.
+    """
+    kind: str
+    text: str = ""
+    grounding_metadata: Optional[object] = None
+    usage_metadata: Optional[object] = None
+    elapsed_seconds: Optional[float] = None
+
+
+def stream_ai_response(
+    prompt: str,
+    mode: str = "direct",
+    board: str = "NCTB",
+    user_class: Optional[str] = None,
+    stream: Optional[str] = None,
+    image_bytes: bytes = None,
+    pdf_context: str = "",
+    history: list = None,
+    enable_research: bool = False,
+):
+    """Streaming counterpart of generate_ai_response().
+
+    Yields StreamChunk events. Uses the SAME _build_chat_request() core as the
+    non-streaming path, so the prompt, system instruction, PDF truncation,
+    image handling and history are identical - a streamed answer is the same
+    answer, delivered incrementally.
+
+    RETRY POLICY (deliberately different from the non-streaming path, and the
+    key architectural constraint of this phase):
+
+        Retries are only safe BEFORE the first byte reaches the student.
+
+    Once any text has been yielded, the student is already reading a partial
+    answer; restarting would either duplicate content or silently replace what
+    they are mid-sentence on. So a failure after first output is finalized with
+    whatever was genuinely produced rather than retried. A failure before first
+    output retries exactly like generate_ai_response does.
+
+    Never raises to the caller - every failure path yields a terminal "error"
+    (or a "done" salvaging partial text) instead, so the HTTP layer always has
+    something well-formed to send.
+    """
+    try:
+        req = _build_chat_request(
+            prompt=prompt,
+            mode=mode,
+            board=board,
+            user_class=user_class,
+            stream=stream,
+            image_bytes=image_bytes,
+            pdf_context=pdf_context,
+            history=history,
+        )
+    except _ChatRequestBuildError as exc:
+        yield StreamChunk(kind="error", text=exc.message)
+        return
+
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        t_attempt_start = time.perf_counter()
+        attempt_timeout = (
+            AI_REQUEST_TIMEOUT_SECONDS if attempt == 1 else RETRY_REQUEST_TIMEOUT_SECONDS
+        )
+
+        config_kwargs = dict(
+            system_instruction=req.system_instruction,
+            thinking_config=types.ThinkingConfig(thinking_level=CHAT_THINKING_LEVEL),
+            http_options=types.HttpOptions(timeout=_seconds_to_ms(attempt_timeout)),
+        )
+        if enable_research:
+            config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+        config = types.GenerateContentConfig(**config_kwargs)
+
+        produced_any_text = False
+        collected = []
+        grounding_metadata = None
+        usage_metadata = None
+
+        try:
+            chat_session = _client.chats.create(
+                model=MODEL_NAME,
+                config=config,
+                history=req.gemini_history,
+            )
+
+            for response in chat_session.send_message_stream(req.contents):
+                # Defensive on every field: a chunk may legitimately carry no
+                # text (e.g. a tool-use or metadata-only chunk). Those are not
+                # errors and must not terminate the stream.
+                piece = getattr(response, "text", None)
+                if piece:
+                    produced_any_text = True
+                    collected.append(piece)
+                    yield StreamChunk(kind="text", text=piece)
+
+                if enable_research:
+                    candidates = getattr(response, "candidates", None) or []
+                    if candidates:
+                        gm = getattr(candidates[0], "grounding_metadata", None)
+                        # Grounding metadata typically arrives on a later
+                        # chunk; keep the most recent non-None one.
+                        if gm is not None:
+                            grounding_metadata = gm
+
+                if getattr(response, "usage_metadata", None) is not None:
+                    usage_metadata = response.usage_metadata
+
+            elapsed = time.perf_counter() - t_attempt_start
+            final_text = "".join(collected)
+
+            if not final_text:
+                # Same meaning as the non-streaming path's empty .text: almost
+                # always a safety-filter block. Not retried - an identical
+                # request would be blocked again.
+                logger.warning(
+                    "stream_ai_response got a blocked/empty stream attempt=%d/%d elapsed=%.3fs "
+                    "(mode=%s, board=%s, user_class=%s)",
+                    attempt, MAX_ATTEMPTS, elapsed, mode, board, user_class
+                )
+                yield StreamChunk(kind="error", text=BLOCKED_RESPONSE_ERROR)
+                return
+
+            _log_usage(usage_metadata, attempt, elapsed, mode, bool(image_bytes), bool(pdf_context))
+            yield StreamChunk(
+                kind="done",
+                text=final_text,
+                grounding_metadata=grounding_metadata,
+                usage_metadata=usage_metadata,
+                elapsed_seconds=elapsed,
+            )
+            return
+
+        except genai_errors.ClientError as e:
+            elapsed = time.perf_counter() - t_attempt_start
+            if produced_any_text:
+                logger.exception(
+                    "stream_ai_response client error AFTER first output - finalizing partial "
+                    "answer attempt=%d elapsed=%.3fs (mode=%s)", attempt, elapsed, mode
+                )
+                yield StreamChunk(
+                    kind="done",
+                    text="".join(collected),
+                    grounding_metadata=grounding_metadata,
+                    usage_metadata=usage_metadata,
+                    elapsed_seconds=elapsed,
+                )
+                return
+            if getattr(e, "code", None) == 429:
+                logger.exception(
+                    "stream_ai_response quota exhausted attempt=%d elapsed=%.3fs (mode=%s)",
+                    attempt, elapsed, mode
+                )
+                yield StreamChunk(kind="error", text=QUOTA_EXHAUSTED_ERROR)
+                return
+            logger.exception(
+                "stream_ai_response client error attempt=%d/%d elapsed=%.3fs (mode=%s)",
+                attempt, MAX_ATTEMPTS, elapsed, mode
+            )
+            if attempt >= MAX_ATTEMPTS_BUCKET_A:
+                yield StreamChunk(kind="error", text=GENERIC_CHAT_ERROR)
+                return
+            continue
+
+        except Exception:
+            elapsed = time.perf_counter() - t_attempt_start
+            if produced_any_text:
+                # Network drop / timeout mid-answer. The student keeps what
+                # actually arrived rather than losing the whole response.
+                logger.exception(
+                    "stream_ai_response failed AFTER first output - finalizing partial answer "
+                    "attempt=%d elapsed=%.3fs (mode=%s)", attempt, elapsed, mode
+                )
+                yield StreamChunk(
+                    kind="done",
+                    text="".join(collected),
+                    grounding_metadata=grounding_metadata,
+                    usage_metadata=usage_metadata,
+                    elapsed_seconds=elapsed,
+                )
+                return
+            logger.exception(
+                "stream_ai_response failed attempt=%d/%d elapsed=%.3fs (mode=%s)",
+                attempt, MAX_ATTEMPTS, elapsed, mode
+            )
+            if attempt >= MAX_ATTEMPTS:
+                yield StreamChunk(kind="error", text=GENERIC_CHAT_ERROR)
+                return
+            continue
+
+    yield StreamChunk(kind="error", text=GENERIC_CHAT_ERROR)

@@ -2967,9 +2967,16 @@ window.sendMessage = async function() {
     clearSelectedImage();
     chatBox.scrollTop = chatBox.scrollHeight;
 
+    // PHASE 8E: the loading line used to always claim Kognit was "searching
+    // through your book & notes" even when no PDF was attached and no search
+    // ran. It now starts neutral and is replaced by the backend's own
+    // `context` value from the stream's "start" event, which is derived from
+    // real state (research on? PDF attached?) rather than guessed here.
     const loadingDiv = document.createElement("div");
-    loadingDiv.className = "bot-message";
-    loadingDiv.textContent = "Kognit is searching through your book & notes...";
+    loadingDiv.className = "bot-message streaming-status";
+    loadingDiv.textContent = (window.KognitStream
+        ? window.KognitStream.loadingCopyFor("thinking")
+        : "Thinking\u2026");
     chatBox.appendChild(loadingDiv);
 
     const headers = {};
@@ -2979,7 +2986,11 @@ window.sendMessage = async function() {
     }
 
     try {
-        const response = await fetch("/api/chat", { method: "POST", headers: headers, body: formData });
+        // PHASE 8E: streaming endpoint. /api/chat is still live and is the
+        // fallback below - if the stream cannot be established for any
+        // reason, the original non-streaming request runs instead and the
+        // student sees exactly the pre-Phase-8E behaviour.
+        const response = await fetch("/api/chat/stream", { method: "POST", headers: headers, body: formData });
 
         // Re-resolve the target project/chat by the ID captured before the
         // request started, rather than trusting the `proj`/`currentChat`
@@ -3035,11 +3046,169 @@ window.sendMessage = async function() {
             return;
         }
 
-        const data = await response.json();
-        const replyText = data.reply || "No response received.";
+        // ================= PHASE 8E: STREAM CONSUMPTION =================
+        // Reads the NDJSON event stream and renders progressively. There is
+        // NO timer and no artificial pacing anywhere in this block - text is
+        // painted as fast as it arrives, batched only to animation frames so
+        // a burst of chunks costs one reflow instead of twenty.
+        //
+        // Safety: only text up to a SAFE construct boundary is parsed as
+        // Markdown (see static/js/stream-render.js). An unterminated $$...$$
+        // or ``` fence is held back as escaped plain text until it closes, so
+        // marked.js never sees half a construct and MathJax never typesets an
+        // incomplete equation - the failure mode that corrupts output
+        // permanently.
+        let replyText = "";
+        let researchPayload = null;
+        let streamFailed = false;
+        let sawTerminal = false;
+
+        // The live streaming bubble. Created on the first delta so a stream
+        // that errors before producing anything leaves no empty bubble.
+        let streamWrapper = null;
+        let streamContent = null;
+        let pendingFrame = null;
+        let lastRenderedLength = -1;
+
+        const ensureStreamBubble = () => {
+            if (streamWrapper || !isStillViewingThisChat) return;
+            streamWrapper = document.createElement("div");
+            streamWrapper.className = "bot-message";
+            streamWrapper.setAttribute("aria-live", "polite");
+            streamContent = document.createElement("div");
+            streamContent.className = "bot-message-content";
+            streamWrapper.appendChild(streamContent);
+            chatBox.appendChild(streamWrapper);
+        };
+
+        const paint = () => {
+            pendingFrame = null;
+            if (!streamContent) return;
+            if (replyText.length === lastRenderedLength) return;
+            lastRenderedLength = replyText.length;
+
+            const split = window.KognitStream
+                ? window.KognitStream.splitForRender(replyText)
+                : { renderable: "", pending: replyText };
+
+            // Renderable part goes through the SAME math-protection pipeline
+            // the non-streaming path uses (protectMathSegments /
+            // restoreProtectedMathSegments) - streamed answers must not get a
+            // second, divergent renderer, especially for Bengali + LaTeX.
+            const protectedResult = protectMathSegments(split.renderable);
+            let html = restoreProtectedMathSegments(
+                marked.parse(protectedResult.text), protectedResult.segments
+            );
+
+            streamContent.innerHTML = html;
+
+            if (split.pending) {
+                // Not yet safe to parse - show it as literal text so the
+                // student still sees it arrive. textContent escapes it.
+                const tail = document.createElement("span");
+                tail.className = "stream-pending";
+                tail.textContent = split.pending;
+                streamContent.appendChild(tail);
+            }
+
+            const nearBottom =
+                chatBox.scrollHeight - chatBox.scrollTop - chatBox.clientHeight < 120;
+            if (nearBottom) chatBox.scrollTop = chatBox.scrollHeight;
+        };
+
+        const schedulePaint = () => {
+            if (pendingFrame !== null) return;
+            pendingFrame = window.requestAnimationFrame(paint);
+        };
+
+        const parser = window.KognitStream.createNdjsonParser(
+            (event) => {
+                if (!event || !event.type) return;
+                if (event.type === "start") {
+                    if (isStillViewingThisChat && chatBox.contains(loadingDiv)) {
+                        loadingDiv.textContent =
+                            window.KognitStream.loadingCopyFor(event.context);
+                    }
+                } else if (event.type === "delta") {
+                    if (typeof event.text !== "string") return;
+                    if (!replyText) {
+                        // First real content: retire the status line.
+                        if (chatBox.contains(loadingDiv)) chatBox.removeChild(loadingDiv);
+                        ensureStreamBubble();
+                    }
+                    replyText += event.text;
+                    schedulePaint();
+                } else if (event.type === "done") {
+                    sawTerminal = true;
+                    if (typeof event.reply === "string" && event.reply) {
+                        // The backend's final reply is authoritative - it is
+                        // the full text the server actually produced, so a
+                        // dropped delta can never leave a truncated answer
+                        // saved to the chat.
+                        replyText = event.reply;
+                    }
+                    researchPayload = event.research || null;
+                } else if (event.type === "error") {
+                    sawTerminal = true;
+                    streamFailed = true;
+                    replyText = event.reply || "No response received.";
+                }
+            },
+            (badLine) => {
+                // A malformed line is skipped, never fatal: one corrupt event
+                // must not cost the student the rest of the answer.
+                console.warn("Kognit: skipped malformed stream line", badLine);
+            }
+        );
+
+        const reader = response.body && response.body.getReader
+            ? response.body.getReader()
+            : null;
+
+        if (!reader) {
+            // No streaming support in this browser - fall back to the
+            // non-streaming endpoint rather than failing.
+            const fallback = await fetch("/api/chat", { method: "POST", headers: headers, body: formData });
+            const fbData = await fallback.json();
+            replyText = fbData.reply || "No response received.";
+            researchPayload = fbData.research || null;
+            sawTerminal = true;
+        } else {
+            const decoder = new TextDecoder();
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                parser.push(decoder.decode(value, { stream: true }));
+            }
+            parser.flush();
+        }
+
+        if (pendingFrame !== null) {
+            window.cancelAnimationFrame(pendingFrame);
+            pendingFrame = null;
+        }
+        if (chatBox.contains(loadingDiv)) chatBox.removeChild(loadingDiv);
+
+        if (!sawTerminal && !replyText) {
+            // Connection closed without any terminal event AND without any
+            // text - treat as a failure rather than saving an empty reply.
+            replyText = "The connection was interrupted before Kognit could answer. Please try again.";
+            streamFailed = true;
+        }
+
+        // The provisional streaming bubble is replaced by a real message
+        // element so the finished answer has the identical DOM, toolbar
+        // (Copy / Like / Dislike / Regenerate) and research rendering as a
+        // non-streamed one. There is exactly ONE final bubble - the
+        // provisional node is removed here, never left alongside it.
+        if (streamWrapper && chatBox.contains(streamWrapper)) {
+            chatBox.removeChild(streamWrapper);
+        }
+
+        const data = { reply: replyText, research: researchPayload };
 
         let newBotMsgIndex = -1;
-        if (targetChat) {
+        if (targetChat && !streamFailed) {
             targetChat.messages.push({ role: "bot", text: replyText, research: data.research || null });
             newBotMsgIndex = targetChat.messages.length - 1;
             saveProjectsToStorage();
@@ -3357,6 +3526,10 @@ async function submitQuizAttempt() {
         if (res.ok) {
             statusEl.textContent = "✅ Result saved.";
             statusEl.className = "quiz-save-status success";
+            // PHASE 8F: only after the attempt is genuinely persisted, because
+            // the next-step engine reads from that stored evidence. Asking
+            // before the write lands would show the student stale advice.
+            renderQuizLearningTakeaway();
             // Consumed server-side (backend/main.py pops it on success) -
             // clear locally too so a stray re-render can't try to resubmit it.
             currentQuizId = null;
@@ -3883,4 +4056,138 @@ function _spOpenQuizForTopic(subject, topic) {
     if (topicInput && topic) {
         topicInput.value = topic;
     }
+}
+
+
+// ==================== PHASE 8F: POST-QUIZ LEARNING TAKEAWAY ====================
+// POLICY (deliberately conservative - see the Phase 8 brief's warning about
+// notification spam and "you are weak at X" messaging):
+//
+//   * Surfaced at ONE natural boundary only: after a quiz result is saved.
+//     Never during an answer, never injected into chat replies.
+//   * At most ONE recommendation, and never the same one twice in a session.
+//   * Built only from evidence that already exists:
+//       - "needs practice" comes from the questions the student actually got
+//         wrong in THIS quiz - directly observed, not inferred
+//       - the next step comes from GET /api/profile/next-steps, i.e. the
+//         existing next_step_engine, with its own `reason` string shown
+//         verbatim so the student can see WHY it was suggested
+//   * Computes no mastery/weakness of its own. Section 4.5 of the brief is
+//     explicit that the frontend must not become a second learning model,
+//     so this file never decides what a student is weak at.
+//   * If there is no evidence, it renders nothing at all rather than padding
+//     with generic encouragement.
+
+// Session-scoped suppression. Cleared only on reload/logout - within one
+// session the student never sees the same recommendation repeated.
+const _shownNextStepKeys = new Set();
+
+function _quizWrongTopicsFromThisAttempt() {
+    // Direct observation from the attempt the student just completed.
+    const wrong = [];
+    quizQuestions.forEach((q, i) => {
+        if (userQuizAnswers[i] !== q.correct_index) wrong.push(q);
+    });
+    return wrong;
+}
+
+async function renderQuizLearningTakeaway() {
+    const container = document.getElementById("quiz-takeaway");
+    if (!container) return;
+
+    container.innerHTML = "";
+    container.classList.add("hidden");
+
+    const wrong = _quizWrongTopicsFromThisAttempt();
+    const total = quizQuestions.length;
+
+    // A perfect score with no recommendation available is a legitimate
+    // "nothing useful to say" case - stay silent rather than manufacture a
+    // takeaway.
+    let recommendation = null;
+    try {
+        const { data: { session } } = await supabaseClient.auth.getSession();
+        if (session) {
+            const res = await fetch("/api/profile/next-steps", {
+                headers: { "Authorization": `Bearer ${session.access_token}` }
+            });
+            if (res.ok) {
+                const data = await res.json();
+                const recs = (data && data.recommendations) || [];
+                // Prefer a recommendation about the topic just quizzed; fall
+                // back to the highest-ranked one the engine returned.
+                const quizTopic = (document.getElementById("quiz-topic-input") || {}).value || "";
+                const normalized = quizTopic.trim().toLowerCase();
+                recommendation =
+                    recs.find(r => (r.topic || "").trim().toLowerCase() === normalized && !_shownNextStepKeys.has(r.topic_key)) ||
+                    recs.find(r => !_shownNextStepKeys.has(r.topic_key)) ||
+                    null;
+            }
+        }
+    } catch (e) {
+        // Recommendations are additive. Their absence must never disturb the
+        // quiz result the student is already looking at.
+        recommendation = null;
+    }
+
+    if (wrong.length === 0 && !recommendation) return;
+
+    const frag = document.createDocumentFragment();
+
+    if (wrong.length > 0) {
+        const block = document.createElement("div");
+        block.className = "quiz-takeaway-block";
+
+        const heading = document.createElement("div");
+        heading.className = "quiz-takeaway-heading";
+        // Plain, factual, non-judgemental. States what happened, not what the
+        // student "is".
+        heading.textContent = `Worth another look (${wrong.length} of ${total})`;
+        block.appendChild(heading);
+
+        const list = document.createElement("ul");
+        list.className = "quiz-takeaway-list";
+        // Cap at three so this stays a takeaway, not a second results table -
+        // the full per-question breakdown is already below.
+        wrong.slice(0, 3).forEach((q) => {
+            const li = document.createElement("li");
+            li.textContent = q.question;   // textContent = escaped
+            list.appendChild(li);
+        });
+        block.appendChild(list);
+        frag.appendChild(block);
+    }
+
+    if (recommendation) {
+        _shownNextStepKeys.add(recommendation.topic_key);
+
+        const block = document.createElement("div");
+        block.className = "quiz-takeaway-block quiz-takeaway-next";
+
+        const heading = document.createElement("div");
+        heading.className = "quiz-takeaway-heading";
+        heading.textContent = "One next step";
+        block.appendChild(heading);
+
+        const what = document.createElement("div");
+        what.className = "quiz-takeaway-topic";
+        const subject = recommendation.subject || "";
+        const topic = recommendation.topic || "";
+        what.textContent = subject && topic ? `${subject} — ${topic}` : (topic || subject);
+        block.appendChild(what);
+
+        if (recommendation.reason) {
+            const why = document.createElement("div");
+            why.className = "quiz-takeaway-reason";
+            // Shown verbatim from next_step_engine so the student can see the
+            // actual evidence basis rather than an opaque suggestion.
+            why.textContent = recommendation.reason;
+            block.appendChild(why);
+        }
+
+        frag.appendChild(block);
+    }
+
+    container.appendChild(frag);
+    container.classList.remove("hidden");
 }

@@ -508,6 +508,13 @@
                 <div id="result-score-text" class="score-text">Your Score: 0 / 5</div>
                 <div id="quiz-save-status" class="quiz-save-status hidden"></div>
             </div>
+            <!-- PHASE 8F: post-quiz learning takeaway.
+                 Populated by renderQuizLearningTakeaway() in app.js from (a)
+                 THIS quiz's own wrong answers and (b) GET /api/profile/next-steps.
+                 It stays empty and hidden unless real evidence exists - it never
+                 fills space with encouragement. -->
+            <div id="quiz-takeaway" class="quiz-takeaway hidden" aria-live="polite"></div>
+
             <div id="result-details-list" class="result-details-list"></div>
             <button class="start-quiz-btn" onclick="resetQuizModal()">Try Another Test</button>
         </div>
@@ -538,6 +545,10 @@
      mobile drawer, logout confirmation, empty-state toggle). Loaded
      before app.js; see the header comment in ui-core.js for why this is
      a separate observing module rather than edits inside app.js. -->
+<!-- PHASE 8E: safe incremental rendering helpers for streamed answers.
+     Pure functions only (boundary scanning, NDJSON parsing); no DOM work,
+     no timers. Must load before app.js, which uses it in sendMessage(). -->
+<script src="/static/js/stream-render.js"></script>
 <script src="/static/js/ui-core.js"></script>
 <script src="/static/js/app.js"></script>
 </body>

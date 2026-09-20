@@ -10,16 +10,23 @@ the drawer trigger or `ui-core.js` stops trapping focus, these fail.
 ```bash
 cd tests_frontend
 npm install      # installs jsdom only; no build step, no bundler
-npm test
+npm test         # runs both suites
 ```
 
-Expected: `37 passed, 0 failed`.
+Expected: `37 passed` (ui-core) and `32 passed` (stream-render).
 
 ## What is and is not covered
 
-Covered: modal focus trap/restore, Escape semantics (including the two
-deliberately non-dismissible cases), the logout confirmation gate, the
-mobile drawer state machine, and the empty-state layout toggle.
+`test_ui_core.mjs` covers: modal focus trap/restore, Escape semantics
+(including the two deliberately non-dismissible cases), the logout
+confirmation gate, the mobile drawer state machine, and the empty-state
+layout toggle.
+
+`test_stream_render.mjs` covers Phase 8E's safe incremental rendering: the
+boundary scanner (unterminated `$$`, code fences, emphasis, inline code,
+LaTeX delimiters), Bengali + LaTeX mixing, the monotonicity guarantee that
+the render boundary never moves backwards, NDJSON parsing across split
+chunks and malformed lines, and loading-copy honesty.
 
 **Not** covered: `app.js`, which needs a live Supabase session and Gemini
 key to boot. The handful of globals `ui-core.js` delegates to are stubbed,
