@@ -22,10 +22,16 @@
        its cleanup body completely untouched
      - empty-state detection by observing #chat-box
 
-   Loaded BEFORE app.js (see templates/index.html). Everything here
-   defers its DOM wiring to DOMContentLoaded, so load order only
-   matters for the wrapper below, which re-reads window.handleLogout
-   lazily at click time rather than capturing it at load time.
+   Loaded AFTER app.js and nav-views.js as of Phase 9B (previously
+   loaded before app.js in Phase 8C - moved because nav-views.js
+   needs app.js's accessor functions to exist first). This file's
+   own design already anticipated not depending on load order:
+   every app.js function it calls (window.handleLogout, the
+   MODAL_CLOSERS lookups, window.closeComposerMenuIfOpen) is looked
+   up lazily at call time via `window[...]` or a `typeof` check
+   inside an event handler, never captured at script-load time. So
+   moving this file later in the load order changes nothing about
+   its behavior - it would work in either position.
    ============================================================ */
 
 (function () {
@@ -318,7 +324,7 @@
                 if (!isDrawerMode() || !drawerIsOpen()) return;
                 var navTarget = event.target.closest(
                     ".chat-title-text, .project-title-wrapper, .btn-primary, " +
-                    ".btn-secondary, .btn-quiz, .profile-trigger-btn"
+                    ".btn-secondary, .btn-quiz, .profile-trigger-btn, .nav-rail-btn"
                 );
                 if (!navTarget) return;
                 // Renaming/deleting happens inside the drawer; only

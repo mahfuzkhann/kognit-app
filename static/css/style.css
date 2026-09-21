@@ -2607,3 +2607,312 @@ body {
     line-height: var(--line-height-normal);
     color: var(--color-text-muted);
 }
+
+/* ============================================================
+   PHASE 9A — THEME TOGGLE
+   ============================================================ */
+.theme-toggle-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    width: 100%;
+    padding: var(--space-sm) var(--space-md);
+    margin-bottom: var(--space-sm);
+    background: transparent;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    color: var(--color-text-tertiary);
+    font-size: var(--font-size-sm);
+    cursor: pointer;
+    min-height: 36px;
+    transition: background var(--duration-fast) var(--ease-standard),
+                color var(--duration-fast) var(--ease-standard);
+}
+
+.theme-toggle-btn:hover {
+    background: var(--color-surface-hover);
+    color: var(--color-text-primary);
+}
+
+.theme-toggle-label {
+    flex: 1;
+    text-align: left;
+}
+
+/* ============================================================
+   PHASE 9B — TOP-LEVEL NAVIGATION, QUIZZES VIEW, PROJECTS VIEW
+   ============================================================ */
+
+.nav-rail {
+    display: flex;
+    gap: var(--space-xs);
+    padding-bottom: var(--space-md);
+    margin-bottom: var(--space-md);
+    border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.nav-rail-btn {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-xs);
+    padding: var(--space-sm) var(--space-xs);
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-md);
+    color: var(--color-text-muted);
+    font-size: var(--font-size-xs);
+    font-weight: var(--font-weight-medium);
+    cursor: pointer;
+    min-height: var(--touch-target-min);
+    transition: background var(--duration-fast) var(--ease-standard),
+                color var(--duration-fast) var(--ease-standard);
+}
+
+.nav-rail-btn:hover {
+    background: var(--color-surface-hover);
+    color: var(--color-text-primary);
+}
+
+.nav-rail-btn.active {
+    background: var(--color-surface-hover);
+    color: var(--color-text-primary);
+    font-weight: var(--font-weight-semibold);
+}
+
+/* A .nav-view fills the same space #chat-view used to occupy alone -
+   exactly one is ever visible (JS toggles .hidden), so no layout
+   competition between them. */
+.nav-view {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    gap: var(--space-lg);
+}
+
+.nav-view.hidden {
+    display: none;
+}
+
+.nav-view-inner {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xl);
+    max-width: var(--content-max-width);
+    width: 100%;
+    margin: 0 auto;
+    padding: var(--space-xl) 0;
+    overflow-y: auto;
+}
+
+.nav-view-header {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+}
+
+.nav-view-title {
+    font-size: var(--font-size-2xl);
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-primary);
+}
+
+.nav-view-subtitle {
+    font-size: var(--font-size-md);
+    color: var(--color-text-muted);
+}
+
+.nav-view-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+}
+
+.nav-view-section-title {
+    font-size: var(--font-size-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.7px;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-muted);
+}
+
+.nav-view-loading {
+    color: var(--color-text-muted);
+    font-size: var(--font-size-md);
+}
+
+/* ---- Quizzes view ------------------------------------------ */
+.quizzes-start-btn {
+    align-self: flex-start;
+    background: var(--color-accent-quiz);
+    color: var(--color-text-inverse);
+    border: none;
+    padding: var(--space-lg) var(--space-2xl);
+    border-radius: var(--radius-lg);
+    font-size: var(--font-size-base);
+    font-weight: var(--font-weight-semibold);
+    cursor: pointer;
+    min-height: var(--touch-target-min);
+    transition: background var(--duration-fast) var(--ease-standard);
+}
+
+.quizzes-start-btn:hover {
+    background: var(--color-accent-quiz-hover);
+}
+
+.quizzes-topic-group-label {
+    font-size: var(--font-size-xs);
+    color: var(--color-text-faint);
+    margin-top: var(--space-sm);
+}
+
+.quizzes-topic-chip {
+    display: inline-flex;
+    margin: var(--space-xs) var(--space-xs) 0 0;
+    padding: var(--space-sm) var(--space-lg);
+    background: var(--color-surface-input);
+    border: 1px solid var(--color-border-input);
+    border-radius: var(--radius-pill);
+    color: var(--color-text-secondary);
+    font-size: var(--font-size-sm);
+    cursor: pointer;
+    transition: background var(--duration-fast) var(--ease-standard);
+}
+
+.quizzes-topic-chip:hover {
+    background: var(--color-surface-hover);
+}
+
+.quizzes-topic-chip--needs-practice {
+    border-color: var(--color-warning);
+    color: var(--color-warning);
+}
+
+/* ---- Projects view ------------------------------------------ */
+.projects-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: var(--space-lg);
+}
+
+.project-card-tile {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+    padding: var(--space-lg);
+    background: var(--color-surface-secondary);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+}
+
+.project-card-tile--active {
+    border-color: var(--color-accent);
+}
+
+.project-card-tile-title {
+    font-size: var(--font-size-base);
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.project-card-tile-meta {
+    font-size: var(--font-size-sm);
+    color: var(--color-text-muted);
+}
+
+.project-card-tile-actions {
+    display: flex;
+    gap: var(--space-sm);
+    margin-top: var(--space-sm);
+}
+
+.project-card-tile-open {
+    flex: 1;
+    background: var(--color-text-primary);
+    color: var(--color-text-inverse);
+    border: none;
+    padding: var(--space-sm) var(--space-md);
+    border-radius: var(--radius-md);
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-medium);
+    cursor: pointer;
+    min-height: 36px;
+}
+
+.project-card-tile-rename,
+.project-card-tile-delete {
+    background: transparent;
+    border: 1px solid var(--color-border);
+    color: var(--color-text-muted);
+    border-radius: var(--radius-md);
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+}
+
+.project-card-tile-rename:hover {
+    color: var(--color-text-primary);
+    border-color: var(--color-border-strong);
+}
+
+.project-card-tile-delete:hover {
+    color: var(--color-error);
+    border-color: var(--color-error);
+}
+
+@media (max-width: 768px) {
+    .nav-rail-btn span {
+        font-size: 10px;
+    }
+}
+
+/* ============================================================
+   PHASE 9C — KEY TAKEAWAY CARD
+   ============================================================
+   Deliberately reuses the same quiet-callout visual language as
+   .quiz-takeaway (Phase 8F) rather than inventing a second card
+   style - one "calm summary" pattern in the whole product, not
+   two competing ones.
+
+   ANSWER-CARDS SCOPE NOTE (Decision 7): Key Takeaway is the only
+   new card type this phase adds. The existing .bot-message
+   blockquote treatment (a quiet left-border rule, see its own
+   comment above) already serves the "important distinction"
+   role Decision 7 names as a candidate - it was deliberately left
+   untouched rather than escalated into a second bordered/background
+   box, since a prior comment on that rule already documents the
+   choice to keep blockquotes card-free, and Decision 7 warns
+   against exactly this kind of card proliferation. A dedicated
+   formula/result card (wrapping MathJax's rendered display-math
+   output) was considered and deferred - see the Phase 9 report. */
+.answer-takeaway {
+    margin: var(--space-md) 0;
+    padding: var(--space-lg);
+    background: var(--color-surface-input);
+    border: 1px solid var(--color-border-input);
+    border-radius: var(--radius-lg);
+    max-width: var(--reading-max-width);
+}
+
+.answer-takeaway-label {
+    font-size: var(--font-size-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.7px;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-muted);
+    margin-bottom: var(--space-xs);
+}
+
+.answer-takeaway-body {
+    font-size: var(--font-size-base);
+    line-height: var(--line-height-normal);
+    color: var(--color-text-secondary);
+}

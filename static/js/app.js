@@ -80,6 +80,30 @@ function _setDefaultProjectIdForUser(user) {
 }
 
 let editingProjectId = null;
+
+// PHASE 9B: minimal, explicit read/write accessors for static/js/nav-views.js
+// (the Quizzes/Projects navigation views). Exposed deliberately rather than
+// relying on nav-views.js reading `projects`/`activeProjectId` as bare
+// identifiers - top-level `let` in one classic <script> IS visible by name
+// to a LATER <script> tag in the same page (verified: this is how app.js's
+// own inline onclick="..." handlers already work), but that's an implicit
+// coupling that would silently break if app.js's top-level code were ever
+// wrapped in an IIFE for encapsulation. An explicit function contract does
+// not have that failure mode, costs a few lines, and makes it obvious in
+// one place exactly what nav-views.js depends on from this file.
+window.getProjectsSnapshot = function() {
+    return projects;
+};
+window.getActiveIds = function() {
+    return { activeProjectId, activeChatId };
+};
+window.startRenamingProject = function(projId) {
+    editingProjectId = projId;
+    renderHistoryList();
+};
+window.openProjectAndChat = function(projId, chatId) {
+    loadChat(projId, chatId);
+};
 let editingChatId = null;
 let searchQuery = "";
 
@@ -1279,6 +1303,35 @@ function createBotMessageElement(rawText, meta = {}) {
     contentDiv.innerHTML = restoreProtectedMathSegments(marked.parse(protectedText), segments);
     wrapper.appendChild(contentDiv);
 
+    // PHASE 9C, Decision 6: Key Takeaway card. `meta.takeaway` was already
+    // extracted deterministically BEFORE this function is ever called (see
+    // sendMessage's stream completion, regenerateBotMessage, and loadChat -
+    // all three funnel through here) - this function only ever renders
+    // what it was given, never decides eligibility itself. Absent for most
+    // answers by design (see rule 8 in backend/ai_engine.py's shared
+    // system instruction - the model omits the marker for simple answers).
+    if (meta.takeaway) {
+        const takeawayCard = document.createElement("div");
+        takeawayCard.className = "answer-takeaway";
+        const label = document.createElement("div");
+        label.className = "answer-takeaway-label";
+        label.textContent = "Key takeaway";
+        const body = document.createElement("div");
+        body.className = "answer-takeaway-body";
+        // Plain textContent, not marked.parse() - the prompt rule (rule 8,
+        // backend/ai_engine.py) asks for 1-2 plain sentences, not
+        // Markdown structure. Any inline math the model includes (e.g.
+        // "$F=ma$") still renders correctly regardless: MathJax's
+        // typesetMathJax() call (below, at every call site of this
+        // function) scans the whole message element's rendered DOM text,
+        // not pre-parsed Markdown source - so it finds and typesets $...$
+        // here exactly as it would anywhere else in the answer.
+        body.textContent = meta.takeaway; // textContent = auto-escaped, XSS-safe
+        takeawayCard.appendChild(label);
+        takeawayCard.appendChild(body);
+        wrapper.appendChild(takeawayCard);
+    }
+
     // PHASE 7C: a compact Sources section, appended only for a genuinely
     // research-grounded answer (see buildResearchSourcesSection above for
     // the exact, narrow condition). Placed after the answer content and
@@ -1505,11 +1558,20 @@ async function regenerateBotMessage(meta, btnEl) {
         }
 
         const data = await response.json();
-        const replyText = data.reply || "No response received.";
+        let replyText = data.reply || "No response received.";
+
+        // PHASE 9C, Decision 6: same deterministic extraction as the
+        // streaming path (static/js/stream-render.js), applied here too so
+        // a regenerated answer gets the identical treatment as a fresh one
+        // - not a second implementation of the same rule.
+        const extracted = window.KognitStream
+            ? window.KognitStream.extractTakeaway(replyText)
+            : { answer: replyText, takeaway: null };
+        replyText = extracted.answer;
 
         // Replace in place (same array index) - never insert a duplicate
         // user or bot message, and never shift later messages' indices.
-        chat.messages[meta.msgIndex] = { role: "bot", text: replyText, research: data.research || null };
+        chat.messages[meta.msgIndex] = { role: "bot", text: replyText, research: data.research || null, takeaway: extracted.takeaway };
         saveProjectsToStorage();
 
         if (activeProjectId === meta.projId && activeChatId === meta.chatId) {
@@ -2098,7 +2160,8 @@ function loadChat(projId, chatId) {
                     chatId: chatId,
                     msgIndex: index,
                     feedback: msg.feedback || null,
-                    research: msg.research || null
+                    research: msg.research || null,
+                    takeaway: msg.takeaway || null
                 }));
             }
         });
@@ -3205,11 +3268,24 @@ window.sendMessage = async function() {
             chatBox.removeChild(streamWrapper);
         }
 
+        // PHASE 9C, Decision 6: deterministic extraction, applied once to
+        // the FINAL text (not per-chunk - the marker only exists once the
+        // model has finished writing it). The stored `msg.text` is always
+        // the clean answer with the marker removed, so Copy, regenerate's
+        // resend, search, and export never see the raw marker syntax -
+        // only createBotMessageElement's rendering gets the takeaway,
+        // via a separate `takeaway` field.
+        var extracted = window.KognitStream
+            ? window.KognitStream.extractTakeaway(replyText)
+            : { answer: replyText, takeaway: null };
+        replyText = extracted.answer;
+        const takeawayText = extracted.takeaway;
+
         const data = { reply: replyText, research: researchPayload };
 
         let newBotMsgIndex = -1;
         if (targetChat && !streamFailed) {
-            targetChat.messages.push({ role: "bot", text: replyText, research: data.research || null });
+            targetChat.messages.push({ role: "bot", text: replyText, research: data.research || null, takeaway: takeawayText });
             newBotMsgIndex = targetChat.messages.length - 1;
             saveProjectsToStorage();
 
@@ -3224,7 +3300,8 @@ window.sendMessage = async function() {
                 projId: requestProjectId,
                 chatId: requestChatId,
                 msgIndex: newBotMsgIndex,
-                research: data.research || null
+                research: data.research || null,
+                takeaway: takeawayText
             });
             chatBox.appendChild(botDiv);
 

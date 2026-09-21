@@ -2,6 +2,36 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+
+    <!-- PHASE 9A: theme must be applied to <html> BEFORE any CSS is
+         parsed, or the page paints once in the default (dark) theme
+         and then visibly flashes to the student's saved choice. This
+         has to be a tiny INLINE, blocking script - an external file
+         would load too late to prevent the flash, which is the one
+         reason this logic isn't simply inside static/js/theme.js.
+         theme.js (loaded later, with the other scripts) reuses this
+         exact function via window.__kognitResolveTheme so the "how do
+         we decide the default" logic exists in exactly one place. -->
+    <script>
+    (function () {
+        function resolveTheme() {
+            try {
+                var saved = window.localStorage.getItem("kognit-theme");
+                if (saved === "light" || saved === "dark") return saved;
+            } catch (e) {
+                // localStorage unavailable (private browsing, disabled
+                // storage) - fall through to the OS preference below
+                // rather than throwing before the page has even parsed.
+            }
+            var prefersLight = window.matchMedia &&
+                window.matchMedia("(prefers-color-scheme: light)").matches;
+            return prefersLight ? "light" : "dark";
+        }
+        window.__kognitResolveTheme = resolveTheme;
+        document.documentElement.setAttribute("data-theme", resolveTheme());
+    })();
+    </script>
+
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <!-- PHASE 8G: maximum-scale/user-scalable are deliberately NOT set -
          pinch-zoom must stay available. Students reading dense formulas
@@ -119,6 +149,37 @@
     <div id="sidebar-overlay" class="sidebar-overlay" hidden></div>
 
     <aside class="sidebar" id="app-sidebar" aria-label="Projects and conversations">
+        <!-- PHASE 9B: top-level navigation (Decision 3: Chat / Quizzes /
+             Projects, no Home). role="tablist" for correct screen-reader
+             semantics since exactly one .nav-view is ever visible at a
+             time, like a tab panel set. Arrow-key roving tabindex and
+             click wiring live in static/js/nav-views.js. -->
+        <div class="nav-rail" role="tablist" aria-label="Kognit sections">
+            <button type="button" id="nav-tab-chat" class="nav-rail-btn active"
+                    role="tab" aria-selected="true" aria-controls="chat-view" tabindex="0">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+                <span>Chat</span>
+            </button>
+            <button type="button" id="nav-tab-quizzes" class="nav-rail-btn"
+                    role="tab" aria-selected="false" aria-controls="quizzes-view" tabindex="-1">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
+                <span>Quizzes</span>
+            </button>
+            <button type="button" id="nav-tab-projects" class="nav-rail-btn"
+                    role="tab" aria-selected="false" aria-controls="projects-view" tabindex="-1">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                <span>Projects</span>
+            </button>
+        </div>
+
+        <!-- PHASE 9B: everything below is scoped to the "Chat" nav tab -
+             the sidebar's project/chat history is conceptually part of the
+             Chat destination (Decision 3/9B.1), so it hides along with
+             #chat-view when Quizzes/Projects is active, rather than
+             staying visible and duplicating what the dedicated Projects
+             view now shows. Nothing inside changed - same buttons, same
+             search box, same #history-list. -->
+        <div id="chat-sidebar-section" class="nav-scoped-section">
         <div class="sidebar-header">
             <button class="btn-primary" onclick="createNewProject()">+ New Project</button>
             <button class="btn-secondary" onclick="createStandaloneChat()">+ New Chat</button>
@@ -138,9 +199,20 @@
                 <!-- Dynamic Projects & Chats render here -->
             </div>
         </div>
+        </div>
+        <!-- /#chat-sidebar-section -->
 
         <!-- AUTH / USER SECTION -->
         <div class="sidebar-footer">
+            <!-- PHASE 9A: theme is per-device (localStorage), not tied
+                 to the account, so this sits above and outside both the
+                 guest and logged-in views below - visible either way. -->
+            <button type="button" id="theme-toggle-btn" class="theme-toggle-btn" aria-pressed="false">
+                <svg class="theme-icon-sun hidden" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><line x1="12" y1="2" x2="12" y2="4"></line><line x1="12" y1="20" x2="12" y2="22"></line><line x1="4.93" y1="4.93" x2="6.34" y2="6.34"></line><line x1="17.66" y1="17.66" x2="19.07" y2="19.07"></line><line x1="2" y1="12" x2="4" y2="12"></line><line x1="20" y1="12" x2="22" y2="12"></line><line x1="4.93" y1="19.07" x2="6.34" y2="17.66"></line><line x1="17.66" y1="6.34" x2="19.07" y2="4.93"></line></svg>
+                <svg class="theme-icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+                <span class="theme-toggle-label">Theme</span>
+            </button>
+
             <div id="auth-guest-view">
                 <button class="btn-auth-login" onclick="openAuthModal()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path></svg> Login / Sign Up</button>
             </div>
@@ -193,6 +265,15 @@
                 <button class="export-btn share-btn" onclick="shareChatLink()" title="Share Link"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.6" y1="10.5" x2="15.4" y2="6.5"></line><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"></line></svg> Share</button>
             </div>
         </header>
+
+        <!-- PHASE 9B: top-level navigation rail (Chat / Quizzes / Projects).
+             Lives at the very top of .sidebar (see below) so it works with
+             the existing mobile drawer for free - no extra breakpoints
+             needed. Switching tabs toggles which of the three .nav-view
+             containers below is visible; it does not reload the page or
+             touch chat/project state. Rendering and behavior for Quizzes
+             and Projects live in static/js/nav-views.js. -->
+        <div id="chat-view" class="nav-view">
 
         <!-- MODE SWITCHER -->
         <div class="mode-selector">
@@ -284,6 +365,25 @@
              the class is removed and the composer returns to the bottom -
              a layout change, not an animation. -->
         <div class="composer-spacer" aria-hidden="true"></div>
+        </div>
+        <!-- /#chat-view -->
+
+        <!-- PHASE 9B: Quizzes destination. Populated by renderQuizzesView()
+             in nav-views.js. Reuses the EXISTING #quiz-modal for actually
+             taking a quiz (opened via the existing openQuizModal()) and the
+             EXISTING /api/profile/snapshot data (same fetch helper the
+             Student Profile panel already uses) for the "Your Topics"
+             section - no new backend endpoint, no invented quiz history. -->
+        <div id="quizzes-view" class="nav-view hidden" role="tabpanel" aria-labelledby="nav-tab-quizzes"></div>
+
+        <!-- PHASE 9B: Projects destination (Decision 4 - a dedicated view,
+             not a filter). Populated by renderProjectsView() in
+             nav-views.js from the SAME `projects` array app.js already
+             maintains (via window.getProjectsSnapshot()) - no second data
+             model, no invented metadata. Only title and a derived chat
+             count are shown, because that is all the existing data model
+             actually contains. -->
+        <div id="projects-view" class="nav-view hidden" role="tabpanel" aria-labelledby="nav-tab-projects"></div>
     </main>
 </div>
 
@@ -548,8 +648,19 @@
 <!-- PHASE 8E: safe incremental rendering helpers for streamed answers.
      Pure functions only (boundary scanning, NDJSON parsing); no DOM work,
      no timers. Must load before app.js, which uses it in sendMessage(). -->
+<!-- PHASE 9A: toggle-button wiring, persistence, system/cross-tab sync.
+     The initial theme decision already happened in the inline <head>
+     script above, before first paint - this only manages the UI
+     and choice-changes from here on. -->
+<script src="/static/js/theme.js"></script>
 <script src="/static/js/stream-render.js"></script>
-<script src="/static/js/ui-core.js"></script>
+<!-- PHASE 9B: top-level nav rail (Chat/Quizzes/Projects) and the
+     Quizzes/Projects view content. Loaded AFTER app.js (see script
+     order below) since it depends on the accessor functions app.js
+     exposes for this purpose - see the PHASE 9B comment in app.js. -->
 <script src="/static/js/app.js"></script>
+<script src="/static/js/nav-views.js"></script>
+<script src="/static/js/ui-core.js"></script>
+
 </body>
 </html>

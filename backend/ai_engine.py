@@ -50,7 +50,7 @@ MODEL_NAME = "gemini-3.6-flash"
 # prompt content, since this label only helps if someone remembers to bump
 # it. Neither of these has any effect on production behavior; main.py never
 # reads this constant.
-CHAT_PROMPT_VERSION = "2026-09-16-a"
+CHAT_PROMPT_VERSION = "2026-09-20-phase9c-takeaway"
 
 # Extracted, byte-identical, from generate_ai_response()'s previously
 # inline system_instruction f-string (Phase 7B production-metadata-capture
@@ -94,7 +94,24 @@ CHAT_SYSTEM_INSTRUCTION_RULES = (
     "specific clarifying question when the request is genuinely ambiguous in a way that "
     "would change the answer (e.g. it's unclear which chapter, which of two problems, or "
     "which subject is meant). Never invent facts, textbook page numbers, or details you are "
-    "not given in order to avoid asking that clarifying question."
+    "not given in order to avoid asking that clarifying question.\n"
+    "8. KEY TAKEAWAY (optional): for a genuinely conceptual, explanatory, or "
+    "multi-step answer, you MAY end your response with one additional block, "
+    "in exactly this format, after your normal answer:\n"
+    "<!--KOGNIT_TAKEAWAY\n"
+    "One or two sentences synthesizing the core idea a student should remember.\n"
+    "KOGNIT_TAKEAWAY-->\n"
+    "Rules for this block: (a) OMIT it entirely for simple factual answers, "
+    "short definitions, or anything where a summary would just repeat what "
+    "was already said - most answers should have NO takeaway block; "
+    "(b) the takeaway must state ONLY something already established in your "
+    "answer above it - never introduce a new fact, number, or claim that "
+    "does not appear in the answer; (c) keep it to 1-2 sentences, in the "
+    "same language as the rest of your answer; (d) use the exact delimiter "
+    "text shown above, with nothing else on those two delimiter lines; "
+    "(e) this block is invisible to the student as raw text - it is "
+    "extracted and shown separately - so do not reference it or refer to "
+    "it as a \"box\" or \"note\" from within your main answer."
 )
 
 # User-facing fallback messages. Never expose str(exception) to the client -

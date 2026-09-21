@@ -216,6 +216,343 @@
     --amber-400: #fbbf24;
 }
 
+/* ============================================================
+   LIGHT THEME — PHASE 9A
+   ============================================================
+   Overrides the semantic layer only (§3 in the block above). The
+   scale layer (§1/§2) stays as dark-mode raw values and is simply
+   not referenced by the light overrides below - every light value
+   here is written out explicitly rather than pointed at a
+   dark-scale token, so the two themes can diverge freely without
+   fighting each other through shared aliases.
+
+   Activated by [data-theme="light"] on <html>, set by
+   static/js/theme.js before first paint (see that file for why).
+
+   CONTRAST — every pair below was verified against the real WCAG
+   2.1 relative-luminance formula (not eyeballed - no browser was
+   available to look at this), against the actual token pairing
+   used in style.css:
+     text-primary/secondary/tertiary/muted on surface   >= 4.5:1
+     text-faint on surface (small/non-essential text)   >= 3.0:1
+     accent, accent-quiz, success, error, warning        >= 4.5:1
+     text-inverse on accent/error/text-primary (buttons) >= 4.5:1
+     border-strong, border-input (real UI boundaries)    >= 3.0:1
+     focus ring on background                            >= 3.0:1
+   `border` and `border-subtle` are decorative dividers, not
+   information-bearing boundaries, so the stricter 3:1 non-text
+   rule does not apply to them and they stay closer to the
+   surface color on purpose - a heavier divider on every card
+   edge would be more visual noise, not more accessible.
+   ============================================================ */
+:root[data-theme="light"] {
+    --color-background:         #f7f7f8;
+    --color-surface:            #ffffff;
+    --color-surface-secondary:  #ffffff;
+    --color-surface-elevated:   #ffffff;
+    --color-surface-raised:     #ffffff;
+    --color-surface-hover:      #eeeef1;
+    --color-surface-input:      #f0f0f3;
+
+    --color-border:             #c7c7cf;
+    --color-border-subtle:      #e2e2e6;
+    --color-border-strong:      #84848e;
+    --color-border-input:       #84848e;
+
+    --color-text-primary:       #16161a;
+    --color-text-secondary:     #33333a;
+    --color-text-tertiary:      #46464e;
+    --color-text-muted:         #5f5f68;
+    --color-text-faint:         #77777f;
+    --color-text-inverse:       #ffffff;
+
+    --color-accent:             #2563eb;
+    --color-accent-hover:       #1d4ed8;
+    --color-accent-quiz:        #4f46e5;
+    --color-accent-quiz-hover:  #4338ca;
+
+    --color-success:            #15803d;
+    --color-error:              #dc2626;
+    --color-warning:            #b45309;
+    --color-focus:              #2563eb;
+
+    /* Shadows read as heavier on a light surface than the dark
+       theme's near-black-on-black values - kept subtle so cards
+       and modals still feel calm, not "floating on paper". */
+    --shadow-subtle:   0 1px 2px rgba(20, 20, 24, 0.08);
+    --shadow-medium:   0 4px 14px rgba(20, 20, 24, 0.10);
+    --shadow-elevated: 0 20px 40px rgba(20, 20, 24, 0.16);
+
+    /* ------------------------------------------------------
+       RAW SCALE TOKENS USED DIRECTLY IN COMPONENT CSS
+       ------------------------------------------------------
+       KNOWN ARCHITECTURAL DEBT, carried over from Phase 8B and
+       being made explicit here rather than silently worked around:
+       style.css has 36 places that reference a raw --gray-N /
+       --indigo-N / etc. scale value directly instead of a semantic
+       token (grep -c 'var(--gray-\|var(--indigo-' style.css). The
+       Phase 8B audit already flagged this as "one literal serving
+       two roles" debt. Phase 9 cannot leave these dark-only, so
+       each one is overridden here for light mode, verified against
+       WCAG contrast exactly like the semantic tokens above (text
+       roles >= 4.5:1 on their actual background context, decorative
+       icon glyphs >= 3:1, real UI borders >= 3:1).
+
+       The CORRECT long-term fix is promoting each of these 36
+       call sites to a proper semantic token (border-strong,
+       text-muted, etc.) so a color only needs to be reasoned about
+       once. That is a mechanical, low-risk refactor - not done
+       here to keep this phase's diff reviewable, but it should be
+       the first item in whatever comes after Phase 9. */
+    --gray-550:   #5f5f68;   /* icon/label text: action-btn, tagline, search icon */
+    --gray-400:   #6b6b74;   /* composer-menu icon glyphs, sp-* muted labels */
+    --gray-350:   #52525b;   /* blockquote body text, icon-btn, research source text */
+    --gray-300:   #33333a;   /* pill-btn / profile-trigger text (on surface-input) */
+    --gray-450:   #52525b;   /* auth-toggle text, no-results, quiz-save-status */
+    --gray-420:   #5a5a63;   /* result-explanation, sp-unavailable-state */
+    --gray-260:   #46464e;   /* sp-topic-line text */
+    --gray-700:   #5f5f68;   /* history-title uppercase label */
+    --gray-150:   #1c1c22;   /* search input text, export-btn, username - was bright-on-dark */
+    --gray-220:   #1c1c22;   /* project-header text - was bright-on-dark */
+    --gray-180:   #1c1c22;   /* sp-subject-name - was bright-on-dark */
+    --gray-100:   #2c2c33;   /* btn-primary:hover bg tint; composer-menu-item text */
+    --gray-750:   #84848e;   /* hover border on inputs/icon buttons - UI 3:1 */
+    --gray-800:   #84848e;   /* rename-input / user-edit-textarea border - UI 3:1 */
+    --gray-930:   #c7c7cf;   /* sidebar divider, user-message bg tint */
+    --gray-915:   #dcdce1;   /* modal-card / sp-header-section border */
+    --gray-910:   #ececef;   /* hr, composer-menu border, action-btn:hover bg */
+    --gray-935:   #eeeef1;   /* quiz-opt-btn:hover bg */
+    --gray-955:   #eeeef1;   /* project-header:hover bg */
+    --gray-958:   #eeeef1;   /* btn-secondary bg */
+    --gray-968:   #f5f5f7;   /* sp-empty-state bg */
+    --gray-890:   #e2e2e6;   /* sp-empty-state dashed border */
+    --indigo-300: #4338ca;   /* btn-quiz / quiz-progress-bar text - was pale-on-dark */
+    --indigo-200: #4338ca;   /* sp-recommendation-action text - was pale-on-dark */
+    --indigo-500: #4f46e5;   /* focus outlines, quiz-opt-btn.selected border */
+    --indigo-800: #e0e7ff;   /* selected pill/quiz-option bg (text-primary sits on this) */
+    --indigo-925: #6366f1;   /* btn-quiz border - darkened from the raw scale value for 3:1 */
+    --indigo-950: #eef2ff;   /* btn-quiz:hover bg (text-primary sits on this) */
+    --amber-400:  #b45309;   /* pin-btn.pinned, sp-item-status-label */
+    --red-500:    #dc2626;   /* delete-btn:hover text/bg */
+    --red-900:    #fee2e2;   /* delete-btn:hover bg tint */
+    --green-200:  #15803d;   /* sp-progress-banner improving text - was pale-on-dark */
+    --blue-300:   #2563eb;   /* research-source-item link - was pale-on-dark */
+    --slate-500:  #475569;   /* auth-divider text */
+    /* --slate-800 and --slate-100 are intentionally NOT overridden:
+       .btn-google-auth keeps a white background in both themes by
+       its own design, so its existing dark-text-on-white values are
+       already theme-correct. */
+}
+
+/* Respect the OS preference for a first-time visitor who has never
+   chosen a theme in this app (see theme.js: this rule only ever
+   matters before localStorage has a saved choice, because theme.js
+   sets data-theme explicitly the instant a preference exists). */
+@media (prefers-color-scheme: light) {
+    :root:not([data-theme]) {
+        --color-background:         #f7f7f8;
+        --color-surface:            #ffffff;
+        --color-surface-secondary:  #ffffff;
+        --color-surface-elevated:   #ffffff;
+        --color-surface-raised:     #ffffff;
+        --color-surface-hover:      #eeeef1;
+        --color-surface-input:      #f0f0f3;
+        --color-border:             #c7c7cf;
+        --color-border-subtle:      #e2e2e6;
+        --color-border-strong:      #84848e;
+        --color-border-input:       #84848e;
+        --color-text-primary:       #16161a;
+        --color-text-secondary:     #33333a;
+        --color-text-tertiary:      #46464e;
+        --color-text-muted:         #5f5f68;
+        --color-text-faint:         #77777f;
+        --color-text-inverse:       #ffffff;
+        --color-accent:             #2563eb;
+        --color-accent-hover:       #1d4ed8;
+        --color-accent-quiz:        #4f46e5;
+        --color-accent-quiz-hover:  #4338ca;
+        --color-success:            #15803d;
+        --color-error:              #dc2626;
+        --color-warning:            #b45309;
+        --color-focus:              #2563eb;
+        --shadow-subtle:   0 1px 2px rgba(20, 20, 24, 0.08);
+        --shadow-medium:   0 4px 14px rgba(20, 20, 24, 0.10);
+        --shadow-elevated: 0 20px 40px rgba(20, 20, 24, 0.16);
+
+        /* Kept identical to the [data-theme="light"] block above -
+           see that block's comment for the full rationale. Only
+           applies before theme.js has run (see that file), which
+           should be milliseconds at most. */
+        --gray-550:  #777777;
+            --gray-500:  #888888;
+            --gray-450:  #94a3b8;
+            --gray-400:  #999999;
+            --gray-350:  #aaaaaa;
+            --gray-300:  #cbd5e1;
+            --gray-280:  #cccccc;
+            --gray-200:  #dddddd;
+            --gray-150:  #e2e8f0;
+            --gray-100:  #e0e0e0;
+            --gray-0:    #ffffff;
+
+            /* ---- 2. BRAND + STATUS (raw, by role) -------------------- */
+            --blue-500:    #3b82f6;
+            --blue-600:    #2563eb;
+            --indigo-300:  #a5b4fc;
+            --indigo-500:  #6366f1;
+            --indigo-600:  #4f46e5;
+            --indigo-700:  #4338ca;
+            --indigo-800:  #3730a3;
+            --indigo-900:  #312e81;
+            --indigo-950:  #1e1b4b;
+            --green-400:   #4ade80;
+            --red-400:     #f87171;
+            --red-500:     #ff5555;
+            --red-900:     #280000;
+
+            /* ---- 3. SEMANTIC COLOR ----------------------------------- */
+            --color-background:         var(--gray-1000);
+            --color-surface:            var(--gray-980);
+            --color-surface-secondary:  var(--gray-970);
+            --color-surface-elevated:   var(--gray-965);
+            --color-surface-raised:     var(--gray-960);
+            --color-surface-hover:      var(--gray-950);
+            --color-surface-input:      var(--gray-945);
+
+            --color-border:             var(--gray-920);
+            --color-border-subtle:      var(--gray-940);
+            --color-border-strong:      var(--gray-850);
+            --color-border-input:       var(--gray-880);
+
+            --color-text-primary:       var(--gray-0);
+            --color-text-secondary:     var(--gray-200);
+            --color-text-tertiary:      var(--gray-280);
+            --color-text-muted:         var(--gray-500);
+            --color-text-faint:         var(--gray-600);
+            --color-text-inverse:       var(--gray-1000);
+
+            --color-accent:             var(--blue-500);
+            --color-accent-hover:       var(--blue-600);
+            --color-accent-quiz:        var(--indigo-600);
+            --color-accent-quiz-hover:  var(--indigo-700);
+
+            --color-success:            var(--green-400);
+            --color-error:              var(--red-400);
+            --color-warning:            #fbbf24;
+
+            /* Focus ring. PHASE 8G: previously no consistent focus token
+               existed at all - focus styling was browser-default or absent
+               on custom controls. */
+            --color-focus:              var(--blue-500);
+            --focus-ring:               0 0 0 2px var(--color-background),
+                                        0 0 0 4px var(--color-focus);
+
+            /* ---- 4. TYPOGRAPHY --------------------------------------- */
+            /* Noto Sans Bengali leads the stack deliberately: Kognit's
+               primary market is Bangla-medium students and Bengali glyphs
+               must not fall back to a system font that renders them
+               inconsistently alongside Latin text and LaTeX. */
+            --font-family-base: "Noto Sans Bengali", -apple-system, BlinkMacSystemFont,
+                                "Segoe UI", Roboto, sans-serif;
+            --font-family-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo,
+                                Consolas, "Liberation Mono", monospace;
+
+            --font-size-xs:      11px;
+            --font-size-sm:      12px;
+            --font-size-md:      13px;
+            --font-size-base:    14px;
+            --font-size-lg:      15px;
+            --font-size-xl:      18px;
+            --font-size-2xl:     20px;
+            --font-size-display: 24px;
+
+            --line-height-tight:   1.3;
+            --line-height-normal:  1.5;
+            --line-height-relaxed: 1.7;
+
+            --font-weight-normal:   400;
+            --font-weight-medium:   500;
+            --font-weight-semibold: 600;
+            --font-weight-bold:     700;
+
+            /* ---- 5. SPACING ------------------------------------------ */
+            --space-2xs: 2px;
+            --space-xs:  4px;
+            --space-sm:  6px;
+            --space-md:  8px;
+            --space-lg:  12px;
+            --space-xl:  16px;
+            --space-2xl: 20px;
+            --space-3xl: 24px;
+
+            /* ---- 6. RADII -------------------------------------------- */
+            --radius-sm:   4px;
+            --radius-md:   6px;
+            --radius-lg:   8px;
+            --radius-xl:   12px;
+            --radius-pill: 999px;
+            --radius-full: 50%;
+
+            /* ---- 7. SHADOW ------------------------------------------- */
+            --shadow-subtle:   0 1px 2px rgba(0, 0, 0, 0.4);
+            --shadow-medium:   0 4px 12px rgba(0, 0, 0, 0.5);
+            --shadow-elevated: 0 20px 40px rgba(0, 0, 0, 0.6);
+
+            /* ---- 8. LAYOUT ------------------------------------------- */
+            --sidebar-width:          272px;
+            --sidebar-width-laptop:   240px;
+            --sidebar-width-tablet:   220px;
+            --sidebar-width-drawer:   288px;
+            --content-max-width:      900px;
+            --reading-max-width:      720px;
+            --modal-width-sm:         380px;
+            --modal-width-md:         580px;
+
+            /* Minimum touch target. PHASE 8G: 44px is the smallest target
+               size that remains reliably tappable; several icon-only
+               controls were below this before Phase 8. */
+            --touch-target-min: 44px;
+
+            /* ---- 9. MOTION ------------------------------------------- */
+            /* Short and consistent on purpose. Motion in Kognit signals a
+               state change; it never decorates. Anything longer than
+               --duration-slow would start to feel like waiting. */
+            --duration-instant: 0.1s;
+            --duration-fast:    0.15s;
+            --duration-normal:  0.2s;
+            --duration-slow:    0.28s;
+            --ease-standard:    cubic-bezier(0.2, 0, 0.2, 1);
+
+            --z-sidebar:        100;
+            --z-drawer-overlay: 900;
+            --z-drawer:         950;
+            --z-modal:          1000;
+            --z-toast:          1100;
+
+            /* ---- 10. PHASE 8B SECOND-PASS SCALE ----------------------
+               One-off literals found in style.css during migration. Added
+               with their exact original values so the migration stayed
+               visually neutral. Several are candidates for consolidation
+               into the main scale once a designer reviews them. */
+            --gray-968: #0d0d10;
+            --gray-958: #121212;
+            --gray-955: #131313;
+            --gray-935: #20202c;
+            --gray-890: #2a2a33;
+            --indigo-925: #262247;
+            --indigo-200: #c7d2fe;
+            --gray-700: #5c5c5c;
+            --slate-500: #64748b;
+            --slate-800: #1e293b;
+            --slate-100: #f1f5f9;
+            --gray-180: #e5e7eb;
+            --gray-220: #d4d4d4;
+            --gray-260: #b8b8c0;
+            --gray-420: #a1a1aa;
+            --blue-300: #7ab8ff;
+    }
+}
+
 /* PHASE 8G: reduced-motion support. Kognit's motion is already
    limited to short state-change transitions, so this zeroes their
    duration rather than removing the rules - the end state is
