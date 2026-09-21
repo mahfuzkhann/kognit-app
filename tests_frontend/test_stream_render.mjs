@@ -217,6 +217,55 @@ check("unknown context degrades to the neutral default", () => {
     eq(S.loadingCopyFor(undefined), S.loadingCopyFor("thinking"));
 });
 
+console.log("\nKey Takeaway extraction (Phase 9C, Decision 6 - deterministic, no second AI call)");
+
+check("no marker present - answer unchanged, takeaway null", () => {
+    const r = S.extractTakeaway("Dhaka is the capital of Bangladesh.");
+    eq(r.answer, "Dhaka is the capital of Bangladesh.");
+    eq(r.takeaway, null);
+});
+
+check("marker present - splits answer from takeaway", () => {
+    const r = S.extractTakeaway(
+        "Photosynthesis converts light into chemical energy.\n" +
+        "<!--KOGNIT_TAKEAWAY\nPlants store solar energy as glucose.\nKOGNIT_TAKEAWAY-->"
+    );
+    eq(r.answer, "Photosynthesis converts light into chemical energy.");
+    eq(r.takeaway, "Plants store solar energy as glucose.");
+});
+
+check("Bengali takeaway extracted correctly", () => {
+    const r = S.extractTakeaway(
+        "সালোকসংশ্লেষণ একটি গুরুত্বপূর্ণ প্রক্রিয়া।\n" +
+        "<!--KOGNIT_TAKEAWAY\nউদ্ভিদ সূর্যালোক থেকে খাদ্য তৈরি করে।\nKOGNIT_TAKEAWAY-->"
+    );
+    eq(r.answer, "সালোকসংশ্লেষণ একটি গুরুত্বপূর্ণ প্রক্রিয়া।");
+    eq(r.takeaway, "উদ্ভিদ সূর্যালোক থেকে খাদ্য তৈরি করে।");
+});
+
+check("an empty marker body yields no takeaway, not a blank card", () => {
+    const r = S.extractTakeaway("Answer text.\n<!--KOGNIT_TAKEAWAY\n   \nKOGNIT_TAKEAWAY-->");
+    eq(r.takeaway, null);
+});
+
+check("malformed/unclosed marker leaves the answer untouched (fail-safe)", () => {
+    const input = "Answer text.\n<!--KOGNIT_TAKEAWAY\nnever closed";
+    const r = S.extractTakeaway(input);
+    eq(r.answer, input, "no partial-match corruption - unmatched text stays exactly as-is");
+    eq(r.takeaway, null);
+});
+
+check("marker text is trimmed of surrounding whitespace", () => {
+    const r = S.extractTakeaway("A.\n<!--KOGNIT_TAKEAWAY\n   Core idea.   \nKOGNIT_TAKEAWAY-->");
+    eq(r.takeaway, "Core idea.");
+});
+
+check("null/empty input never throws", () => {
+    eq(S.extractTakeaway(null).answer, "");
+    eq(S.extractTakeaway("").answer, "");
+    eq(S.extractTakeaway(undefined).takeaway, null);
+});
+
 console.log(`\n${"=".repeat(52)}`);
 console.log(`  ${passed} passed, ${failed} failed`);
 console.log("=".repeat(52));

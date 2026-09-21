@@ -73,6 +73,24 @@
         while (i < len) {
             var ch = text[i];
 
+            // ---- HTML comment: <!-- ... -->
+            // PHASE 9C: the Key Takeaway marker (see extractTakeaway below)
+            // is carried as an HTML comment specifically because an HTML
+            // comment degrades safely - if extraction ever fails for any
+            // reason, a raw <!-- --> is invisible when rendered, never
+            // visible garbage. But during STREAMING the pending-text tail is
+            // shown via textContent (escaped, so it displays literally), so
+            // an in-progress "<!--KOGNIT_TAKEAWAY" must still be held back
+            // like any other unterminated construct - otherwise the student
+            // would briefly see the raw marker text on screen.
+            if (text.startsWith("<!--", i)) {
+                var closeComment = text.indexOf("-->", i + 4);
+                if (closeComment === -1) return _clampTrailingDelimiters(text, safe);
+                i = closeComment + 3;
+                safe = i;
+                continue;
+            }
+
             // ---- fenced code block: ``` ... ```
             if (text.startsWith("```", i)) {
                 var closeFence = text.indexOf("```", i + 3);
@@ -171,7 +189,7 @@
        of delimiter characters. Costs at most a few characters of
        delay, and guarantees the boundary only ever grows.
        -------------------------------------------------------- */
-    var AMBIGUOUS_TRAILING = "`*$\\_~";
+    var AMBIGUOUS_TRAILING = "`*$\\_~<!-";
 
     function _clampTrailingDelimiters(text, boundary) {
         var start = text.length;
@@ -245,12 +263,59 @@
         };
     }
 
+    /* --------------------------------------------------------
+       extractTakeaway — PHASE 9C, Decision 6
+       --------------------------------------------------------
+       Deterministic extraction, NOT a second AI call. The model is
+       instructed (see CHAT_SYSTEM_INSTRUCTION_RULES rule 8 in
+       backend/ai_engine.py - the SAME shared system instruction
+       used by both the streaming and non-streaming path) to
+       OPTIONALLY end a conceptual/explanatory answer with:
+
+           <!--KOGNIT_TAKEAWAY
+           one or two sentence synthesis
+           KOGNIT_TAKEAWAY-->
+
+       This function's only job is to find that marker, if present,
+       and split it from the visible answer. It makes NO decision
+       about content, correctness, or relevance - that judgment
+       belongs entirely to the model, which is also the only thing
+       that has actually read the answer. If the marker is absent
+       (the model judged the answer too simple for one, per its
+       instructions), takeaway is null and the answer is returned
+       unchanged - most answers will take this path, by design.
+
+       Safe by construction even if the model gets the format
+       slightly wrong: the regex only matches the EXACT delimiter
+       pair. Anything that doesn't match stays in the visible
+       answer untouched - there is no partial-match corruption
+       mode.
+       -------------------------------------------------------- */
+    var TAKEAWAY_PATTERN = /\n?<!--KOGNIT_TAKEAWAY\s*([\s\S]*?)\s*KOGNIT_TAKEAWAY-->\n?/;
+
+    function extractTakeaway(fullText) {
+        if (!fullText) return { answer: fullText || "", takeaway: null };
+        var match = TAKEAWAY_PATTERN.exec(fullText);
+        if (!match) return { answer: fullText, takeaway: null };
+
+        var takeawayText = match[1].trim();
+        var answer = (fullText.slice(0, match.index) + fullText.slice(match.index + match[0].length));
+
+        if (!takeawayText) {
+            // Model emitted an empty marker - treat as "no takeaway" rather
+            // than rendering a blank card.
+            return { answer: answer, takeaway: null };
+        }
+        return { answer: answer, takeaway: takeawayText };
+    }
+
     window.KognitStream = {
         LOADING_COPY: LOADING_COPY,
         loadingCopyFor: loadingCopyFor,
         findSafeBoundary: findSafeBoundary,
         splitForRender: splitForRender,
         hasCompleteMath: hasCompleteMath,
-        createNdjsonParser: createNdjsonParser
+        createNdjsonParser: createNdjsonParser,
+        extractTakeaway: extractTakeaway
     };
 })();

@@ -127,10 +127,31 @@ check("tokens.css loads before style.css", () => {
     assert(t < s, "tokens.css must load before style.css for var() to resolve");
 });
 
-check("ui-core.js loads before app.js", () => {
-    const u = rawHtml.indexOf("/static/js/ui-core.js");
+check("app.js loads before nav-views.js and ui-core.js (Phase 9B order)", () => {
+    // Reversed from Phase 8C's original order (ui-core.js before app.js).
+    // Phase 9B's nav-views.js needs app.js's accessor functions
+    // (getProjectsSnapshot, getActiveIds, etc.) to exist first, so app.js
+    // now loads first. ui-core.js tolerates either position by design -
+    // every app.js function it calls is looked up lazily via `window[...]`
+    // at event time, never captured at script-load time (see the header
+    // comment in ui-core.js) - so moving it after app.js changes nothing
+    // about its own behavior, which is exactly why this reordering was
+    // safe to make.
     const a = rawHtml.indexOf("/static/js/app.js");
-    assert(u !== -1 && a !== -1 && u < a, "ui-core.js must be loaded before app.js");
+    const n = rawHtml.indexOf("/static/js/nav-views.js");
+    const u = rawHtml.indexOf("/static/js/ui-core.js");
+    assert(a !== -1 && n !== -1 && u !== -1, "all three scripts must be present");
+    assert(a < n, "app.js must load before nav-views.js (nav-views.js reads app.js's accessors)");
+    assert(a < u, "app.js must load before ui-core.js under the current order");
+});
+
+check("nav rail markup (Chat/Quizzes/Projects, no Home) is present", () => {
+    assert(rawHtml.includes('id="nav-tab-chat"'), "missing Chat tab");
+    assert(rawHtml.includes('id="nav-tab-quizzes"'), "missing Quizzes tab");
+    assert(rawHtml.includes('id="nav-tab-projects"'), "missing Projects tab");
+    assert(!rawHtml.includes('id="nav-tab-home"'), "Home was explicitly declined (Decision 3) - must not exist");
+    assert(!/>\s*Scheduled\s*</.test(rawHtml), "Scheduled was explicitly declined - must not exist");
+    assert(!/>\s*Plugins\s*</.test(rawHtml), "Plugins was explicitly declined - must not exist");
 });
 
 check("logout button routes through confirmation, not straight to handleLogout", () => {
