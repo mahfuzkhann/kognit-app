@@ -372,6 +372,20 @@ class TestConfiguration:
         config = mock_client.chats.create.call_args.kwargs["config"]
         assert config.thinking_config.thinking_level == genai_types.ThinkingLevel.LOW
 
+
+    def test_complex_academic_prompt_uses_medium_thinking(self, mock_client):
+        chat = MagicMock()
+        chat.send_message.return_value = _make_response("solution")
+        mock_client.chats.create.return_value = chat
+
+        ai_engine.generate_ai_response(
+            prompt="Solve this quadratic equation step by step: 2x² - 5x - 3 = 0 and explain why.",
+            mode="direct",
+        )
+
+        config = mock_client.chats.create.call_args.kwargs["config"]
+        assert config.thinking_config.thinking_level == genai_types.ThinkingLevel.MEDIUM
+
     def test_attempt_one_uses_full_timeout(self, mock_client):
         chat = MagicMock()
         chat.send_message.return_value = _make_response("ok")

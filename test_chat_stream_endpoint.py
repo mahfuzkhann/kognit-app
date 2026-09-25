@@ -259,6 +259,35 @@ class TestStreamEndpoint:
         assert events[-1]["type"] == "error"
         assert isinstance(events[-1]["reply"], str) and events[-1]["reply"]
 
+    def test_partial_stream_is_error_not_done_and_not_persisted(self, client, monkeypatch):
+        _install_fake_stream(
+            monkeypatch,
+            [_FakeChunk("partial")],
+            raise_after=1,
+            exc=RuntimeError("network dropped"),
+        )
+        r = client.post("/api/chat/stream", data={"prompt": "q", "chat_id": "c1"})
+        events = _parse_ndjson(r.text)
+        assert events[-1]["type"] == "error"
+        assert events[-1]["partial"] is True
+        assert events[-1]["reply"] == "partial"
+        assert not any(e["type"] == "done" for e in events)
+
+    def test_stream_without_terminal_event_is_not_success(self, client, monkeypatch):
+        class _Chats:
+            def create(self, **kwargs):
+                return _FakeChatSession([_FakeChunk("partial", finish_reason=None)])
+
+        class _Client:
+            chats = _Chats()
+
+        monkeypatch.setattr(ai_engine, "_client", _Client())
+        r = client.post("/api/chat/stream", data={"prompt": "q", "chat_id": "c1"})
+        events = _parse_ndjson(r.text)
+        assert events[-1]["type"] == "error"
+        assert events[-1]["partial"] is True
+        assert events[-1]["reply"] == "partial"
+
     def test_oversized_image_rejected_with_413(self, client, monkeypatch):
         big = b"0" * (main.MAX_IMAGE_UPLOAD_SIZE_BYTES + 1024)
         r = client.post(

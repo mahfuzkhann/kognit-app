@@ -2916,3 +2916,15 @@ body {
     line-height: var(--line-height-normal);
     color: var(--color-text-secondary);
 }
+
+
+/* BUG 3: a partial model stream is visible but is never presented as a
+   successful saved answer. Keep the notice quiet and actionable. */
+.stream-interrupted-notice {
+    margin-top: 10px;
+    padding: 8px 10px;
+    border-top: 1px solid var(--border-subtle, #e5e7eb);
+    color: var(--text-muted, #6b7280);
+    font-size: 0.82rem;
+    line-height: 1.35;
+}

@@ -3124,6 +3124,8 @@ window.sendMessage = async function() {
         let replyText = "";
         let researchPayload = null;
         let streamFailed = false;
+        let streamInterruptionCode = null;
+        let streamInterruptionFinishReason = null;
         let sawTerminal = false;
 
         // The live streaming bubble. Created on the first delta so a stream
@@ -3214,7 +3216,13 @@ window.sendMessage = async function() {
                 } else if (event.type === "error") {
                     sawTerminal = true;
                     streamFailed = true;
+                    streamInterruptionCode = event.error_code || "stream_error";
+                    streamInterruptionFinishReason = event.finish_reason || null;
                     replyText = event.reply || "No response received.";
+                    if (replyText) {
+                        ensureStreamBubble();
+                        schedulePaint();
+                    }
                 }
             },
             (badLine) => {
@@ -3252,11 +3260,15 @@ window.sendMessage = async function() {
         }
         if (chatBox.contains(loadingDiv)) chatBox.removeChild(loadingDiv);
 
-        if (!sawTerminal && !replyText) {
-            // Connection closed without any terminal event AND without any
-            // text - treat as a failure rather than saving an empty reply.
-            replyText = "The connection was interrupted before Kognit could answer. Please try again.";
+        if (!sawTerminal) {
+            // Connection closed without the backend's explicit terminal
+            // event. This is never a successful completion, even if some
+            // text arrived before the connection died.
             streamFailed = true;
+            streamInterruptionCode = "missing_terminal_event";
+            if (!replyText) {
+                replyText = "The connection was interrupted before Kognit could answer. Please try again.";
+            }
         }
 
         // The provisional streaming bubble is replaced by a real message
@@ -3303,8 +3315,20 @@ window.sendMessage = async function() {
                 research: data.research || null,
                 takeaway: takeawayText
             });
-            chatBox.appendChild(botDiv);
 
+            if (streamFailed && replyText) {
+                const notice = document.createElement("div");
+                notice.className = "stream-interrupted-notice";
+                notice.textContent = "Generation was interrupted. This partial answer was not saved. Try again.";
+                if (streamInterruptionFinishReason) {
+                    notice.title = `Finish reason: ${streamInterruptionFinishReason}`;
+                } else if (streamInterruptionCode) {
+                    notice.title = `Stream status: ${streamInterruptionCode}`;
+                }
+                botDiv.appendChild(notice);
+            }
+
+            chatBox.appendChild(botDiv);
             typesetMathJax([botDiv]);
         }
         // If the user switched chats before the response arrived, it's

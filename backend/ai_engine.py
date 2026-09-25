@@ -218,6 +218,9 @@ MAX_PDF_CONTEXT_CHARS = 300_000
 #     quiz-generation latency numbers.
 # ---------------------------------------------------------------------------
 CHAT_THINKING_LEVEL = types.ThinkingLevel.LOW
+# Complex academic tasks get a measured step up in reasoning effort without
+# adding another model call. The default remains LOW for latency-critical chat.
+COMPLEX_CHAT_THINKING_LEVEL = types.ThinkingLevel.MEDIUM
 TITLE_THINKING_LEVEL = types.ThinkingLevel.LOW
 QUIZ_THINKING_LEVEL = None
 
@@ -384,6 +387,41 @@ _KOGNIT_ROLE_TO_GEMINI_ROLE = {"user": "user", "bot": "model"}
 def _seconds_to_ms(seconds: float) -> int:
     """google-genai's HttpOptions.timeout is documented in milliseconds."""
     return int(seconds * 1000)
+
+def _select_chat_thinking_level(
+    prompt: str,
+    mode: str,
+    image_bytes: Optional[bytes],
+    pdf_context: str,
+    enable_research: bool = False,
+):
+    """Select reasoning effort without an extra classifier LLM call.
+
+    Simple conversational requests stay on LOW for fast first output. Clearly
+    multi-step academic/reasoning requests use MEDIUM. This is intentionally a
+    conservative heuristic: it is a policy layer, not a second AI call, and
+    can be replaced by benchmark-driven routing later.
+    """
+    text = (prompt or "").strip().lower()
+    complexity_markers = (
+        "solve", "calculate", "derive", "prove", "evaluate", "analyze",
+        "compare", "explain why", "step by step", "equation", "quadratic",
+        "integral", "derivative", "probability", "force", "velocity",
+        "stoichiometry", "reaction", "genetics",
+        "সমাধান", "প্রমাণ কর", "নির্ণয় কর", "হিসাব কর", "ব্যাখ্যা কর",
+        "কেন", "ধাপে ধাপে", "সমীকরণ", "অনুপাত", "সম্ভাবনা",
+    )
+    long_or_structured = len(text) >= 450 or text.count("\n") >= 4
+    if (
+        any(marker in text for marker in complexity_markers)
+        or long_or_structured
+        or mode == "socratic"
+        or bool(image_bytes)
+        or bool(pdf_context)
+        or enable_research
+    ):
+        return COMPLEX_CHAT_THINKING_LEVEL
+    return CHAT_THINKING_LEVEL
 
 
 def _build_gemini_history(history: list) -> list:
@@ -673,7 +711,11 @@ def generate_ai_response(
         # key at all, so this change cannot affect any existing request.
         config_kwargs = dict(
             system_instruction=system_instruction,
-            thinking_config=types.ThinkingConfig(thinking_level=CHAT_THINKING_LEVEL),
+            thinking_config=types.ThinkingConfig(
+                thinking_level=_select_chat_thinking_level(
+                    prompt, mode, image_bytes, pdf_context, enable_research
+                )
+            ),
             http_options=types.HttpOptions(timeout=_seconds_to_ms(attempt_timeout)),
         )
         if enable_research:
@@ -1145,24 +1187,71 @@ def generate_chat_title(history: list, board: str = "NCTB") -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
+
 @dataclass
 class StreamChunk:
     """One event from stream_ai_response().
 
     kind:
-      "text"  - an incremental piece of the answer. `text` is the delta only.
-      "done"  - terminal success. `text` is the FULL final answer;
-                grounding_metadata carries research metadata (or None).
-      "error" - terminal failure. `text` is the student-facing message.
+      "text" - an incremental piece of the answer.
+      "done" - terminal success. text is the FULL final answer.
+      "error" - terminal failure. text is the student-facing message.
+      "interrupted" - terminal failure after partial output. text contains the
+        partial answer so the UI can show what actually arrived, but it must
+        NOT be persisted as a successful assistant message.
 
-    Exactly one terminal event ("done" or "error") is always emitted, so a
-    consumer can never be left waiting forever.
+    A successful stream requires an explicit provider STOP finish reason.
+    Closing the iterator without a successful finish reason is never treated
+    as success.
     """
     kind: str
     text: str = ""
     grounding_metadata: Optional[object] = None
     usage_metadata: Optional[object] = None
     elapsed_seconds: Optional[float] = None
+    attempt: int = 1
+    finish_reason: Optional[str] = None
+    error_code: Optional[str] = None
+    ttft_seconds: Optional[float] = None
+
+
+def _stream_finish_reason(response) -> Optional[str]:
+    """Return the first candidate finish reason in a stable string form."""
+    candidates = getattr(response, "candidates", None) or []
+    for candidate in candidates:
+        reason = getattr(candidate, "finish_reason", None)
+        if reason is None:
+            continue
+        name = getattr(reason, "name", None)
+        if name:
+            return str(name).upper()
+        value = getattr(reason, "value", None)
+        if value is not None:
+            return str(value).upper()
+        return str(reason).upper()
+    return None
+
+
+def _stream_is_stop_finish(reason: Optional[str]) -> bool:
+    if not reason:
+        return False
+    normalized = reason.upper()
+    return normalized == "STOP" or normalized.endswith(".STOP")
+
+
+def _stream_retryable_provider_error(exc: Exception) -> bool:
+    """Only fast, pre-output transient provider failures are retryable.
+
+    Client-side read/connect timeouts are intentionally excluded. Retrying a
+    30-second stalled stream can multiply latency without evidence that the
+    second generation will succeed.
+    """
+    if isinstance(exc, genai_errors.ServerError):
+        code = getattr(exc, "code", None)
+        return isinstance(code, int) and 500 <= code < 600
+    if isinstance(exc, genai_errors.ClientError):
+        return getattr(exc, "code", None) in TRANSIENT_RETRYABLE_CLIENT_HTTP_CODES
+    return False
 
 
 def stream_ai_response(
@@ -1176,27 +1265,19 @@ def stream_ai_response(
     history: list = None,
     enable_research: bool = False,
 ):
-    """Streaming counterpart of generate_ai_response().
+    """Native Gemini streaming adapter with explicit completion semantics.
 
-    Yields StreamChunk events. Uses the SAME _build_chat_request() core as the
-    non-streaming path, so the prompt, system instruction, PDF truncation,
-    image handling and history are identical - a streamed answer is the same
-    answer, delivered incrementally.
+    The provider stream is passed through incrementally. Kognit never waits
+    for a complete answer and never simulates typing in the browser.
 
-    RETRY POLICY (deliberately different from the non-streaming path, and the
-    key architectural constraint of this phase):
-
-        Retries are only safe BEFORE the first byte reaches the student.
-
-    Once any text has been yielded, the student is already reading a partial
-    answer; restarting would either duplicate content or silently replace what
-    they are mid-sentence on. So a failure after first output is finalized with
-    whatever was genuinely produced rather than retried. A failure before first
-    output retries exactly like generate_ai_response does.
-
-    Never raises to the caller - every failure path yields a terminal "error"
-    (or a "done" salvaging partial text) instead, so the HTTP layer always has
-    something well-formed to send.
+    Critical reliability rules:
+      1. Retry only before the first text delta.
+      2. Only fast transient provider 5xx/409 failures are retryable.
+      3. Client-side timeouts are not retried.
+      4. Once text has been emitted, never start a second generation.
+      5. Iterator exhaustion is not success unless Gemini supplied STOP.
+      6. Non-STOP finish reasons are terminal interruptions, not successful
+         assistant messages.
     """
     try:
         req = _build_chat_request(
@@ -1210,14 +1291,20 @@ def stream_ai_response(
             history=history,
         )
     except _ChatRequestBuildError as exc:
-        yield StreamChunk(kind="error", text=exc.message)
+        yield StreamChunk(kind="error", text=exc.message, error_code="request_build")
         return
 
-    for attempt in range(1, MAX_ATTEMPTS + 1):
+    max_pre_output_attempts = 2
+
+    for attempt in range(1, max_pre_output_attempts + 1):
         t_attempt_start = time.perf_counter()
-        attempt_timeout = (
-            AI_REQUEST_TIMEOUT_SECONDS if attempt == 1 else RETRY_REQUEST_TIMEOUT_SECONDS
-        )
+        attempt_timeout = AI_REQUEST_TIMEOUT_SECONDS
+        produced_any_text = False
+        collected = []
+        grounding_metadata = None
+        usage_metadata = None
+        finish_reason = None
+        ttft_seconds = None
 
         config_kwargs = dict(
             system_instruction=req.system_instruction,
@@ -1228,11 +1315,6 @@ def stream_ai_response(
             config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
         config = types.GenerateContentConfig(**config_kwargs)
 
-        produced_any_text = False
-        collected = []
-        grounding_metadata = None
-        usage_metadata = None
-
         try:
             chat_session = _client.chats.create(
                 model=MODEL_NAME,
@@ -1241,21 +1323,32 @@ def stream_ai_response(
             )
 
             for response in chat_session.send_message_stream(req.contents):
-                # Defensive on every field: a chunk may legitimately carry no
-                # text (e.g. a tool-use or metadata-only chunk). Those are not
-                # errors and must not terminate the stream.
                 piece = getattr(response, "text", None)
                 if piece:
                     produced_any_text = True
                     collected.append(piece)
-                    yield StreamChunk(kind="text", text=piece)
+                    if ttft_seconds is None:
+                        ttft_seconds = time.perf_counter() - t_attempt_start
+                        logger.info(
+                            "stream_ai_response first_token attempt=%d ttft=%.3fs "
+                            "(mode=%s, has_image=%s, has_pdf=%s)",
+                            attempt, ttft_seconds, mode, bool(image_bytes), bool(pdf_context),
+                        )
+                    yield StreamChunk(
+                        kind="text",
+                        text=piece,
+                        attempt=attempt,
+                        ttft_seconds=ttft_seconds,
+                    )
+
+                candidate_reason = _stream_finish_reason(response)
+                if candidate_reason:
+                    finish_reason = candidate_reason
 
                 if enable_research:
                     candidates = getattr(response, "candidates", None) or []
                     if candidates:
                         gm = getattr(candidates[0], "grounding_metadata", None)
-                        # Grounding metadata typically arrives on a later
-                        # chunk; keep the most recent non-None one.
                         if gm is not None:
                             grounding_metadata = gm
 
@@ -1266,82 +1359,141 @@ def stream_ai_response(
             final_text = "".join(collected)
 
             if not final_text:
-                # Same meaning as the non-streaming path's empty .text: almost
-                # always a safety-filter block. Not retried - an identical
-                # request would be blocked again.
                 logger.warning(
-                    "stream_ai_response got a blocked/empty stream attempt=%d/%d elapsed=%.3fs "
-                    "(mode=%s, board=%s, user_class=%s)",
-                    attempt, MAX_ATTEMPTS, elapsed, mode, board, user_class
+                    "stream_ai_response empty stream attempt=%d/%d elapsed=%.3fs "
+                    "finish_reason=%s (mode=%s)",
+                    attempt, max_pre_output_attempts, elapsed, finish_reason, mode,
                 )
-                yield StreamChunk(kind="error", text=BLOCKED_RESPONSE_ERROR)
+                yield StreamChunk(
+                    kind="error",
+                    text=BLOCKED_RESPONSE_ERROR,
+                    elapsed_seconds=elapsed,
+                    attempt=attempt,
+                    finish_reason=finish_reason,
+                    error_code="empty_response",
+                    ttft_seconds=ttft_seconds,
+                )
                 return
 
-            _log_usage(usage_metadata, attempt, elapsed, mode, bool(image_bytes), bool(pdf_context))
+            if not _stream_is_stop_finish(finish_reason):
+                logger.warning(
+                    "stream_ai_response non-successful completion attempt=%d/%d "
+                    "elapsed=%.3fs finish_reason=%s produced_chars=%d (mode=%s)",
+                    attempt, max_pre_output_attempts, elapsed, finish_reason,
+                    len(final_text), mode,
+                )
+                yield StreamChunk(
+                    kind="interrupted",
+                    text=final_text,
+                    grounding_metadata=grounding_metadata,
+                    usage_metadata=usage_metadata,
+                    elapsed_seconds=elapsed,
+                    attempt=attempt,
+                    finish_reason=finish_reason,
+                    error_code="non_stop_finish",
+                    ttft_seconds=ttft_seconds,
+                )
+                return
+
+            _log_usage(
+                usage_metadata,
+                attempt,
+                elapsed,
+                mode,
+                bool(image_bytes),
+                bool(pdf_context),
+            )
             yield StreamChunk(
                 kind="done",
                 text=final_text,
                 grounding_metadata=grounding_metadata,
                 usage_metadata=usage_metadata,
                 elapsed_seconds=elapsed,
+                attempt=attempt,
+                finish_reason=finish_reason,
+                ttft_seconds=ttft_seconds,
             )
             return
 
-        except genai_errors.ClientError as e:
+        except Exception as exc:
             elapsed = time.perf_counter() - t_attempt_start
+
             if produced_any_text:
                 logger.exception(
-                    "stream_ai_response client error AFTER first output - finalizing partial "
-                    "answer attempt=%d elapsed=%.3fs (mode=%s)", attempt, elapsed, mode
+                    "stream_ai_response interrupted AFTER first output attempt=%d "
+                    "elapsed=%.3fs error_type=%s (mode=%s)",
+                    attempt, elapsed, type(exc).__name__, mode,
                 )
+                error_code = "provider_error" if isinstance(
+                    exc, (genai_errors.ClientError, genai_errors.ServerError)
+                ) else "stream_exception"
                 yield StreamChunk(
-                    kind="done",
+                    kind="interrupted",
                     text="".join(collected),
                     grounding_metadata=grounding_metadata,
                     usage_metadata=usage_metadata,
                     elapsed_seconds=elapsed,
+                    attempt=attempt,
+                    error_code=error_code,
+                    ttft_seconds=ttft_seconds,
                 )
                 return
-            if getattr(e, "code", None) == 429:
+
+            if _stream_retryable_provider_error(exc) and attempt < max_pre_output_attempts:
+                retry_delay = random.uniform(
+                    RETRY_DELAY_BASE_SECONDS - RETRY_DELAY_JITTER_SECONDS,
+                    RETRY_DELAY_BASE_SECONDS + RETRY_DELAY_JITTER_SECONDS,
+                )
+                logger.warning(
+                    "stream_ai_response pre-output transient failure attempt=%d/%d "
+                    "elapsed=%.3fs error_type=%s code=%s - retrying in %.2fs",
+                    attempt, max_pre_output_attempts, elapsed, type(exc).__name__,
+                    getattr(exc, "code", None), retry_delay,
+                )
+                time.sleep(retry_delay)
+                continue
+
+            if isinstance(exc, genai_errors.ClientError) and getattr(exc, "code", None) == 429:
                 logger.exception(
                     "stream_ai_response quota exhausted attempt=%d elapsed=%.3fs (mode=%s)",
-                    attempt, elapsed, mode
-                )
-                yield StreamChunk(kind="error", text=QUOTA_EXHAUSTED_ERROR)
-                return
-            logger.exception(
-                "stream_ai_response client error attempt=%d/%d elapsed=%.3fs (mode=%s)",
-                attempt, MAX_ATTEMPTS, elapsed, mode
-            )
-            if attempt >= MAX_ATTEMPTS_BUCKET_A:
-                yield StreamChunk(kind="error", text=GENERIC_CHAT_ERROR)
-                return
-            continue
-
-        except Exception:
-            elapsed = time.perf_counter() - t_attempt_start
-            if produced_any_text:
-                # Network drop / timeout mid-answer. The student keeps what
-                # actually arrived rather than losing the whole response.
-                logger.exception(
-                    "stream_ai_response failed AFTER first output - finalizing partial answer "
-                    "attempt=%d elapsed=%.3fs (mode=%s)", attempt, elapsed, mode
+                    attempt, elapsed, mode,
                 )
                 yield StreamChunk(
-                    kind="done",
-                    text="".join(collected),
-                    grounding_metadata=grounding_metadata,
-                    usage_metadata=usage_metadata,
+                    kind="error",
+                    text=QUOTA_EXHAUSTED_ERROR,
                     elapsed_seconds=elapsed,
+                    attempt=attempt,
+                    error_code="quota",
+                    ttft_seconds=ttft_seconds,
                 )
                 return
-            logger.exception(
-                "stream_ai_response failed attempt=%d/%d elapsed=%.3fs (mode=%s)",
-                attempt, MAX_ATTEMPTS, elapsed, mode
-            )
-            if attempt >= MAX_ATTEMPTS:
-                yield StreamChunk(kind="error", text=GENERIC_CHAT_ERROR)
-                return
-            continue
 
-    yield StreamChunk(kind="error", text=GENERIC_CHAT_ERROR)
+            error_code = (
+                "provider_server_error"
+                if isinstance(exc, genai_errors.ServerError)
+                else "client_timeout"
+                if isinstance(exc, httpx.TimeoutException)
+                else "connect_error"
+                if isinstance(exc, httpx.ConnectError)
+                else "provider_client_error"
+                if isinstance(exc, genai_errors.ClientError)
+                else "stream_exception"
+            )
+            logger.exception(
+                "stream_ai_response failed BEFORE first output attempt=%d/%d "
+                "elapsed=%.3fs error_type=%s code=%s (mode=%s)",
+                attempt, max_pre_output_attempts, elapsed, type(exc).__name__,
+                getattr(exc, "code", None), mode,
+            )
+            yield StreamChunk(
+                kind="error",
+                text=GENERIC_CHAT_ERROR,
+                elapsed_seconds=elapsed,
+                attempt=attempt,
+                error_code=error_code,
+                ttft_seconds=ttft_seconds,
+            )
+            return
+
+    yield StreamChunk(kind="error", text=GENERIC_CHAT_ERROR, error_code="retry_exhausted")
+

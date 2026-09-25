@@ -1054,6 +1054,10 @@ async def chat_stream_endpoint(
 
         final_text = ""
         grounding_metadata = None
+        stream_ttft_seconds = None
+        stream_elapsed_seconds = None
+        stream_finish_reason = None
+        stream_attempt = 1
         terminal_sent = False
 
         try:
@@ -1077,13 +1081,47 @@ async def chat_stream_endpoint(
 
             async for chunk in iterate_in_threadpool(gen):
                 if chunk.kind == "text":
-                    yield _line({"type": "delta", "text": chunk.text})
+                    yield _line({
+                        "type": "delta",
+                        "text": chunk.text,
+                        "attempt": chunk.attempt,
+                        "ttft_seconds": chunk.ttft_seconds,
+                    })
                 elif chunk.kind == "done":
                     final_text = chunk.text
                     grounding_metadata = chunk.grounding_metadata
+                    stream_ttft_seconds = chunk.ttft_seconds
+                    stream_elapsed_seconds = chunk.elapsed_seconds
+                    stream_finish_reason = chunk.finish_reason
+                    stream_attempt = chunk.attempt
+                elif chunk.kind == "interrupted":
+                    # Partial output is visible to the student, but it is NOT
+                    # a successful assistant message. The frontend receives
+                    # the partial text so it can show what actually arrived
+                    # plus an interruption state and offer Regenerate.
+                    terminal_sent = True
+                    yield _line({
+                        "type": "error",
+                        "reply": chunk.text,
+                        "partial": bool(chunk.text),
+                        "error_code": chunk.error_code or "stream_interrupted",
+                        "finish_reason": chunk.finish_reason,
+                        "attempt": chunk.attempt,
+                        "ttft_seconds": chunk.ttft_seconds,
+                        "elapsed_seconds": chunk.elapsed_seconds,
+                    })
+                    return
                 elif chunk.kind == "error":
                     terminal_sent = True
-                    yield _line({"type": "error", "reply": chunk.text})
+                    yield _line({
+                        "type": "error",
+                        "reply": chunk.text,
+                        "partial": False,
+                        "error_code": chunk.error_code,
+                        "attempt": chunk.attempt,
+                        "ttft_seconds": chunk.ttft_seconds,
+                        "elapsed_seconds": chunk.elapsed_seconds,
+                    })
                     return
 
             if not final_text:
@@ -1132,19 +1170,28 @@ async def chat_stream_endpoint(
             )
 
             terminal_sent = True
-            yield _line({"type": "done", "reply": final_text, "research": research_payload})
+            yield _line({
+                "type": "done",
+                "reply": final_text,
+                "research": research_payload,
+                "attempt": stream_attempt,
+                "ttft_seconds": stream_ttft_seconds,
+                "elapsed_seconds": stream_elapsed_seconds,
+                "finish_reason": stream_finish_reason,
+            })
 
         except Exception:
             logger.exception("chat_stream_endpoint: unexpected failure mid-stream")
             if not terminal_sent:
-                # The client must never be left waiting on a stream that
-                # stopped producing. If partial text was already delivered,
-                # finalize with it rather than discarding what the student
-                # can already see.
-                if final_text:
-                    yield _line({"type": "done", "reply": final_text, "research": None})
-                else:
-                    yield _line({"type": "error", "reply": GENERIC_CHAT_ERROR})
+                # A server-side exception is never a successful completion.
+                # The client must receive an explicit terminal error instead
+                # of treating whatever text happened to arrive as complete.
+                yield _line({
+                    "type": "error",
+                    "reply": final_text if final_text else GENERIC_CHAT_ERROR,
+                    "partial": bool(final_text),
+                    "error_code": "endpoint_exception",
+                })
 
     return StreamingResponse(
         event_stream(),
