@@ -309,6 +309,37 @@
         return { answer: answer, takeaway: takeawayText };
     }
 
+    /* --------------------------------------------------------
+       isCompletedAnswer — BUG 3 FIX (frontend completion-integrity)
+       --------------------------------------------------------
+       The confirmed frontend bug: the old check was
+       `if (!sawTerminal && !replyText)`, which only flagged a
+       dropped connection when NO text had arrived. If even one
+       delta had already landed - the common case, since a drop
+       happens mid-answer, not before the first token - the partial
+       buffer was silently saved and rendered as a normal completed
+       answer, no error, no indication anything was wrong.
+
+       This function is the single source of truth for "was this
+       stream ACTUALLY a success", pulled out on its own so it can
+       be unit-tested directly (see tests_frontend/test_stream_render.mjs)
+       rather than re-verified only by exercising the full sendMessage()
+       flow in a browser.
+
+       Truth table (matches the Bug 3 spec exactly):
+         sawTerminal=false, any text            -> NOT completed (interrupted)
+         sawTerminal=false, no text              -> NOT completed (interrupted)
+         sawTerminal=true,  terminalType="interrupted" -> NOT completed
+         sawTerminal=true,  terminalType="error"       -> NOT completed
+         sawTerminal=true,  terminalType="done"        -> completed
+
+       Only an explicit successful "done" terminal event may ever mark an
+       answer complete. Never inferred from the mere presence of text.
+       -------------------------------------------------------- */
+    function isCompletedAnswer(sawTerminal, terminalType) {
+        return sawTerminal === true && terminalType === "done";
+    }
+
     window.KognitStream = {
         LOADING_COPY: LOADING_COPY,
         loadingCopyFor: loadingCopyFor,
@@ -316,6 +347,7 @@
         splitForRender: splitForRender,
         hasCompleteMath: hasCompleteMath,
         createNdjsonParser: createNdjsonParser,
-        extractTakeaway: extractTakeaway
+        extractTakeaway: extractTakeaway,
+        isCompletedAnswer: isCompletedAnswer
     };
 })();

@@ -992,11 +992,22 @@ async def chat_endpoint(
 #     collide with.
 #
 # EVENT CONTRACT (one JSON object per line):
-#   {"type":"start",    "context":"thinking"|"research"|"document"|"document_web"}
-#   {"type":"delta",    "text":"<incremental piece>"}
-#   {"type":"done",     "reply":"<full final answer>", "research":{...}|null}
-#   {"type":"error",    "reply":"<student-facing message>"}
-# Exactly one terminal event (done|error) is always sent.
+#   {"type":"start",       "context":"thinking"|"research"|"document"|"document_web"}
+#   {"type":"delta",       "text":"<incremental piece>"}
+#   {"type":"done",        "reply":"<full final answer>", "research":{...}|null}
+#   {"type":"interrupted", "reply":"<whatever was genuinely generated, may be partial>"}
+#   {"type":"error",       "reply":"<student-facing message>"}
+# Exactly one terminal event (done|interrupted|error) is always sent.
+#
+# BUG 3 (completion-integrity) FIX: "done" now means ONLY a verified, clean
+# successful completion (see stream_ai_response's _is_successful_finish() in
+# ai_engine.py). "interrupted" is a NEW, additive event type - a consumer
+# that has never seen a "start"/"delta"/"done"/"error" convention change
+# still degrades safely (it simply won't recognize "interrupted" as a
+# terminal, same as any unrecognized type), but this codebase's own
+# frontend (static/js/app.js) is updated in the same change to treat
+# "interrupted" as terminal and non-successful. Only an explicit "done"
+# may ever cause an answer to be treated/saved as complete.
 
 @app.post("/api/chat/stream")
 async def chat_stream_endpoint(
@@ -1081,6 +1092,16 @@ async def chat_stream_endpoint(
                 elif chunk.kind == "done":
                     final_text = chunk.text
                     grounding_metadata = chunk.grounding_metadata
+                elif chunk.kind == "interrupted":
+                    # BUG 3 FIX: a genuinely partial/non-success stream. This
+                    # must NEVER be forwarded as "done" - see the event
+                    # contract comment above. Whatever text was actually
+                    # produced is still sent (the student already saw it
+                    # stream in), but tagged so the frontend cannot mistake
+                    # it for a completed answer.
+                    terminal_sent = True
+                    yield _line({"type": "interrupted", "reply": chunk.text})
+                    return
                 elif chunk.kind == "error":
                     terminal_sent = True
                     yield _line({"type": "error", "reply": chunk.text})

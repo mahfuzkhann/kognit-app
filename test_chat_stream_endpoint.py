@@ -11,6 +11,7 @@ No network: the Gemini SDK client is monkeypatched throughout.
 import json
 import pytest
 from fastapi.testclient import TestClient
+from google.genai import types
 
 import backend.ai_engine as ai_engine
 import backend.main as main
@@ -21,11 +22,15 @@ import backend.main as main
 # ---------------------------------------------------------------------------
 
 class _FakeChunk:
-    def __init__(self, text=None, grounding=None, usage=None):
+    def __init__(self, text=None, grounding=None, usage=None, finish_reason=None):
         self.text = text
         self.usage_metadata = usage
-        if grounding is not None:
-            cand = type("C", (), {"grounding_metadata": grounding})()
+        if grounding is not None or finish_reason is not None:
+            cand = type(
+                "C", (),
+                {"grounding_metadata": grounding, "finish_reason": finish_reason,
+                 "finish_message": None},
+            )()
             self.candidates = [cand]
         else:
             self.candidates = []
@@ -90,17 +95,27 @@ class TestStreamAdapter:
         assert out[-1].kind == "done"
         assert out[-1].text == "real text"
 
-    def test_failure_AFTER_first_output_salvages_partial_answer(self, monkeypatch):
-        # The critical streaming rule: never discard text the student can
-        # already see, and never retry once bytes have shipped.
+    def test_failure_AFTER_first_output_finalizes_as_interrupted_not_done(self, monkeypatch):
+        # BUG 3 FIX: never discard text the student can already see, and
+        # never retry once bytes have shipped - but a mid-stream exception
+        # is NOT a successful completion, so it must be "interrupted", never
+        # "done". (Before the Bug 3 fix this asserted kind == "done", which
+        # was the exact defect: a genuine failure and a real success were
+        # wire-identical.)
         _install_fake_stream(
             monkeypatch,
             [_FakeChunk("partial answer so far")],
             raise_after=1,
         )
         out = list(ai_engine.stream_ai_response(prompt="hi"))
-        assert out[-1].kind == "done", "must finalize, not error, after partial output"
-        assert out[-1].text == "partial answer so far"
+        assert out[-1].kind == "interrupted", "a mid-stream exception must never be reported as done"
+        assert out[-1].text == "partial answer so far", "the genuinely-produced text must still be preserved"
+
+    def test_exactly_one_terminal_event_when_interrupted(self, monkeypatch):
+        _install_fake_stream(monkeypatch, [_FakeChunk("partial")], raise_after=1)
+        out = list(ai_engine.stream_ai_response(prompt="hi"))
+        terminal = [c for c in out if c.kind in ("done", "interrupted", "error")]
+        assert len(terminal) == 1, "a consumer must never be left waiting, even when interrupted"
 
     def test_failure_BEFORE_first_output_retries_then_errors(self, monkeypatch):
         attempts = {"n": 0}
@@ -133,6 +148,91 @@ class TestStreamAdapter:
         _install_fake_stream(monkeypatch, [_FakeChunk("answer", grounding=object())])
         out = list(ai_engine.stream_ai_response(prompt="hi", enable_research=False))
         assert out[-1].grounding_metadata is None
+
+
+class TestStreamCompletionIntegrity:
+    """
+    BUG 3 FIX - the explicit completion rule. A stream with non-empty text
+    and NO exception must still be classified as interrupted, not done,
+    whenever the last observed finish_reason is not STOP. These enum
+    members were read directly off the installed google-genai==2.20.0
+    package (see FinishReason in google.genai.types) - not guessed.
+    """
+
+    def test_clean_stop_finish_reason_is_success(self, monkeypatch):
+        _install_fake_stream(
+            monkeypatch,
+            [_FakeChunk("A complete answer.", finish_reason=types.FinishReason.STOP)],
+        )
+        out = list(ai_engine.stream_ai_response(prompt="hi"))
+        assert out[-1].kind == "done"
+        assert out[-1].text == "A complete answer."
+
+    def test_max_tokens_finish_reason_is_interrupted_not_done(self, monkeypatch):
+        # The core Bug 3 scenario: the SDK iterator exits with NO exception
+        # at all, but the model's own output cap truncated the answer.
+        # Before this fix, non-empty text always meant "done" - finish_reason
+        # was never even read - so this exact case was silently invisible.
+        _install_fake_stream(
+            monkeypatch,
+            [_FakeChunk("An answer that got cut off ha", finish_reason=types.FinishReason.MAX_TOKENS)],
+        )
+        out = list(ai_engine.stream_ai_response(prompt="hi"))
+        assert out[-1].kind == "interrupted", "MAX_TOKENS must never be reported as a clean done"
+        assert out[-1].text == "An answer that got cut off ha", "the partial text must still be preserved"
+
+    def test_safety_finish_reason_is_interrupted_not_done(self, monkeypatch):
+        _install_fake_stream(
+            monkeypatch,
+            [_FakeChunk("Some text before a safety stop", finish_reason=types.FinishReason.SAFETY)],
+        )
+        out = list(ai_engine.stream_ai_response(prompt="hi"))
+        assert out[-1].kind == "interrupted"
+
+    def test_recitation_finish_reason_is_interrupted_not_done(self, monkeypatch):
+        _install_fake_stream(
+            monkeypatch,
+            [_FakeChunk("Some quoted text", finish_reason=types.FinishReason.RECITATION)],
+        )
+        out = list(ai_engine.stream_ai_response(prompt="hi"))
+        assert out[-1].kind == "interrupted"
+
+    def test_unrecognized_other_finish_reason_is_interrupted_not_done(self, monkeypatch):
+        _install_fake_stream(
+            monkeypatch,
+            [_FakeChunk("Some text", finish_reason=types.FinishReason.OTHER)],
+        )
+        out = list(ai_engine.stream_ai_response(prompt="hi"))
+        assert out[-1].kind == "interrupted", "any non-STOP reason must default to interrupted, not done"
+
+    def test_finish_reason_never_observed_on_any_chunk_defaults_to_success(self, monkeypatch):
+        # Deliberate, documented conservative default (see
+        # _is_successful_finish()'s docstring in ai_engine.py): when the
+        # iterator completes cleanly and NO chunk ever carried a
+        # finish_reason at all, this is treated as success rather than
+        # interrupted, to avoid mislabeling ordinary answers as broken in
+        # an SDK/model combination this sandbox could not verify against
+        # live Gemini. REQUIRES LIVE GEMINI VALIDATION - see the Bug 3
+        # report.
+        _install_fake_stream(monkeypatch, [_FakeChunk("A normal answer with no finish_reason at all")])
+        out = list(ai_engine.stream_ai_response(prompt="hi"))
+        assert out[-1].kind == "done"
+
+    def test_intermediate_none_finish_reason_does_not_erase_a_later_real_value(self, monkeypatch):
+        # Matches the installed SDK's own internal pattern (google.genai
+        # chats.py keeps the most recent non-None finish_reason across
+        # chunks) - an early chunk with no finish_reason must not hide a
+        # later, real one.
+        _install_fake_stream(
+            monkeypatch,
+            [
+                _FakeChunk("first "),
+                _FakeChunk("part", finish_reason=None),
+                _FakeChunk("", finish_reason=types.FinishReason.MAX_TOKENS),
+            ],
+        )
+        out = list(ai_engine.stream_ai_response(prompt="hi"))
+        assert out[-1].kind == "interrupted"
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +358,34 @@ class TestStreamEndpoint:
         events = _parse_ndjson(r.text)
         assert events[-1]["type"] == "error"
         assert isinstance(events[-1]["reply"], str) and events[-1]["reply"]
+
+    def test_interrupted_stream_emits_interrupted_event_not_done(self, client, monkeypatch):
+        # BUG 3 FIX, end-to-end through the real HTTP endpoint: a mid-stream
+        # exception after partial output must reach the client as
+        # "interrupted", never "done".
+        _install_fake_stream(monkeypatch, [_FakeChunk("partial answer")], raise_after=1)
+        r = client.post("/api/chat/stream", data={"prompt": "q", "chat_id": "c1"})
+        events = _parse_ndjson(r.text)
+        assert events[-1]["type"] == "interrupted"
+        assert events[-1]["reply"] == "partial answer"
+        assert not any(e["type"] == "done" for e in events), "must never also emit a done event"
+
+    def test_max_tokens_over_http_emits_interrupted_not_done(self, client, monkeypatch):
+        _install_fake_stream(
+            monkeypatch,
+            [_FakeChunk("truncated answer", finish_reason=types.FinishReason.MAX_TOKENS)],
+        )
+        r = client.post("/api/chat/stream", data={"prompt": "q", "chat_id": "c1"})
+        events = _parse_ndjson(r.text)
+        assert events[-1]["type"] == "interrupted"
+        assert events[-1]["reply"] == "truncated answer"
+
+    def test_exactly_one_terminal_event_when_interrupted_over_http(self, client, monkeypatch):
+        _install_fake_stream(monkeypatch, [_FakeChunk("x")], raise_after=1)
+        r = client.post("/api/chat/stream", data={"prompt": "q", "chat_id": "c1"})
+        events = _parse_ndjson(r.text)
+        terminal = [e for e in events if e["type"] in ("done", "interrupted", "error")]
+        assert len(terminal) == 1
 
     def test_oversized_image_rejected_with_413(self, client, monkeypatch):
         big = b"0" * (main.MAX_IMAGE_UPLOAD_SIZE_BYTES + 1024)

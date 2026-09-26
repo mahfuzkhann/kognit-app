@@ -434,6 +434,82 @@ def _log_usage(usage, attempt: int, elapsed: float, mode: str, image: bool, pdf:
     )
 
 
+def _is_successful_finish(finish_reason) -> bool:
+    """
+    BUG 3 FIX - the explicit completion rule.
+
+    A streamed answer is only a genuine success if:
+      - the SDK's send_message_stream() iterator completed with NO
+        exception, AND
+      - the last finish_reason observed across all chunks is either
+        absent (None) or exactly types.FinishReason.STOP.
+
+    Any other observed value (MAX_TOKENS, SAFETY, RECITATION, LANGUAGE,
+    OTHER, BLOCKLIST, PROHIBITED_CONTENT, SPII, etc. - the full enum was
+    read directly off the installed google-genai==2.20.0 package, not
+    guessed) is explicitly non-success.
+
+    On `finish_reason is None`: verified directly against the installed
+    SDK's own chats.py (send_message_stream's internal history-recording
+    logic keeps the same "most recent non-None finish_reason across
+    chunks" pattern used here, and separately treats an all-None
+    finish_reason as evidence a turn may not be fully valid). Because this
+    sandbox cannot reach the live Gemini API, it was NOT possible to
+    verify whether gemini-3.6-flash's typical successful stream reliably
+    emits finish_reason=STOP on its final chunk, or sometimes completes
+    with it still unpopulated. Treating a never-observed finish_reason as
+    success (rather than as interrupted) is the deliberately conservative
+    choice here: it introduces ZERO regression versus the pre-fix
+    behavior (which never checked finish_reason at all), whereas the
+    opposite choice risks mislabeling ordinary successful answers as
+    interrupted if this SDK/model combination doesn't always populate it.
+    REQUIRES LIVE GEMINI VALIDATION - see the Bug 3 report.
+    """
+    return finish_reason is None or finish_reason == types.FinishReason.STOP
+
+
+def _log_stream_telemetry(
+    outcome: str,
+    mode: str,
+    attempt: int,
+    ttft_seconds,
+    chunk_count: int,
+    last_chunk_elapsed,
+    finish_reason,
+    exception_type,
+    http_status,
+    total_duration: float,
+    explicit_completion_received: bool,
+) -> None:
+    """
+    BUG 3 INSTRUMENTATION - exactly one structured summary line per
+    streaming request, emitted at the terminal point inside
+    stream_ai_response() (success, interrupted, or error). This is the
+    root-cause signal the investigation found completely missing before
+    this fix: finish_reason and exception_type were never captured
+    anywhere, so a MAX_TOKENS truncation and a genuine STOP were
+    indistinguishable from the logs, and a 503 vs. a plain RuntimeError
+    were both just "failed".
+
+    `outcome` is always one of a small fixed set of internal labels (see
+    call sites in stream_ai_response) - never raw provider error text.
+
+    NEVER pass prompt text, answer text, or any other student content
+    here - only the fields below.
+    """
+    logger.info(
+        "stream_telemetry outcome=%s mode=%s attempt=%d/%d model=%s ttft=%s "
+        "chunk_count=%d last_chunk_at=%s finish_reason=%s exception_type=%s "
+        "http_status=%s total_duration=%.3fs explicit_completion_received=%s",
+        outcome, mode, attempt, MAX_ATTEMPTS, MODEL_NAME,
+        ("%.3fs" % ttft_seconds) if ttft_seconds is not None else None,
+        chunk_count,
+        ("%.3fs" % last_chunk_elapsed) if last_chunk_elapsed is not None else None,
+        finish_reason, exception_type, http_status,
+        total_duration, explicit_completion_received,
+    )
+
+
 from dataclasses import dataclass
 
 
@@ -1150,13 +1226,36 @@ class StreamChunk:
     """One event from stream_ai_response().
 
     kind:
-      "text"  - an incremental piece of the answer. `text` is the delta only.
-      "done"  - terminal success. `text` is the FULL final answer;
-                grounding_metadata carries research metadata (or None).
-      "error" - terminal failure. `text` is the student-facing message.
+      "text"        - an incremental piece of the answer. `text` is the
+                      delta only.
+      "done"        - terminal SUCCESS ONLY. `text` is the FULL final
+                      answer; grounding_metadata carries research metadata
+                      (or None). Emitted ONLY when the SDK's stream
+                      iterator completed with no exception AND the last
+                      observed finish_reason is absent or exactly STOP -
+                      see _is_successful_finish() below (BUG 3 fix).
+      "interrupted" - terminal PARTIAL/NON-SUCCESS. `text` is whatever was
+                      genuinely generated before the stream stopped being
+                      trustworthy (exception after first output, or a
+                      clean exit with a non-STOP finish_reason such as
+                      MAX_TOKENS/SAFETY/RECITATION). The caller must NOT
+                      treat this as a completed answer - see main.py's
+                      event contract and app.js's completion check.
+      "error"       - terminal failure with NO usable answer text at all
+                      (blocked before any output, quota exhausted, or all
+                      retries exhausted before first output). `text` is a
+                      safe, student-facing message - never raw provider
+                      text.
 
-    Exactly one terminal event ("done" or "error") is always emitted, so a
-    consumer can never be left waiting forever.
+    Exactly one terminal event ("done", "interrupted", or "error") is
+    always emitted, so a consumer can never be left waiting forever.
+
+    BUG 3 (completion-integrity fix): before this fix, "done" was used for
+    every non-empty outcome, including a mid-stream exception salvage and
+    (unconditionally, since finish_reason was never even read) a clean but
+    truncated finish. That made a genuinely complete answer and a
+    truncated one wire-identical. "interrupted" now carries every case
+    that isn't a verified clean STOP.
     """
     kind: str
     text: str = ""
@@ -1184,20 +1283,37 @@ def stream_ai_response(
     answer, delivered incrementally.
 
     RETRY POLICY (deliberately different from the non-streaming path, and the
-    key architectural constraint of this phase):
+    key architectural constraint of this phase - UNCHANGED by the Bug 3 fix
+    below):
 
         Retries are only safe BEFORE the first byte reaches the student.
 
     Once any text has been yielded, the student is already reading a partial
     answer; restarting would either duplicate content or silently replace what
-    they are mid-sentence on. So a failure after first output is finalized with
-    whatever was genuinely produced rather than retried. A failure before first
-    output retries exactly like generate_ai_response does.
+    they are mid-sentence on. So a failure after first output is finalized
+    WITHOUT retry - but, per the Bug 3 completion-integrity fix, it is now
+    finalized as "interrupted", never as "done". A failure before first output
+    retries exactly like generate_ai_response does (same MAX_ATTEMPTS/
+    MAX_ATTEMPTS_BUCKET_A, same timeouts - none of that changed here).
 
-    Never raises to the caller - every failure path yields a terminal "error"
-    (or a "done" salvaging partial text) instead, so the HTTP layer always has
-    something well-formed to send.
+    COMPLETION INTEGRITY (Bug 3 fix - see _is_successful_finish() above):
+    "done" is now reserved exclusively for a stream that the SDK iterator
+    completed with no exception AND whose last observed finish_reason is
+    absent or exactly STOP. An exception after partial text, or a clean exit
+    whose last finish_reason is a non-STOP value (MAX_TOKENS/SAFETY/
+    RECITATION/etc, previously invisible - finish_reason was never read at
+    all), now yields "interrupted" instead. See StreamChunk's docstring for
+    the full kind contract.
+
+    Never raises to the caller - every failure path yields a terminal event
+    ("done"/"interrupted"/"error") instead, so the HTTP layer always has
+    something well-formed to send. Exactly one terminal event per call.
     """
+    t_stream_start = time.perf_counter()
+    ttft_seconds = None
+    chunk_count = 0
+    last_chunk_elapsed = None
+
     try:
         req = _build_chat_request(
             prompt=prompt,
@@ -1232,6 +1348,8 @@ def stream_ai_response(
         collected = []
         grounding_metadata = None
         usage_metadata = None
+        last_finish_reason = None
+        last_finish_message = None
 
         try:
             chat_session = _client.chats.create(
@@ -1241,28 +1359,52 @@ def stream_ai_response(
             )
 
             for response in chat_session.send_message_stream(req.contents):
+                # BUG 3 INSTRUMENTATION: every chunk the SDK iterator yields
+                # counts toward chunk_count, whether or not it carries text -
+                # a metadata-only chunk is still a real provider round trip.
+                chunk_count += 1
+                last_chunk_elapsed = time.perf_counter() - t_stream_start
+
                 # Defensive on every field: a chunk may legitimately carry no
                 # text (e.g. a tool-use or metadata-only chunk). Those are not
                 # errors and must not terminate the stream.
                 piece = getattr(response, "text", None)
                 if piece:
+                    if not produced_any_text:
+                        ttft_seconds = time.perf_counter() - t_stream_start
                     produced_any_text = True
                     collected.append(piece)
                     yield StreamChunk(kind="text", text=piece)
 
-                if enable_research:
-                    candidates = getattr(response, "candidates", None) or []
-                    if candidates:
-                        gm = getattr(candidates[0], "grounding_metadata", None)
+                candidates = getattr(response, "candidates", None) or []
+                if candidates:
+                    cand = candidates[0]
+                    if enable_research:
+                        gm = getattr(cand, "grounding_metadata", None)
                         # Grounding metadata typically arrives on a later
                         # chunk; keep the most recent non-None one.
                         if gm is not None:
                             grounding_metadata = gm
+                    # BUG 3 FIX: finish_reason is the only signal that can
+                    # distinguish a clean STOP from MAX_TOKENS/SAFETY/
+                    # RECITATION/etc when the iterator exits with NO
+                    # exception at all. Verified directly against the
+                    # installed google-genai==2.20.0 Candidate model
+                    # (finish_reason is documented as unset while the model
+                    # is still generating) - an intermediate None is
+                    # expected and must not erase an earlier real value, so
+                    # keep the most recent non-None one, same pattern as
+                    # grounding_metadata above.
+                    fr = getattr(cand, "finish_reason", None)
+                    if fr is not None:
+                        last_finish_reason = fr
+                        last_finish_message = getattr(cand, "finish_message", None)
 
                 if getattr(response, "usage_metadata", None) is not None:
                     usage_metadata = response.usage_metadata
 
             elapsed = time.perf_counter() - t_attempt_start
+            total_elapsed = time.perf_counter() - t_stream_start
             final_text = "".join(collected)
 
             if not final_text:
@@ -1271,15 +1413,59 @@ def stream_ai_response(
                 # request would be blocked again.
                 logger.warning(
                     "stream_ai_response got a blocked/empty stream attempt=%d/%d elapsed=%.3fs "
-                    "(mode=%s, board=%s, user_class=%s)",
-                    attempt, MAX_ATTEMPTS, elapsed, mode, board, user_class
+                    "finish_reason=%s (mode=%s, board=%s, user_class=%s)",
+                    attempt, MAX_ATTEMPTS, elapsed, last_finish_reason, mode, board, user_class
+                )
+                _log_stream_telemetry(
+                    outcome="blocked_empty", mode=mode, attempt=attempt,
+                    ttft_seconds=ttft_seconds, chunk_count=chunk_count,
+                    last_chunk_elapsed=last_chunk_elapsed, finish_reason=last_finish_reason,
+                    exception_type=None, http_status=None, total_duration=total_elapsed,
+                    explicit_completion_received=False,
                 )
                 yield StreamChunk(kind="error", text=BLOCKED_RESPONSE_ERROR)
                 return
 
-            _log_usage(usage_metadata, attempt, elapsed, mode, bool(image_bytes), bool(pdf_context))
+            if _is_successful_finish(last_finish_reason):
+                _log_usage(usage_metadata, attempt, elapsed, mode, bool(image_bytes), bool(pdf_context))
+                _log_stream_telemetry(
+                    outcome="success", mode=mode, attempt=attempt,
+                    ttft_seconds=ttft_seconds, chunk_count=chunk_count,
+                    last_chunk_elapsed=last_chunk_elapsed, finish_reason=last_finish_reason,
+                    exception_type=None, http_status=None, total_duration=total_elapsed,
+                    explicit_completion_received=True,
+                )
+                yield StreamChunk(
+                    kind="done",
+                    text=final_text,
+                    grounding_metadata=grounding_metadata,
+                    usage_metadata=usage_metadata,
+                    elapsed_seconds=elapsed,
+                )
+                return
+
+            # BUG 3 FIX: the iterator exited with NO exception, yet the last
+            # observed finish_reason is not STOP. Before this fix this branch
+            # did not exist - any non-empty final_text fell straight through
+            # to "done" regardless of finish_reason. This is exactly the
+            # silent-truncation mode the investigation found had zero
+            # visibility: no exception is raised anywhere in this case.
+            logger.warning(
+                "stream_ai_response non-success finish_reason=%s finish_message=%s "
+                "attempt=%d/%d elapsed=%.3fs chunk_count=%d (mode=%s, board=%s, "
+                "user_class=%s) - finalizing as interrupted, not done",
+                last_finish_reason, last_finish_message, attempt, MAX_ATTEMPTS, elapsed,
+                chunk_count, mode, board, user_class
+            )
+            _log_stream_telemetry(
+                outcome="interrupted_finish_reason", mode=mode, attempt=attempt,
+                ttft_seconds=ttft_seconds, chunk_count=chunk_count,
+                last_chunk_elapsed=last_chunk_elapsed, finish_reason=last_finish_reason,
+                exception_type=None, http_status=None, total_duration=total_elapsed,
+                explicit_completion_received=False,
+            )
             yield StreamChunk(
-                kind="done",
+                kind="interrupted",
                 text=final_text,
                 grounding_metadata=grounding_metadata,
                 usage_metadata=usage_metadata,
@@ -1289,13 +1475,22 @@ def stream_ai_response(
 
         except genai_errors.ClientError as e:
             elapsed = time.perf_counter() - t_attempt_start
+            total_elapsed = time.perf_counter() - t_stream_start
             if produced_any_text:
                 logger.exception(
-                    "stream_ai_response client error AFTER first output - finalizing partial "
-                    "answer attempt=%d elapsed=%.3fs (mode=%s)", attempt, elapsed, mode
+                    "stream_ai_response client error AFTER first output - finalizing as "
+                    "interrupted attempt=%d elapsed=%.3fs chunk_count=%d finish_reason=%s "
+                    "(mode=%s)", attempt, elapsed, chunk_count, last_finish_reason, mode
+                )
+                _log_stream_telemetry(
+                    outcome="interrupted_exception", mode=mode, attempt=attempt,
+                    ttft_seconds=ttft_seconds, chunk_count=chunk_count,
+                    last_chunk_elapsed=last_chunk_elapsed, finish_reason=last_finish_reason,
+                    exception_type=type(e).__name__, http_status=getattr(e, "code", None),
+                    total_duration=total_elapsed, explicit_completion_received=False,
                 )
                 yield StreamChunk(
-                    kind="done",
+                    kind="interrupted",
                     text="".join(collected),
                     grounding_metadata=grounding_metadata,
                     usage_metadata=usage_metadata,
@@ -1307,6 +1502,13 @@ def stream_ai_response(
                     "stream_ai_response quota exhausted attempt=%d elapsed=%.3fs (mode=%s)",
                     attempt, elapsed, mode
                 )
+                _log_stream_telemetry(
+                    outcome="quota_exhausted", mode=mode, attempt=attempt,
+                    ttft_seconds=ttft_seconds, chunk_count=chunk_count,
+                    last_chunk_elapsed=last_chunk_elapsed, finish_reason=None,
+                    exception_type=type(e).__name__, http_status=429,
+                    total_duration=total_elapsed, explicit_completion_received=False,
+                )
                 yield StreamChunk(kind="error", text=QUOTA_EXHAUSTED_ERROR)
                 return
             logger.exception(
@@ -1314,21 +1516,39 @@ def stream_ai_response(
                 attempt, MAX_ATTEMPTS, elapsed, mode
             )
             if attempt >= MAX_ATTEMPTS_BUCKET_A:
+                _log_stream_telemetry(
+                    outcome="error_client", mode=mode, attempt=attempt,
+                    ttft_seconds=ttft_seconds, chunk_count=chunk_count,
+                    last_chunk_elapsed=last_chunk_elapsed, finish_reason=None,
+                    exception_type=type(e).__name__, http_status=getattr(e, "code", None),
+                    total_duration=total_elapsed, explicit_completion_received=False,
+                )
                 yield StreamChunk(kind="error", text=GENERIC_CHAT_ERROR)
                 return
             continue
 
-        except Exception:
+        except Exception as e:
             elapsed = time.perf_counter() - t_attempt_start
+            total_elapsed = time.perf_counter() - t_stream_start
             if produced_any_text:
-                # Network drop / timeout mid-answer. The student keeps what
-                # actually arrived rather than losing the whole response.
+                # Network drop / timeout mid-answer, or any other unexpected
+                # exception - the exact type/status is now captured in the
+                # telemetry line below (previously only a generic
+                # "failed" log with no exception identity at all).
                 logger.exception(
-                    "stream_ai_response failed AFTER first output - finalizing partial answer "
-                    "attempt=%d elapsed=%.3fs (mode=%s)", attempt, elapsed, mode
+                    "stream_ai_response failed AFTER first output - finalizing as interrupted "
+                    "attempt=%d elapsed=%.3fs chunk_count=%d exception_type=%s (mode=%s)",
+                    attempt, elapsed, chunk_count, type(e).__name__, mode
+                )
+                _log_stream_telemetry(
+                    outcome="interrupted_exception", mode=mode, attempt=attempt,
+                    ttft_seconds=ttft_seconds, chunk_count=chunk_count,
+                    last_chunk_elapsed=last_chunk_elapsed, finish_reason=last_finish_reason,
+                    exception_type=type(e).__name__, http_status=getattr(e, "code", None),
+                    total_duration=total_elapsed, explicit_completion_received=False,
                 )
                 yield StreamChunk(
-                    kind="done",
+                    kind="interrupted",
                     text="".join(collected),
                     grounding_metadata=grounding_metadata,
                     usage_metadata=usage_metadata,
@@ -1336,10 +1556,17 @@ def stream_ai_response(
                 )
                 return
             logger.exception(
-                "stream_ai_response failed attempt=%d/%d elapsed=%.3fs (mode=%s)",
-                attempt, MAX_ATTEMPTS, elapsed, mode
+                "stream_ai_response failed attempt=%d/%d elapsed=%.3fs exception_type=%s (mode=%s)",
+                attempt, MAX_ATTEMPTS, elapsed, type(e).__name__, mode
             )
             if attempt >= MAX_ATTEMPTS:
+                _log_stream_telemetry(
+                    outcome="error_exception", mode=mode, attempt=attempt,
+                    ttft_seconds=ttft_seconds, chunk_count=chunk_count,
+                    last_chunk_elapsed=last_chunk_elapsed, finish_reason=None,
+                    exception_type=type(e).__name__, http_status=getattr(e, "code", None),
+                    total_duration=total_elapsed, explicit_completion_received=False,
+                )
                 yield StreamChunk(kind="error", text=GENERIC_CHAT_ERROR)
                 return
             continue

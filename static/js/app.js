@@ -1303,6 +1303,20 @@ function createBotMessageElement(rawText, meta = {}) {
     contentDiv.innerHTML = restoreProtectedMathSegments(marked.parse(protectedText), segments);
     wrapper.appendChild(contentDiv);
 
+    // BUG 3 FIX: an interrupted/truncated stream must never look identical
+    // to a completed answer. `meta.interrupted` is set by sendMessage()
+    // ONLY when the stream ended without an explicit successful "done"
+    // terminal but genuine partial text still exists (see
+    // window.KognitStream.isCompletedAnswer) - an "error" terminal's own
+    // message is already self-explanatory and does not get this notice on
+    // top of it.
+    if (meta.interrupted) {
+        const notice = document.createElement("div");
+        notice.className = "answer-interrupted-notice";
+        notice.textContent = "This answer was interrupted before it finished generating.";
+        wrapper.appendChild(notice);
+    }
+
     // PHASE 9C, Decision 6: Key Takeaway card. `meta.takeaway` was already
     // extracted deterministically BEFORE this function is ever called (see
     // sendMessage's stream completion, regenerateBotMessage, and loadChat -
@@ -3125,6 +3139,11 @@ window.sendMessage = async function() {
         let researchPayload = null;
         let streamFailed = false;
         let sawTerminal = false;
+        // BUG 3 FIX: which terminal event, if any, was actually received.
+        // Completion is decided ENTIRELY by window.KognitStream.isCompletedAnswer(
+        // sawTerminal, terminalType) below - never inferred from whether
+        // replyText happens to be non-empty.
+        let terminalType = null;
 
         // The live streaming bubble. Created on the first delta so a stream
         // that errors before producing anything leaves no empty bubble.
@@ -3203,6 +3222,7 @@ window.sendMessage = async function() {
                     schedulePaint();
                 } else if (event.type === "done") {
                     sawTerminal = true;
+                    terminalType = "done";
                     if (typeof event.reply === "string" && event.reply) {
                         // The backend's final reply is authoritative - it is
                         // the full text the server actually produced, so a
@@ -3211,8 +3231,21 @@ window.sendMessage = async function() {
                         replyText = event.reply;
                     }
                     researchPayload = event.research || null;
+                } else if (event.type === "interrupted") {
+                    // BUG 3 FIX: a genuinely partial/non-success stream -
+                    // NEVER treated as a completed answer (see
+                    // isCompletedAnswer below). The backend's reply is still
+                    // authoritative for whatever text it actually produced,
+                    // same reasoning as "done" above, but this must never be
+                    // saved as a finished assistant message.
+                    sawTerminal = true;
+                    terminalType = "interrupted";
+                    if (typeof event.reply === "string" && event.reply) {
+                        replyText = event.reply;
+                    }
                 } else if (event.type === "error") {
                     sawTerminal = true;
+                    terminalType = "error";
                     streamFailed = true;
                     replyText = event.reply || "No response received.";
                 }
@@ -3236,6 +3269,7 @@ window.sendMessage = async function() {
             replyText = fbData.reply || "No response received.";
             researchPayload = fbData.research || null;
             sawTerminal = true;
+            terminalType = "done";
         } else {
             const decoder = new TextDecoder();
             while (true) {
@@ -3252,11 +3286,32 @@ window.sendMessage = async function() {
         }
         if (chatBox.contains(loadingDiv)) chatBox.removeChild(loadingDiv);
 
-        if (!sawTerminal && !replyText) {
-            // Connection closed without any terminal event AND without any
-            // text - treat as a failure rather than saving an empty reply.
-            replyText = "The connection was interrupted before Kognit could answer. Please try again.";
+        // BUG 3 FIX (completion integrity): previously this only checked
+        // `!sawTerminal && !replyText`, so a connection that dropped AFTER
+        // some text had already streamed in - the common case, since a drop
+        // happens mid-answer, not before the first token - fell through
+        // this check entirely and got silently saved as a normal completed
+        // answer. Completion is now decided ONLY by an explicit successful
+        // "done" terminal, regardless of how much text arrived.
+        let isPartialAnswer = false;
+        if (!window.KognitStream.isCompletedAnswer(sawTerminal, terminalType)) {
             streamFailed = true;
+            if (!replyText) {
+                // Nothing was ever generated - a plain, self-explanatory
+                // message is enough, no separate notice needed.
+                replyText = "The connection was interrupted before Kognit could answer. Please try again.";
+            } else if (terminalType !== "error") {
+                // Genuine partial content the student already watched
+                // stream in (interrupted terminal, or a drop with no
+                // terminal at all). Keep it visible per the existing UX
+                // pattern, but it must be clearly marked, never presented
+                // as a normal finished answer - see createBotMessageElement's
+                // meta.interrupted handling.
+                isPartialAnswer = true;
+            }
+            // terminalType === "error" already carries its own complete,
+            // safe, self-explanatory message in replyText - no additional
+            // notice needed on top of it.
         }
 
         // The provisional streaming bubble is replaced by a real message
@@ -3283,7 +3338,14 @@ window.sendMessage = async function() {
 
         const data = { reply: replyText, research: researchPayload };
 
-        let newBotMsgIndex = -1;
+        // BUG 3 FIX: msgIndex is `null` (not the old `-1`) whenever the
+        // message wasn't actually saved. `-1` is a valid integer, so the
+        // toolbar's `Number.isInteger(meta.msgIndex)` check was passing for
+        // an unsaved message and wiring up a Like/Dislike/Regenerate that
+        // pointed at a non-existent array slot. `null` correctly disables
+        // them instead - a pre-existing, adjacent issue on exactly the
+        // variable this fix already touches, not a separate refactor.
+        let newBotMsgIndex = null;
         if (targetChat && !streamFailed) {
             targetChat.messages.push({ role: "bot", text: replyText, research: data.research || null, takeaway: takeawayText });
             newBotMsgIndex = targetChat.messages.length - 1;
@@ -3301,7 +3363,11 @@ window.sendMessage = async function() {
                 chatId: requestChatId,
                 msgIndex: newBotMsgIndex,
                 research: data.research || null,
-                takeaway: takeawayText
+                takeaway: takeawayText,
+                // BUG 3 FIX: renders the "this answer was interrupted"
+                // notice (see createBotMessageElement) instead of letting a
+                // truncated answer look identical to a complete one.
+                interrupted: isPartialAnswer
             });
             chatBox.appendChild(botDiv);
 

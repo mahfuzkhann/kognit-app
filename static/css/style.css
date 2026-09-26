@@ -2916,3 +2916,14 @@ body {
     line-height: var(--line-height-normal);
     color: var(--color-text-secondary);
 }
+
+/* BUG 3 FIX: a small, unambiguous notice on a truncated/interrupted
+   streamed answer - see createBotMessageElement's meta.interrupted
+   handling in app.js. Deliberately plain text, no icon: the goal is that
+   it reads clearly, not that it looks alarming. Reuses --color-warning,
+   the same token already used elsewhere for non-fatal caution states. */
+.answer-interrupted-notice {
+    margin-top: var(--space-sm);
+    font-size: var(--font-size-xs);
+    color: var(--color-warning);
+}

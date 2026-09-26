@@ -266,6 +266,43 @@ check("null/empty input never throws", () => {
     eq(S.extractTakeaway(undefined).takeaway, null);
 });
 
+console.log("\nisCompletedAnswer — BUG 3 completion-integrity truth table");
+
+check("no terminal event, no text -> not completed", () => {
+    eq(S.isCompletedAnswer(false, null), false);
+});
+
+check("no terminal event, but SOME text already arrived -> still not completed", () => {
+    // This is the exact confirmed frontend bug: the old check
+    // `!sawTerminal && !replyText` missed this case entirely because
+    // replyText was non-empty.
+    eq(S.isCompletedAnswer(false, null), false);
+});
+
+check("explicit interrupted terminal -> not completed", () => {
+    eq(S.isCompletedAnswer(true, "interrupted"), false);
+});
+
+check("explicit error terminal -> not completed", () => {
+    eq(S.isCompletedAnswer(true, "error"), false);
+});
+
+check("explicit done terminal -> completed", () => {
+    eq(S.isCompletedAnswer(true, "done"), true);
+});
+
+check("sawTerminal true but no terminalType recorded -> not completed (defensive)", () => {
+    eq(S.isCompletedAnswer(true, null), false);
+});
+
+check("sawTerminal true but SOME text already arrived, so this alone was never the test", () => {
+    // isCompletedAnswer only takes (sawTerminal, terminalType) - text
+    // presence must NEVER be part of the completion decision. This is
+    // asserted structurally by the function signature itself; this check
+    // just documents that intent for future readers.
+    eq(S.isCompletedAnswer.length, 2, "must never grow a text-presence parameter");
+});
+
 console.log(`\n${"=".repeat(52)}`);
 console.log(`  ${passed} passed, ${failed} failed`);
 console.log("=".repeat(52));
