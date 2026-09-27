@@ -3135,15 +3135,18 @@ window.sendMessage = async function() {
         // marked.js never sees half a construct and MathJax never typesets an
         // incomplete equation - the failure mode that corrupts output
         // permanently.
-        let replyText = "";
-        let researchPayload = null;
+        // BUG 3 PHASE 2: replyText/researchPayload/sawTerminal/terminalType
+        // are now owned by window.KognitStream's stream-state reducer (see
+        // createStreamState/applyStreamEvent in stream-render.js) rather
+        // than four independently-mutated loose variables - "retry"
+        // resetting ALL of them atomically in one place is exactly what
+        // prevents concatenating a discarded partial attempt with the
+        // recovery generation's answer. Completion is decided ENTIRELY by
+        // window.KognitStream.isCompletedAnswer(streamState.sawTerminal,
+        // streamState.terminalType) below - never inferred from whether
+        // text happens to be non-empty.
+        let streamState = window.KognitStream.createStreamState();
         let streamFailed = false;
-        let sawTerminal = false;
-        // BUG 3 FIX: which terminal event, if any, was actually received.
-        // Completion is decided ENTIRELY by window.KognitStream.isCompletedAnswer(
-        // sawTerminal, terminalType) below - never inferred from whether
-        // replyText happens to be non-empty.
-        let terminalType = null;
 
         // The live streaming bubble. Created on the first delta so a stream
         // that errors before producing anything leaves no empty bubble.
@@ -3166,12 +3169,12 @@ window.sendMessage = async function() {
         const paint = () => {
             pendingFrame = null;
             if (!streamContent) return;
-            if (replyText.length === lastRenderedLength) return;
-            lastRenderedLength = replyText.length;
+            if (streamState.replyText.length === lastRenderedLength) return;
+            lastRenderedLength = streamState.replyText.length;
 
             const split = window.KognitStream
-                ? window.KognitStream.splitForRender(replyText)
-                : { renderable: "", pending: replyText };
+                ? window.KognitStream.splitForRender(streamState.replyText)
+                : { renderable: "", pending: streamState.replyText };
 
             // Renderable part goes through the SAME math-protection pipeline
             // the non-streaming path uses (protectMathSegments /
@@ -3205,49 +3208,56 @@ window.sendMessage = async function() {
 
         const parser = window.KognitStream.createNdjsonParser(
             (event) => {
-                if (!event || !event.type) return;
+                if (!event || typeof event.type !== "string") return;
+
                 if (event.type === "start") {
                     if (isStillViewingThisChat && chatBox.contains(loadingDiv)) {
                         loadingDiv.textContent =
                             window.KognitStream.loadingCopyFor(event.context);
                     }
-                } else if (event.type === "delta") {
-                    if (typeof event.text !== "string") return;
-                    if (!replyText) {
-                        // First real content: retire the status line.
+                    return;
+                }
+
+                if (event.type === "retry") {
+                    // BUG 3 PHASE 2: a confirmed transient provider failure
+                    // hit after partial output. Discard the in-progress
+                    // bubble completely and show a fresh loading state - the
+                    // recovery generation's own first delta (below) then
+                    // naturally retires this loading indicator and creates a
+                    // brand-new bubble via the exact same "first content"
+                    // check any stream's very first delta already goes
+                    // through, so no separate bubble-creation path is
+                    // needed for it.
+                    if (pendingFrame !== null) {
+                        window.cancelAnimationFrame(pendingFrame);
+                        pendingFrame = null;
+                    }
+                    if (streamWrapper && chatBox.contains(streamWrapper)) {
+                        chatBox.removeChild(streamWrapper);
+                    }
+                    streamWrapper = null;
+                    streamContent = null;
+                    lastRenderedLength = -1;
+                    if (isStillViewingThisChat && !chatBox.contains(loadingDiv)) {
+                        chatBox.appendChild(loadingDiv);
+                    }
+                    loadingDiv.textContent = window.KognitStream.loadingCopyFor("retrying");
+                    streamState = window.KognitStream.applyStreamEvent(streamState, event);
+                    return;
+                }
+
+                const hadTextBefore = !!streamState.replyText;
+                streamState = window.KognitStream.applyStreamEvent(streamState, event);
+
+                if (event.type === "delta") {
+                    if (!hadTextBefore && streamState.replyText) {
+                        // First real content of this generation (the
+                        // original attempt, or - after a "retry" - the
+                        // recovery generation): retire the status line.
                         if (chatBox.contains(loadingDiv)) chatBox.removeChild(loadingDiv);
                         ensureStreamBubble();
                     }
-                    replyText += event.text;
                     schedulePaint();
-                } else if (event.type === "done") {
-                    sawTerminal = true;
-                    terminalType = "done";
-                    if (typeof event.reply === "string" && event.reply) {
-                        // The backend's final reply is authoritative - it is
-                        // the full text the server actually produced, so a
-                        // dropped delta can never leave a truncated answer
-                        // saved to the chat.
-                        replyText = event.reply;
-                    }
-                    researchPayload = event.research || null;
-                } else if (event.type === "interrupted") {
-                    // BUG 3 FIX: a genuinely partial/non-success stream -
-                    // NEVER treated as a completed answer (see
-                    // isCompletedAnswer below). The backend's reply is still
-                    // authoritative for whatever text it actually produced,
-                    // same reasoning as "done" above, but this must never be
-                    // saved as a finished assistant message.
-                    sawTerminal = true;
-                    terminalType = "interrupted";
-                    if (typeof event.reply === "string" && event.reply) {
-                        replyText = event.reply;
-                    }
-                } else if (event.type === "error") {
-                    sawTerminal = true;
-                    terminalType = "error";
-                    streamFailed = true;
-                    replyText = event.reply || "No response received.";
                 }
             },
             (badLine) => {
@@ -3263,13 +3273,14 @@ window.sendMessage = async function() {
 
         if (!reader) {
             // No streaming support in this browser - fall back to the
-            // non-streaming endpoint rather than failing.
+            // non-streaming endpoint rather than failing. Routed through the
+            // SAME reducer as a synthetic "done" event so this path can
+            // never diverge from the real streaming completion semantics.
             const fallback = await fetch("/api/chat", { method: "POST", headers: headers, body: formData });
             const fbData = await fallback.json();
-            replyText = fbData.reply || "No response received.";
-            researchPayload = fbData.research || null;
-            sawTerminal = true;
-            terminalType = "done";
+            streamState = window.KognitStream.applyStreamEvent(streamState, {
+                type: "done", reply: fbData.reply || "No response received.", research: fbData.research || null
+            });
         } else {
             const decoder = new TextDecoder();
             while (true) {
@@ -3293,14 +3304,20 @@ window.sendMessage = async function() {
         // this check entirely and got silently saved as a normal completed
         // answer. Completion is now decided ONLY by an explicit successful
         // "done" terminal, regardless of how much text arrived.
+        //
+        // From here on, replyText/researchPayload are plain local variables
+        // again (destructured from the final streamState) so the rest of
+        // this function - unchanged since Phase 1 - doesn't need to know
+        // the reducer exists.
+        let { replyText, researchPayload } = streamState;
         let isPartialAnswer = false;
-        if (!window.KognitStream.isCompletedAnswer(sawTerminal, terminalType)) {
+        if (!window.KognitStream.isCompletedAnswer(streamState.sawTerminal, streamState.terminalType)) {
             streamFailed = true;
             if (!replyText) {
                 // Nothing was ever generated - a plain, self-explanatory
                 // message is enough, no separate notice needed.
                 replyText = "The connection was interrupted before Kognit could answer. Please try again.";
-            } else if (terminalType !== "error") {
+            } else if (streamState.terminalType !== "error") {
                 // Genuine partial content the student already watched
                 // stream in (interrupted terminal, or a drop with no
                 // terminal at all). Keep it visible per the existing UX

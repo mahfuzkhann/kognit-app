@@ -47,7 +47,12 @@
         thinking: "Thinking\u2026",
         research: "Searching the web\u2026",
         document: "Reading your document\u2026",
-        document_web: "Checking your document and the web\u2026"
+        document_web: "Checking your document and the web\u2026",
+        // BUG 3 PHASE 2: shown when a "retry" event resets an in-progress
+        // answer after a confirmed transient provider failure - distinct
+        // copy so the student understands why their partial answer just
+        // disappeared, rather than assuming something broke.
+        retrying: "One moment, reconnecting to finish this answer\u2026"
     };
 
     function loadingCopyFor(context) {
@@ -340,6 +345,82 @@
         return sawTerminal === true && terminalType === "done";
     }
 
+    /* --------------------------------------------------------
+       createStreamState / applyStreamEvent — BUG 3 PHASE 2
+       --------------------------------------------------------
+       The single source of truth for how an incoming parsed NDJSON
+       event changes the accumulated answer state. Pulled out of
+       app.js's sendMessage() for the same reason isCompletedAnswer
+       was in Phase 1: this is exactly the kind of subtle state
+       transition (in particular "retry" resetting everything) that
+       is prone to silently going wrong in a hand-maintained
+       if/else chain, and the spec's core failure mode to avoid -
+       concatenating two generations - is a state-management bug,
+       not a rendering bug. Pulling it into one small, pure,
+       directly-testable function (see
+       tests_frontend/test_stream_render.mjs) makes "no duplication
+       across a retry" something that's actually verified, not just
+       eyeballed.
+
+       This function owns ONLY the abstract accumulator - replyText,
+       researchPayload, sawTerminal, terminalType. It knows nothing
+       about the DOM; app.js still owns all rendering/loading-indicator
+       side effects and reads the returned state's fields where it
+       used to read its own loose variables.
+
+       Never mutates `state` - always returns a new object, so a
+       caller (or a test) can compare before/after cleanly.
+       -------------------------------------------------------- */
+    function createStreamState() {
+        return { replyText: "", researchPayload: null, sawTerminal: false, terminalType: null };
+    }
+
+    function applyStreamEvent(state, event) {
+        if (!event || typeof event.type !== "string") return state;
+
+        switch (event.type) {
+            case "delta":
+                if (typeof event.text !== "string" || !event.text) return state;
+                return Object.assign({}, state, { replyText: state.replyText + event.text });
+
+            case "retry":
+                // BUG 3 PHASE 2: a confirmed transient provider failure hit
+                // after partial output. Discard EVERYTHING from the failed
+                // attempt - text, research payload, terminal tracking - and
+                // start completely fresh. This one line is the entire
+                // no-concatenation guarantee on the frontend side.
+                return createStreamState();
+
+            case "done":
+                return Object.assign({}, state, {
+                    replyText: (typeof event.reply === "string" && event.reply) ? event.reply : state.replyText,
+                    researchPayload: event.research || null,
+                    sawTerminal: true,
+                    terminalType: "done"
+                });
+
+            case "interrupted":
+                return Object.assign({}, state, {
+                    replyText: (typeof event.reply === "string" && event.reply) ? event.reply : state.replyText,
+                    sawTerminal: true,
+                    terminalType: "interrupted"
+                });
+
+            case "error":
+                return Object.assign({}, state, {
+                    replyText: event.reply || "No response received.",
+                    sawTerminal: true,
+                    terminalType: "error"
+                });
+
+            default:
+                // "start", or any future/unrecognized type - no accumulator
+                // change. app.js still handles "start" separately for its
+                // own loading-indicator side effects.
+                return state;
+        }
+    }
+
     window.KognitStream = {
         LOADING_COPY: LOADING_COPY,
         loadingCopyFor: loadingCopyFor,
@@ -348,6 +429,8 @@
         hasCompleteMath: hasCompleteMath,
         createNdjsonParser: createNdjsonParser,
         extractTakeaway: extractTakeaway,
-        isCompletedAnswer: isCompletedAnswer
+        isCompletedAnswer: isCompletedAnswer,
+        createStreamState: createStreamState,
+        applyStreamEvent: applyStreamEvent
     };
 })();

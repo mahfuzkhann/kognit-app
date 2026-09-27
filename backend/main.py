@@ -994,20 +994,31 @@ async def chat_endpoint(
 # EVENT CONTRACT (one JSON object per line):
 #   {"type":"start",       "context":"thinking"|"research"|"document"|"document_web"}
 #   {"type":"delta",       "text":"<incremental piece>"}
+#   {"type":"retry"}
 #   {"type":"done",        "reply":"<full final answer>", "research":{...}|null}
 #   {"type":"interrupted", "reply":"<whatever was genuinely generated, may be partial>"}
 #   {"type":"error",       "reply":"<student-facing message>"}
 # Exactly one terminal event (done|interrupted|error) is always sent.
+# "retry" is the one NON-terminal, additive-in-Phase-2 event - it may appear
+# at most once, mid-stream, and is always followed by more delta/terminal
+# events for a completely fresh generation. It carries no fields.
 #
-# BUG 3 (completion-integrity) FIX: "done" now means ONLY a verified, clean
-# successful completion (see stream_ai_response's _is_successful_finish() in
-# ai_engine.py). "interrupted" is a NEW, additive event type - a consumer
-# that has never seen a "start"/"delta"/"done"/"error" convention change
-# still degrades safely (it simply won't recognize "interrupted" as a
-# terminal, same as any unrecognized type), but this codebase's own
-# frontend (static/js/app.js) is updated in the same change to treat
-# "interrupted" as terminal and non-successful. Only an explicit "done"
-# may ever cause an answer to be treated/saved as complete.
+# BUG 3 PHASE 1 (completion-integrity) FIX: "done" now means ONLY a
+# verified, clean successful completion (see stream_ai_response's
+# _is_successful_finish() in ai_engine.py). "interrupted" is an additive
+# event type - a consumer that predates this change still degrades safely
+# (it simply won't recognize "interrupted"/"retry" as anything, same as any
+# unrecognized type), but this codebase's own frontend (static/js/app.js)
+# is updated in the same change to treat "interrupted" as terminal and
+# non-successful. Only an explicit "done" may ever cause an answer to be
+# treated/saved as complete.
+#
+# BUG 3 PHASE 2 (bounded recovery) FIX: "retry" signals that a confirmed
+# transient provider failure (ServerError/5xx) hit after partial output,
+# Kognit discarded that partial generation entirely, and a single fresh
+# recovery generation is starting from the same request/context. A
+# consumer MUST reset any in-progress rendering on "retry" - the delta
+# events that follow are a brand new answer, never a continuation.
 
 @app.post("/api/chat/stream")
 async def chat_stream_endpoint(
@@ -1089,6 +1100,13 @@ async def chat_stream_endpoint(
             async for chunk in iterate_in_threadpool(gen):
                 if chunk.kind == "text":
                     yield _line({"type": "delta", "text": chunk.text})
+                elif chunk.kind == "retry":
+                    # BUG 3 PHASE 2: NOT terminal - do not set terminal_sent,
+                    # do not return. The same generator keeps running and
+                    # will yield a fresh set of delta/terminal events for
+                    # the recovery generation over this SAME NDJSON
+                    # response - no new HTTP request needed.
+                    yield _line({"type": "retry"})
                 elif chunk.kind == "done":
                     final_text = chunk.text
                     grounding_metadata = chunk.grounding_metadata

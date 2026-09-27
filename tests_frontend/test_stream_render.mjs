@@ -303,6 +303,107 @@ check("sawTerminal true but SOME text already arrived, so this alone was never t
     eq(S.isCompletedAnswer.length, 2, "must never grow a text-presence parameter");
 });
 
+console.log("\napplyStreamEvent / createStreamState — BUG 3 PHASE 2 recovery state machine");
+
+check("createStreamState starts empty", () => {
+    const s = S.createStreamState();
+    eq(s.replyText, "");
+    eq(s.researchPayload, null);
+    eq(s.sawTerminal, false);
+    eq(s.terminalType, null);
+});
+
+check("delta accumulates text", () => {
+    let s = S.createStreamState();
+    s = S.applyStreamEvent(s, { type: "delta", text: "Hello " });
+    s = S.applyStreamEvent(s, { type: "delta", text: "world" });
+    eq(s.replyText, "Hello world");
+    eq(s.sawTerminal, false);
+});
+
+check("spec test 17: attempt 1 partial - delta lands in state, not terminal", () => {
+    let s = S.applyStreamEvent(S.createStreamState(), { type: "delta", text: "attempt one partial" });
+    eq(s.replyText, "attempt one partial");
+    eq(S.isCompletedAnswer(s.sawTerminal, s.terminalType), false);
+});
+
+check("spec test 18: a retry event resets everything accumulated so far", () => {
+    let s = S.createStreamState();
+    s = S.applyStreamEvent(s, { type: "delta", text: "attempt one partial" });
+    s = S.applyStreamEvent(s, { type: "retry" });
+    eq(s.replyText, "", "retry must wipe the discarded attempt's text");
+    eq(s.researchPayload, null);
+    eq(s.sawTerminal, false);
+    eq(s.terminalType, null);
+});
+
+check("spec test 19: after a retry, new deltas start from a clean slate", () => {
+    let s = S.createStreamState();
+    s = S.applyStreamEvent(s, { type: "delta", text: "DISCARDED" });
+    s = S.applyStreamEvent(s, { type: "retry" });
+    s = S.applyStreamEvent(s, { type: "delta", text: "fresh " });
+    s = S.applyStreamEvent(s, { type: "delta", text: "answer" });
+    eq(s.replyText, "fresh answer");
+    assert(!s.replyText.includes("DISCARDED"), "the discarded attempt's text must never reappear");
+});
+
+check("spec test 20/21: attempt 2 done - only the recovery's own text is final, and it completes", () => {
+    let s = S.createStreamState();
+    s = S.applyStreamEvent(s, { type: "delta", text: "DISCARDED" });
+    s = S.applyStreamEvent(s, { type: "retry" });
+    s = S.applyStreamEvent(s, { type: "delta", text: "fresh answer" });
+    s = S.applyStreamEvent(s, { type: "done", reply: "fresh answer" });
+    eq(s.replyText, "fresh answer");
+    eq(S.isCompletedAnswer(s.sawTerminal, s.terminalType), true);
+});
+
+check("spec test 22: no duplicated answer even if attempt 1 streamed a lot before failing", () => {
+    let s = S.createStreamState();
+    s = S.applyStreamEvent(s, { type: "delta", text: "Newton's first law states that an object " });
+    s = S.applyStreamEvent(s, { type: "delta", text: "remains at rest unless acted upon by DISCARDED" });
+    s = S.applyStreamEvent(s, { type: "retry" });
+    s = S.applyStreamEvent(s, { type: "delta", text: "Newton's first law: an object at rest stays at rest, " });
+    s = S.applyStreamEvent(s, { type: "delta", text: "and an object in motion stays in motion, unless acted on by a net force." });
+    s = S.applyStreamEvent(s, { type: "done", reply: "Newton's first law: an object at rest stays at rest, and an object in motion stays in motion, unless acted on by a net force." });
+    assert(!s.replyText.includes("DISCARDED"), "attempt 1's text must not survive into the final answer");
+    // The final text is exactly attempt 2's answer, not a longer string
+    // formed by concatenating both attempts.
+    eq(s.replyText, "Newton's first law: an object at rest stays at rest, and an object in motion stays in motion, unless acted on by a net force.");
+});
+
+check("spec test 23: retry followed by a second failure yields interrupted, not completed", () => {
+    let s = S.createStreamState();
+    s = S.applyStreamEvent(s, { type: "delta", text: "attempt one" });
+    s = S.applyStreamEvent(s, { type: "retry" });
+    s = S.applyStreamEvent(s, { type: "delta", text: "attempt two partial" });
+    s = S.applyStreamEvent(s, { type: "interrupted", reply: "attempt two partial" });
+    eq(s.replyText, "attempt two partial");
+    assert(!s.replyText.includes("attempt one"), "attempt 1 must not leak into the interrupted result either");
+    eq(S.isCompletedAnswer(s.sawTerminal, s.terminalType), false);
+});
+
+check("spec test 24: connection ends with no terminal event at all remains incomplete", () => {
+    let s = S.createStreamState();
+    s = S.applyStreamEvent(s, { type: "delta", text: "some partial text" });
+    // ... connection drops here, no further events ...
+    eq(S.isCompletedAnswer(s.sawTerminal, s.terminalType), false);
+    eq(s.replyText, "some partial text", "the partial text is preserved for display, just never marked complete");
+});
+
+check("unrecognized event types are a safe no-op", () => {
+    let s = S.applyStreamEvent(S.createStreamState(), { type: "start", context: "thinking" });
+    eq(s.replyText, "");
+    eq(s.sawTerminal, false);
+});
+
+check("applyStreamEvent never mutates its input state", () => {
+    const s1 = S.createStreamState();
+    const s2 = S.applyStreamEvent(s1, { type: "delta", text: "x" });
+    eq(s1.replyText, "", "the original state object must be untouched");
+    eq(s2.replyText, "x");
+    assert(s1 !== s2, "a new object must be returned, never the same reference");
+});
+
 console.log(`\n${"=".repeat(52)}`);
 console.log(`  ${passed} passed, ${failed} failed`);
 console.log("=".repeat(52));

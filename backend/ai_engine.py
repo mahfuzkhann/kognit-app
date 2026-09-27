@@ -480,6 +480,7 @@ def _log_stream_telemetry(
     http_status,
     total_duration: float,
     explicit_completion_received: bool,
+    recovery_used: bool = False,
 ) -> None:
     """
     BUG 3 INSTRUMENTATION - exactly one structured summary line per
@@ -493,6 +494,17 @@ def _log_stream_telemetry(
 
     `outcome` is always one of a small fixed set of internal labels (see
     call sites in stream_ai_response) - never raw provider error text.
+    BUG 3 PHASE 2 added one new outcome, "recovery_triggered", emitted the
+    moment a bounded recovery generation is granted (separate from the
+    eventual final "success"/"interrupted"/"error" line for the same
+    request, which also carries recovery_used=True so the two lines can be
+    correlated by attempt/mode/timing).
+
+    `recovery_used` (Phase 2): whether this request had already triggered
+    its one bounded recovery generation by the time this line was logged -
+    lets a grep for the FINAL outcome answer "did recovery run, and did it
+    help" in one field, satisfying the Phase 2 telemetry requirement
+    without a second parallel logging path.
 
     NEVER pass prompt text, answer text, or any other student content
     here - only the fields below.
@@ -500,13 +512,14 @@ def _log_stream_telemetry(
     logger.info(
         "stream_telemetry outcome=%s mode=%s attempt=%d/%d model=%s ttft=%s "
         "chunk_count=%d last_chunk_at=%s finish_reason=%s exception_type=%s "
-        "http_status=%s total_duration=%.3fs explicit_completion_received=%s",
+        "http_status=%s total_duration=%.3fs explicit_completion_received=%s "
+        "recovery_used=%s",
         outcome, mode, attempt, MAX_ATTEMPTS, MODEL_NAME,
         ("%.3fs" % ttft_seconds) if ttft_seconds is not None else None,
         chunk_count,
         ("%.3fs" % last_chunk_elapsed) if last_chunk_elapsed is not None else None,
         finish_reason, exception_type, http_status,
-        total_duration, explicit_completion_received,
+        total_duration, explicit_completion_received, recovery_used,
     )
 
 
@@ -1228,12 +1241,24 @@ class StreamChunk:
     kind:
       "text"        - an incremental piece of the answer. `text` is the
                       delta only.
+      "retry"       - BUG 3 PHASE 2: a bounded recovery generation is
+                      starting after a confirmed transient provider
+                      failure (ServerError/5xx) hit after partial output.
+                      NOT terminal - more "text" chunks and an eventual
+                      "done"/"interrupted"/"error" always follow. Carries
+                      no text. The consumer MUST discard everything
+                      accumulated so far (the failed attempt's partial
+                      text is never part of the final answer) and treat
+                      what follows as a completely fresh generation.
       "done"        - terminal SUCCESS ONLY. `text` is the FULL final
                       answer; grounding_metadata carries research metadata
                       (or None). Emitted ONLY when the SDK's stream
                       iterator completed with no exception AND the last
                       observed finish_reason is absent or exactly STOP -
-                      see _is_successful_finish() below (BUG 3 fix).
+                      see _is_successful_finish() below (BUG 3 fix). When
+                      a "retry" preceded it, this text comes ENTIRELY from
+                      the recovery generation, never combined with the
+                      discarded attempt.
       "interrupted" - terminal PARTIAL/NON-SUCCESS. `text` is whatever was
                       genuinely generated before the stream stopped being
                       trustworthy (exception after first output, or a
@@ -1256,6 +1281,13 @@ class StreamChunk:
     truncated finish. That made a genuinely complete answer and a
     truncated one wire-identical. "interrupted" now carries every case
     that isn't a verified clean STOP.
+
+    BUG 3 PHASE 2 (recovery): "retry" is the one new, non-terminal kind. At
+    most one is ever emitted per call - see `recovery_used` in
+    stream_ai_response. It exists specifically for the evidenced case of a
+    confirmed transient provider failure after partial output; every other
+    after-first-byte failure still goes straight to "interrupted" with no
+    retry, unchanged from Phase 1.
     """
     kind: str
     text: str = ""
@@ -1282,37 +1314,61 @@ def stream_ai_response(
     image handling and history are identical - a streamed answer is the same
     answer, delivered incrementally.
 
-    RETRY POLICY (deliberately different from the non-streaming path, and the
-    key architectural constraint of this phase - UNCHANGED by the Bug 3 fix
-    below):
+    RETRY POLICY (the key architectural constraint of this phase, refined by
+    the Bug 3 Phase 2 recovery mechanism below):
 
-        Retries are only safe BEFORE the first byte reaches the student.
+        Retries before the first byte are unrestricted (same as
+        generate_ai_response). After the first byte, retrying used to be
+        unconditionally unsafe - restarting mid-answer would either
+        duplicate content or silently replace what the student is
+        mid-sentence on.
 
-    Once any text has been yielded, the student is already reading a partial
-    answer; restarting would either duplicate content or silently replace what
-    they are mid-sentence on. So a failure after first output is finalized
-    WITHOUT retry - but, per the Bug 3 completion-integrity fix, it is now
-    finalized as "interrupted", never as "done". A failure before first output
-    retries exactly like generate_ai_response does (same MAX_ATTEMPTS/
-    MAX_ATTEMPTS_BUCKET_A, same timeouts - none of that changed here).
+    Real production telemetry (Bug 3 Phase 1 validation) showed the actual
+    dominant post-first-byte failure is a CONFIRMED TRANSIENT one: Gemini
+    returns HTTP 200, streams real content (9 chunks / 34 chunks observed),
+    then fails with ServerError 503 "high demand... usually temporary" -
+    not a request problem, a provider capacity problem. For exactly this
+    evidenced case, Phase 2 grants ONE bounded recovery generation: the
+    partial output is discarded completely (never concatenated - a fresh
+    chat_session is created from the SAME frozen `req`, so it is the exact
+    same prompt/history/context, not a continuation), a "retry" event tells
+    the client to reset its in-progress bubble, and a brand new complete
+    generation is attempted. See `recovery_used` below.
 
-    COMPLETION INTEGRITY (Bug 3 fix - see _is_successful_finish() above):
-    "done" is now reserved exclusively for a stream that the SDK iterator
-    completed with no exception AND whose last observed finish_reason is
-    absent or exactly STOP. An exception after partial text, or a clean exit
-    whose last finish_reason is a non-STOP value (MAX_TOKENS/SAFETY/
-    RECITATION/etc, previously invisible - finish_reason was never read at
-    all), now yields "interrupted" instead. See StreamChunk's docstring for
-    the full kind contract.
+    Every OTHER after-first-byte failure (ClientError of any kind including
+    429, a non-STOP finish_reason with no exception, or an unexpected bare
+    exception) is still finalized immediately as "interrupted" with NO
+    retry - none of those are the confirmed-transient case the evidence
+    supports recovering from, and 429/quota specifically must never be
+    blindly retried (retrying an exhausted quota cannot succeed and only
+    burns latency).
+
+    COMPLETION INTEGRITY (Bug 3 Phase 1 fix - see _is_successful_finish()
+    above): "done" is reserved exclusively for a stream that the SDK
+    iterator completed with no exception AND whose last observed
+    finish_reason is absent or exactly STOP - including the recovery
+    generation's own completion, which is what ends up in "done" when
+    recovery succeeds. See StreamChunk's docstring for the full kind
+    contract, including "retry".
 
     Never raises to the caller - every failure path yields a terminal event
     ("done"/"interrupted"/"error") instead, so the HTTP layer always has
-    something well-formed to send. Exactly one terminal event per call.
+    something well-formed to send. Exactly one terminal event per call
+    ("retry" is NOT terminal - more chunks always follow it).
     """
     t_stream_start = time.perf_counter()
     ttft_seconds = None
     chunk_count = 0
     last_chunk_elapsed = None
+    # BUG 3 PHASE 2: at most ONE recovery generation is ever granted per
+    # call, regardless of how many pre-first-token retries happen on either
+    # side of it. This flag is the entire enforcement mechanism - see the
+    # ServerError branch below.
+    recovery_used = False
+    # Set for exactly one loop iteration - the one immediately following a
+    # recovery grant - so that iteration gets the FULL request timeout
+    # (it's a complete fresh generation, not a quick incremental retry).
+    pending_recovery = False
 
     try:
         req = _build_chat_request(
@@ -1331,8 +1387,11 @@ def stream_ai_response(
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         t_attempt_start = time.perf_counter()
+        is_recovery_attempt = pending_recovery
+        pending_recovery = False
         attempt_timeout = (
-            AI_REQUEST_TIMEOUT_SECONDS if attempt == 1 else RETRY_REQUEST_TIMEOUT_SECONDS
+            AI_REQUEST_TIMEOUT_SECONDS if (attempt == 1 or is_recovery_attempt)
+            else RETRY_REQUEST_TIMEOUT_SECONDS
         )
 
         config_kwargs = dict(
@@ -1422,6 +1481,7 @@ def stream_ai_response(
                     last_chunk_elapsed=last_chunk_elapsed, finish_reason=last_finish_reason,
                     exception_type=None, http_status=None, total_duration=total_elapsed,
                     explicit_completion_received=False,
+                    recovery_used=recovery_used,
                 )
                 yield StreamChunk(kind="error", text=BLOCKED_RESPONSE_ERROR)
                 return
@@ -1434,6 +1494,7 @@ def stream_ai_response(
                     last_chunk_elapsed=last_chunk_elapsed, finish_reason=last_finish_reason,
                     exception_type=None, http_status=None, total_duration=total_elapsed,
                     explicit_completion_received=True,
+                    recovery_used=recovery_used,
                 )
                 yield StreamChunk(
                     kind="done",
@@ -1463,6 +1524,7 @@ def stream_ai_response(
                 last_chunk_elapsed=last_chunk_elapsed, finish_reason=last_finish_reason,
                 exception_type=None, http_status=None, total_duration=total_elapsed,
                 explicit_completion_received=False,
+                recovery_used=recovery_used,
             )
             yield StreamChunk(
                 kind="interrupted",
@@ -1488,6 +1550,7 @@ def stream_ai_response(
                     last_chunk_elapsed=last_chunk_elapsed, finish_reason=last_finish_reason,
                     exception_type=type(e).__name__, http_status=getattr(e, "code", None),
                     total_duration=total_elapsed, explicit_completion_received=False,
+                    recovery_used=recovery_used,
                 )
                 yield StreamChunk(
                     kind="interrupted",
@@ -1508,6 +1571,7 @@ def stream_ai_response(
                     last_chunk_elapsed=last_chunk_elapsed, finish_reason=None,
                     exception_type=type(e).__name__, http_status=429,
                     total_duration=total_elapsed, explicit_completion_received=False,
+                    recovery_used=recovery_used,
                 )
                 yield StreamChunk(kind="error", text=QUOTA_EXHAUSTED_ERROR)
                 return
@@ -1522,6 +1586,106 @@ def stream_ai_response(
                     last_chunk_elapsed=last_chunk_elapsed, finish_reason=None,
                     exception_type=type(e).__name__, http_status=getattr(e, "code", None),
                     total_duration=total_elapsed, explicit_completion_received=False,
+                    recovery_used=recovery_used,
+                )
+                yield StreamChunk(kind="error", text=GENERIC_CHAT_ERROR)
+                return
+            continue
+
+        except genai_errors.ServerError as e:
+            # BUG 3 PHASE 2 - the confirmed-transient recovery path.
+            # ServerError means Gemini's own infrastructure (5xx), not the
+            # request, is the problem - this is the ONLY exception class
+            # this phase treats as safe to recover from after partial
+            # output, and it is scoped this narrowly deliberately: the real
+            # production telemetry that motivated this phase showed exactly
+            # "HTTP 200, streaming began, N chunks delivered, then 503
+            # UNAVAILABLE (high demand... usually temporary)" - a provider
+            # capacity problem, not a request problem. ClientError (429
+            # included) and a bare unexpected Exception after text still
+            # finalize as "interrupted" immediately, same as Phase 1 - see
+            # those branches. Retrying either of those would either burn
+            # latency on an unwinnable quota wait (429) or blindly retry a
+            # Kognit-side bug that would just fail identically again.
+            elapsed = time.perf_counter() - t_attempt_start
+            total_elapsed = time.perf_counter() - t_stream_start
+            if produced_any_text:
+                if not recovery_used:
+                    # Grant the ONE bounded recovery generation. The partial
+                    # text collected so far is discarded completely, never
+                    # concatenated - continuing this same `for attempt` loop
+                    # resets `collected`/`grounding_metadata`/
+                    # `usage_metadata`/`last_finish_reason` fresh at the top
+                    # of the next iteration (identical to how a
+                    # before-first-token retry already worked), and a
+                    # brand-new chat_session is created from the SAME frozen
+                    # `req` - so the recovery is the same prompt/system
+                    # instruction/history/image/PDF context, a completely
+                    # fresh generation, not a continuation.
+                    recovery_used = True
+                    pending_recovery = True
+                    logger.warning(
+                        "stream_ai_response transient server error AFTER first output - "
+                        "triggering ONE bounded recovery generation, discarding partial "
+                        "attempt=%d elapsed=%.3fs chunk_count=%d http_status=%s (mode=%s)",
+                        attempt, elapsed, chunk_count, getattr(e, "code", None), mode
+                    )
+                    _log_stream_telemetry(
+                        outcome="recovery_triggered", mode=mode, attempt=attempt,
+                        ttft_seconds=ttft_seconds, chunk_count=chunk_count,
+                        last_chunk_elapsed=last_chunk_elapsed, finish_reason=last_finish_reason,
+                        exception_type=type(e).__name__, http_status=getattr(e, "code", None),
+                        total_duration=total_elapsed, explicit_completion_received=False,
+                        recovery_used=True,
+                    )
+                    yield StreamChunk(kind="retry")
+                    continue
+                # The recovery generation ITSELF also failed transiently
+                # after producing its OWN partial output. Bounded means
+                # bounded - no second recovery. Finalize as interrupted with
+                # THIS attempt's own text only, never combined with the
+                # first (discarded) attempt's text.
+                logger.exception(
+                    "stream_ai_response transient server error AFTER the recovery "
+                    "attempt's own output - no further recovery, finalizing as "
+                    "interrupted attempt=%d elapsed=%.3fs chunk_count=%d (mode=%s)",
+                    attempt, elapsed, chunk_count, mode
+                )
+                _log_stream_telemetry(
+                    outcome="interrupted_exception", mode=mode, attempt=attempt,
+                    ttft_seconds=ttft_seconds, chunk_count=chunk_count,
+                    last_chunk_elapsed=last_chunk_elapsed, finish_reason=last_finish_reason,
+                    exception_type=type(e).__name__, http_status=getattr(e, "code", None),
+                    total_duration=total_elapsed, explicit_completion_received=False,
+                    recovery_used=True,
+                )
+                yield StreamChunk(
+                    kind="interrupted",
+                    text="".join(collected),
+                    grounding_metadata=grounding_metadata,
+                    usage_metadata=usage_metadata,
+                    elapsed_seconds=elapsed,
+                )
+                return
+            # Transient server error BEFORE any output on this attempt: the
+            # existing bucket-B "maybe it fails before first token, try
+            # again" protection (unchanged in effect - MAX_ATTEMPTS_BUCKET_B
+            # is the same 3 this case already retried up to when it fell
+            # through the generic Exception branch pre-Phase-2; it is now
+            # just correctly classified as ServerError). This is NOT the new
+            # recovery grant and does not set recovery_used.
+            logger.exception(
+                "stream_ai_response server error attempt=%d/%d elapsed=%.3fs http_status=%s "
+                "(mode=%s)", attempt, MAX_ATTEMPTS_BUCKET_B, elapsed, getattr(e, "code", None), mode
+            )
+            if attempt >= MAX_ATTEMPTS_BUCKET_B:
+                _log_stream_telemetry(
+                    outcome="error_server", mode=mode, attempt=attempt,
+                    ttft_seconds=ttft_seconds, chunk_count=chunk_count,
+                    last_chunk_elapsed=last_chunk_elapsed, finish_reason=None,
+                    exception_type=type(e).__name__, http_status=getattr(e, "code", None),
+                    total_duration=total_elapsed, explicit_completion_received=False,
+                    recovery_used=recovery_used,
                 )
                 yield StreamChunk(kind="error", text=GENERIC_CHAT_ERROR)
                 return
@@ -1546,6 +1710,7 @@ def stream_ai_response(
                     last_chunk_elapsed=last_chunk_elapsed, finish_reason=last_finish_reason,
                     exception_type=type(e).__name__, http_status=getattr(e, "code", None),
                     total_duration=total_elapsed, explicit_completion_received=False,
+                    recovery_used=recovery_used,
                 )
                 yield StreamChunk(
                     kind="interrupted",
@@ -1566,6 +1731,7 @@ def stream_ai_response(
                     last_chunk_elapsed=last_chunk_elapsed, finish_reason=None,
                     exception_type=type(e).__name__, http_status=getattr(e, "code", None),
                     total_duration=total_elapsed, explicit_completion_received=False,
+                    recovery_used=recovery_used,
                 )
                 yield StreamChunk(kind="error", text=GENERIC_CHAT_ERROR)
                 return
