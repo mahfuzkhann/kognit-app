@@ -128,12 +128,17 @@ await check("toggling persists the explicit choice to localStorage", async () =>
     eq(window.localStorage.getItem("kognit-theme"), "light");
 });
 
-await check("sun/moon icon visibility matches the active theme", async () => {
+// PHASE 10 (UI redesign): the icon shows the theme a click would switch
+// TO, matching the reference design - a sun while dark (switch to light),
+// a moon while light (switch to dark). This is the inverse of Phase 9A's
+// "show the current theme" rule; the aria-label test below already covers
+// the action-described-not-state wording this mirrors.
+await check("sun/moon icon shows the theme a click switches TO", async () => {
     const { doc, window } = buildDom({ storedTheme: "light" }); await ready(window); await ready(window);
     const sun = doc.querySelector(".theme-icon-sun");
     const moon = doc.querySelector(".theme-icon-moon");
-    assert(!sun.classList.contains("hidden"), "sun should show in light theme");
-    assert(moon.classList.contains("hidden"), "moon should hide in light theme");
+    assert(sun.classList.contains("hidden"), "sun should hide in light theme (already light)");
+    assert(!moon.classList.contains("hidden"), "moon should show in light theme (click -> dark)");
 });
 
 await check("accessible label describes the ACTION, not the current state", async () => {

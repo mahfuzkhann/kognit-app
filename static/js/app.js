@@ -2016,31 +2016,65 @@ window.handleSidebarSearch = function(event) {
 //   - New chats now start with messages: [] (empty). A brand-new chat and
 //     a previously-used-then-emptied chat are visually identical - both
 //     just have zero messages - so one code path (loadChat) covers both.
-const EMPTY_CHAT_GREETINGS = [
-    "What would you like to learn today?",
-    "What can I help you understand?",
-    "Ready to explore something new?",
-    "What are we studying today?",
-    "Ask me anything about your coursework.",
-    "Let's work through a problem together.",
-    "Where should we start today?"
-];
-
-function getRandomGreeting() {
-    return EMPTY_CHAT_GREETINGS[Math.floor(Math.random() * EMPTY_CHAT_GREETINGS.length)];
+// PHASE 10 (UI redesign): the empty-state greeting is now personal - a
+// time-of-day lead ("Good morning") plus the student's first name from
+// their real profile (currentProfile), never a hard-coded name. It replaces
+// the old random "What would you like to learn today?" line. The mobile
+// design shows a single "How can I help you today?" line instead, so both
+// are rendered and CSS shows whichever fits the viewport.
+function getGreetingLead() {
+    const hour = new Date().getHours();
+    if (hour < 12) return "Good morning";
+    if (hour < 17) return "Good afternoon";
+    return "Good evening";
 }
+
+// First word of the profile name; "" when there is no profile (guest, or a
+// logged-in student who has not finished onboarding yet) - in which case the
+// greeting is just the time-of-day lead, with no invented name.
+function getGreetingFirstName() {
+    if (!currentProfile || !currentProfile.name) return "";
+    const first = String(currentProfile.name).trim().split(/\s+/)[0];
+    return first || "";
+}
+
+function fillEmptyChatGreeting(greetingDiv) {
+    const leadEl = greetingDiv.querySelector(".empty-chat-title-lead");
+    const nameEl = greetingDiv.querySelector(".empty-chat-title-name");
+    if (!leadEl || !nameEl) return;
+    const name = getGreetingFirstName();
+    leadEl.textContent = name ? `${getGreetingLead()},` : getGreetingLead();
+    nameEl.textContent = name;
+}
+
+// Called from shell.js when the profile finishes loading AFTER the empty
+// state was already drawn (the profile fetch is async), so the name appears
+// without needing a chat switch.
+window.refreshEmptyChatGreeting = function() {
+    const greetingDiv = document.querySelector(".empty-chat-greeting");
+    if (greetingDiv) fillEmptyChatGreeting(greetingDiv);
+};
+
+// PHASE 10: read-only accessor for shell.js (class pill, greeting), same
+// convention as the PHASE 9B accessors near the top of this file.
+window.getCurrentProfile = function() {
+    return currentProfile;
+};
 
 // Renders the empty-state greeting into an already-emptied #chat-box.
 // Deliberately NOT styled like `.bot-message` (no bubble, no border, no
 // toolbar) so it reads as an empty-conversation placeholder rather than a
-// stored AI reply - see `.empty-chat-greeting` in style.css.
+// stored AI reply - see `.empty-chat-greeting` in shell.css.
 function renderEmptyChatGreeting(chatBox) {
     const greetingDiv = document.createElement("div");
     greetingDiv.className = "empty-chat-greeting";
     greetingDiv.innerHTML = `
-        <span class="empty-chat-greeting-icon">${UI_ICONS.spark}</span>
-        <p class="empty-chat-greeting-text">${getRandomGreeting()}</p>
+        <span class="empty-chat-logo" role="img" aria-label="Kognit"></span>
+        <h1 class="empty-chat-title"><span class="empty-chat-title-lead"></span> <span class="empty-chat-title-name"></span></h1>
+        <p class="empty-chat-subtitle">Your personal AI academic assistant</p>
+        <p class="empty-chat-mobile-title">How can I help you today?</p>
     `;
+    fillEmptyChatGreeting(greetingDiv);
     chatBox.appendChild(greetingDiv);
 }
 
@@ -2214,6 +2248,31 @@ function applyPDFStatusUI(chat) {
     }
 }
 
+// PHASE 10: creation time of a chat, derived from its id ("chat_<ms>" - see
+// createNewChat/createStandaloneChat). Returns null for any id that is not
+// in that format, so no time is ever guessed.
+function getChatCreatedAt(chat) {
+    const match = /^chat_(\d{10,})$/.exec((chat && chat.id) || "");
+    if (!match) return null;
+    const ms = Number(match[1]);
+    return Number.isFinite(ms) ? ms : null;
+}
+
+// "now", "2m ago", "3h ago", "1d ago", "2w ago", "5mo ago", "1y ago".
+function formatRelativeTime(timestampMs, nowMs = Date.now()) {
+    const seconds = Math.max(0, Math.floor((nowMs - timestampMs) / 1000));
+    if (seconds < 60) return "now";
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    if (days < 7) return `${days}d ago`;
+    if (days < 30) return `${Math.floor(days / 7)}w ago`;
+    if (days < 365) return `${Math.floor(days / 30)}mo ago`;
+    return `${Math.floor(days / 365)}y ago`;
+}
+
 // Builds one chat row (.chat-item) - used both for chats nested inside a
 // project folder and for standalone chats in the flat "Recent Chats" list.
 // Identical behavior in both places (open/rename/delete), only the parent
@@ -2251,17 +2310,46 @@ function renderChatItem(proj, chat) {
         chatItem.appendChild(input);
         setTimeout(() => input.focus(), 50);
     } else {
-        const titleText = document.createElement("span");
+        // PHASE 10: the whole row (icon, title, time) is ONE real <button>,
+        // so it is keyboard-focusable and announced properly - it used to be
+        // a click handler on a <span>. The action buttons below are siblings
+        // of it, not children, so they never trigger it.
+        const titleText = document.createElement("button");
+        titleText.type = "button";
         titleText.className = "chat-title-text";
+        if (chat.id === activeChatId) titleText.setAttribute("aria-current", "true");
         // FEATURE 8: built as separate DOM nodes (icon span + text node)
         // rather than one interpolated string, so chat.title always goes
-        // through a text node exactly as it did before - no change to how
-        // titles are escaped/rendered, only the emoji prefix becomes an SVG.
+        // through textContent exactly as it did before - no change to how
+        // titles are escaped/rendered.
         const titleIcon = document.createElement("span");
         titleIcon.className = "chat-item-icon";
-        titleIcon.innerHTML = chat.pinned ? UI_ICONS.pin : UI_ICONS.chat;
+        titleIcon.innerHTML = UI_ICONS.chat;
+        const titleLabel = document.createElement("span");
+        titleLabel.className = "chat-title-label";
+        titleLabel.textContent = chat.title;
         titleText.appendChild(titleIcon);
-        titleText.appendChild(document.createTextNode(chat.title));
+        titleText.appendChild(titleLabel);
+
+        // Relative time. The data model has no "last activity" field, but
+        // every chat id is "chat_<creation ms>", so this is the REAL
+        // creation time (see getChatCreatedAt) - nothing is invented, and a
+        // chat whose id is not in that format simply shows no time.
+        const createdAt = getChatCreatedAt(chat);
+        if (createdAt) {
+            const timeEl = document.createElement("span");
+            timeEl.className = "chat-item-time";
+            timeEl.textContent = formatRelativeTime(createdAt);
+            timeEl.title = "Started " + new Date(createdAt).toLocaleString();
+            titleText.appendChild(timeEl);
+        }
+        if (chat.pinned) {
+            const pinMark = document.createElement("span");
+            pinMark.className = "chat-item-pin-mark";
+            pinMark.title = "Pinned";
+            pinMark.innerHTML = UI_ICONS.pin;
+            titleText.appendChild(pinMark);
+        }
         titleText.onclick = () => loadChat(proj.id, chat.id);
 
         const chatActions = document.createElement("div");
@@ -2274,18 +2362,21 @@ function renderChatItem(proj, chat) {
         const pinBtn = document.createElement("button");
         pinBtn.className = `action-btn pin-btn ${chat.pinned ? "pinned" : ""}`;
         pinBtn.title = chat.pinned ? "Unpin Chat" : "Pin Chat";
+        pinBtn.setAttribute("aria-label", pinBtn.title);
         pinBtn.innerHTML = UI_ICONS.pin;
         pinBtn.onclick = (e) => { e.stopPropagation(); togglePinChat(chat); };
 
         const editChatBtn = document.createElement("button");
         editChatBtn.className = "action-btn";
         editChatBtn.title = "Rename Chat";
+        editChatBtn.setAttribute("aria-label", "Rename Chat");
         editChatBtn.innerHTML = UI_ICONS.edit;
         editChatBtn.onclick = (e) => { e.stopPropagation(); editingChatId = chat.id; renderHistoryList(); };
 
         const delChatBtn = document.createElement("button");
         delChatBtn.className = "action-btn delete-btn";
         delChatBtn.title = "Delete Chat";
+        delChatBtn.setAttribute("aria-label", "Delete Chat");
         delChatBtn.innerHTML = UI_ICONS.trash;
         delChatBtn.onclick = (e) => { e.stopPropagation(); deleteChat(proj.id, chat.id); };
 
@@ -2421,33 +2512,22 @@ function renderHistoryList() {
     // list instead - this is what stops a standalone chat from ever
     // appearing nested inside a project, and stops a project's chats from
     // ever leaking into Recent Chats.
+    //
+    // PHASE 10: the "Recent Chats" heading (with its New Chat / Search
+    // buttons) is now static markup in index.html, and Recent Chats comes
+    // FIRST, matching the design. Real projects follow under a small
+    // "Projects" heading with its own "+" - they are still fully reachable
+    // here (a project's chats beyond the first are not shown anywhere else).
     const realProjects = projects.filter(p => p.id !== DEFAULT_PROJECT_ID);
     const defaultProject = projects.find(p => p.id === DEFAULT_PROJECT_ID);
-
-    realProjects.forEach(proj => {
-        const card = renderProjectCard(proj);
-        if (card) {
-            hasMatch = true;
-            historyList.appendChild(card);
-        }
-    });
 
     if (defaultProject) {
         const matchingRecentChats = (defaultProject.chats || []).filter(chat =>
             chat.title.toLowerCase().includes(searchQuery)
         );
 
-        // Only render the "Recent Chats" heading/section at all if there is
-        // at least one standalone chat (or a search match among them) -
-        // an empty section for a bucket most users may never touch would
-        // just be sidebar clutter.
         if (matchingRecentChats.length > 0) {
             hasMatch = true;
-
-            const recentHeading = document.createElement("div");
-            recentHeading.className = "history-title recent-chats-heading";
-            recentHeading.textContent = "Recent Chats";
-            historyList.appendChild(recentHeading);
 
             const recentList = document.createElement("div");
             recentList.className = "recent-chats-list";
@@ -2460,8 +2540,42 @@ function renderHistoryList() {
         }
     }
 
-    if (!hasMatch && searchQuery !== "") {
-        historyList.innerHTML = `<div class="no-results">No projects or chats found matching "${searchQuery}"</div>`;
+    const projectCards = realProjects
+        .map(proj => renderProjectCard(proj))
+        .filter(card => card);
+
+    if (projectCards.length > 0) {
+        hasMatch = true;
+
+        const projectsHead = document.createElement("div");
+        projectsHead.className = "sidebar-section-head sidebar-projects-head";
+
+        const projectsTitle = document.createElement("h3");
+        projectsTitle.className = "sidebar-section-title";
+        projectsTitle.textContent = "Projects";
+
+        const newProjectBtn = document.createElement("button");
+        newProjectBtn.type = "button";
+        newProjectBtn.className = "mini-icon-btn sidebar-nav-action";
+        newProjectBtn.title = "New project";
+        newProjectBtn.setAttribute("aria-label", "New project");
+        newProjectBtn.innerHTML = UI_ICONS.plus;
+        newProjectBtn.onclick = () => createNewProject();
+
+        projectsHead.appendChild(projectsTitle);
+        projectsHead.appendChild(newProjectBtn);
+        historyList.appendChild(projectsHead);
+        projectCards.forEach(card => historyList.appendChild(card));
+    }
+
+    if (!hasMatch) {
+        const emptyNote = document.createElement("div");
+        emptyNote.className = searchQuery !== "" ? "no-results" : "sidebar-empty-hint";
+        // textContent, not innerHTML: the search text is user input.
+        emptyNote.textContent = searchQuery !== ""
+            ? `No projects or chats found matching "${searchQuery}"`
+            : "No chats yet. Start one with +.";
+        historyList.appendChild(emptyNote);
     }
 }
 

@@ -73,24 +73,24 @@
     --red-900:     #280000;
 
     /* ---- 3. SEMANTIC COLOR ----------------------------------- */
-    --color-background:         var(--gray-1000);
-    --color-surface:            var(--gray-980);
-    --color-surface-secondary:  var(--gray-970);
-    --color-surface-elevated:   var(--gray-965);
-    --color-surface-raised:     var(--gray-960);
-    --color-surface-hover:      var(--gray-950);
-    --color-surface-input:      var(--gray-945);
+    --color-background:         #09090b;
+    --color-surface:            #0b0b0e;
+    --color-surface-secondary:  #0f1013;
+    --color-surface-elevated:   #131419;
+    --color-surface-raised:     #14151a;
+    --color-surface-hover:      #17181d;
+    --color-surface-input:      #15161b;
 
-    --color-border:             var(--gray-920);
-    --color-border-subtle:      var(--gray-940);
-    --color-border-strong:      var(--gray-850);
-    --color-border-input:       var(--gray-880);
+    --color-border:             #1f2025;
+    --color-border-subtle:      #18191d;
+    --color-border-strong:      #34363d;
+    --color-border-input:       #2a2c33;
 
-    --color-text-primary:       var(--gray-0);
-    --color-text-secondary:     var(--gray-200);
-    --color-text-tertiary:      var(--gray-280);
-    --color-text-muted:         var(--gray-500);
-    --color-text-faint:         var(--gray-600);
+    --color-text-primary:       #f4f4f6;
+    --color-text-secondary:     #d6d7dc;
+    --color-text-tertiary:      #b4b6bd;
+    --color-text-muted:         #8c8e97;
+    --color-text-faint:         #63656d;
     --color-text-inverse:       var(--gray-1000);
 
     --color-accent:             var(--blue-500);
@@ -101,6 +101,9 @@
     --color-success:            var(--green-400);
     --color-error:              var(--red-400);
     --color-warning:            #fbbf24;
+    /* PHASE 10: the muted gray-blue used for the student's name in the
+       empty-state greeting. */
+    --color-text-name:          #b0b3cb;
 
     /* Focus ring. PHASE 8G: previously no consistent focus token
        existed at all - focus styling was browser-default or absent
@@ -154,6 +157,12 @@
     --radius-xl:   12px;
     --radius-pill: 999px;
     --radius-full: 50%;
+    /* PHASE 10 (UI redesign): coherent radius scale for the new shell.
+       small 8 / medium 12 / large 16 / composer 24. Cards use --radius-card. */
+    --radius-2xl:  16px;
+    --radius-card: 16px;
+    --radius-composer: 24px;
+    --radius-composer-mobile: 28px;
 
     /* ---- 7. SHADOW ------------------------------------------- */
     --shadow-subtle:   0 1px 2px rgba(0, 0, 0, 0.4);
@@ -161,10 +170,11 @@
     --shadow-elevated: 0 20px 40px rgba(0, 0, 0, 0.6);
 
     /* ---- 8. LAYOUT ------------------------------------------- */
-    --sidebar-width:          272px;
-    --sidebar-width-laptop:   240px;
-    --sidebar-width-tablet:   220px;
-    --sidebar-width-drawer:   288px;
+    --sidebar-width:          300px;
+    --sidebar-width-laptop:   272px;
+    --sidebar-width-tablet:   248px;
+    --sidebar-width-drawer: 420px;
+    --composer-max-width:      880px;
     --content-max-width:      900px;
     --reading-max-width:      720px;
     --modal-width-sm:         380px;
@@ -246,16 +256,16 @@
    edge would be more visual noise, not more accessible.
    ============================================================ */
 :root[data-theme="light"] {
-    --color-background:         #f7f7f8;
+    --color-background:         #f6f6f8;
     --color-surface:            #ffffff;
-    --color-surface-secondary:  #ffffff;
+    --color-surface-secondary:  #fafafb;
     --color-surface-elevated:   #ffffff;
     --color-surface-raised:     #ffffff;
-    --color-surface-hover:      #eeeef1;
+    --color-surface-hover:      #eeeff2;
     --color-surface-input:      #f0f0f3;
 
-    --color-border:             #c7c7cf;
-    --color-border-subtle:      #e2e2e6;
+    --color-border:             #d3d3da;
+    --color-border-subtle:      #e6e6ea;
     --color-border-strong:      #84848e;
     --color-border-input:       #84848e;
 
@@ -274,6 +284,7 @@
     --color-success:            #15803d;
     --color-error:              #dc2626;
     --color-warning:            #b45309;
+    --color-text-name:          #565b82;
     --color-focus:              #2563eb;
 
     /* Shadows read as heavier on a light surface than the dark
@@ -350,15 +361,15 @@
    sets data-theme explicitly the instant a preference exists). */
 @media (prefers-color-scheme: light) {
     :root:not([data-theme]) {
-        --color-background:         #f7f7f8;
+        --color-background:         #f6f6f8;
         --color-surface:            #ffffff;
-        --color-surface-secondary:  #ffffff;
+        --color-surface-secondary:  #fafafb;
         --color-surface-elevated:   #ffffff;
         --color-surface-raised:     #ffffff;
-        --color-surface-hover:      #eeeef1;
+        --color-surface-hover:      #eeeff2;
         --color-surface-input:      #f0f0f3;
-        --color-border:             #c7c7cf;
-        --color-border-subtle:      #e2e2e6;
+        --color-border:             #d3d3da;
+        --color-border-subtle:      #e6e6ea;
         --color-border-strong:      #84848e;
         --color-border-input:       #84848e;
         --color-text-primary:       #16161a;
@@ -374,6 +385,7 @@
         --color-success:            #15803d;
         --color-error:              #dc2626;
         --color-warning:            #b45309;
+        --color-text-name:          #565b82;
         --color-focus:              #2563eb;
         --shadow-subtle:   0 1px 2px rgba(20, 20, 24, 0.08);
         --shadow-medium:   0 4px 14px rgba(20, 20, 24, 0.10);

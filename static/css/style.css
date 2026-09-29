@@ -25,33 +25,6 @@ body {
     width: 100vw;
 }
 
-/* Sidebar Styling
-   PHASE 3 (minimal redesign): overall vertical rhythm tightened (16px ->
-   14px padding/gap) and the three header actions are laid out as a compact
-   2-column grid (New Project / New Chat) with Quiz as a slim full-width row
-   underneath, instead of three stacked full-height buttons. This is a pure
-   CSS layout change - the buttons themselves keep their existing ids/
-   onclick handlers, so no JS/HTML behavior changes. */
-.sidebar {
-    width: 272px;
-    background-color: var(--color-surface);
-    border-right: 1px solid var(--gray-930);
-    display: flex;
-    flex-direction: column;
-    padding: 14px;
-    gap: 14px;
-}
-
-.sidebar-header {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 6px;
-}
-
-.sidebar-header .btn-quiz {
-    grid-column: 1 / -1;
-}
-
 .btn-primary {
     width: 100%;
     background: var(--color-text-primary);
@@ -67,70 +40,6 @@ body {
 
 .btn-primary:hover {
     background: var(--gray-100);
-}
-
-.btn-secondary {
-    width: 100%;
-    background: var(--gray-958);
-    color: var(--color-text-tertiary);
-    border: 1px solid var(--color-border);
-    padding: 9px 8px;
-    border-radius: 7px;
-    font-weight: 500;
-    cursor: pointer;
-    font-size: 12.5px;
-    transition: 0.2s ease;
-}
-
-.btn-secondary:hover {
-    background: var(--color-border-subtle);
-    color: var(--color-text-primary);
-    border-color: var(--color-border-strong);
-}
-
-.btn-quiz {
-    width: 100%;
-    background: transparent;
-    color: var(--indigo-300);
-    border: 1px solid var(--indigo-925);
-    padding: 8px;
-    border-radius: 7px;
-    font-weight: 600;
-    cursor: pointer;
-    font-size: 12.5px;
-    transition: 0.2s ease;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-}
-
-.btn-quiz:hover {
-    background: var(--indigo-950);
-    color: var(--color-text-primary);
-}
-
-.history-section {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    overflow-y: auto;
-    flex: 1;
-}
-
-.history-title {
-    font-size: 10.5px;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
-    color: var(--gray-700);
-    font-weight: 600;
-    padding: 0 4px;
-}
-
-.history-list {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
 }
 
 /* Project Container
@@ -207,15 +116,6 @@ body {
     color: var(--color-text-muted);
 }
 
-.chat-item-icon {
-    display: inline-flex;
-    align-items: center;
-    margin-right: 6px;
-    flex-shrink: 0;
-    color: var(--gray-550);
-    vertical-align: -2px;
-}
-
 .project-title-text {
     white-space: nowrap;
     overflow: hidden;
@@ -234,47 +134,6 @@ body {
 /* FEATURE 1: collapsed project - its nested chats are fully hidden. */
 .chats-list.collapsed {
     display: none;
-}
-
-/* Recent Chats (standalone chats with no project) - a flat list, visually
-   distinct from a project's nested .chats-list: no left border/indent,
-   since these chats don't belong to any folder. Reuses .chat-item for each
-   row so hover/active/rename/delete styling stays identical to a chat
-   nested inside a project. */
-.recent-chats-heading {
-    margin-top: 4px;
-}
-
-.recent-chats-list {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-}
-
-/* Nested Chat Item */
-.chat-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 6px 7px;
-    border-radius: 6px;
-    cursor: pointer;
-    font-size: 12px;
-    color: var(--color-text-muted);
-    transition: 0.15s;
-    min-height: 30px;
-}
-
-.chat-item:hover, .chat-item.active {
-    background: var(--color-border-subtle);
-    color: var(--color-text-primary);
-}
-
-.chat-title-text {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    flex: 1;
 }
 
 /* Actions */
@@ -337,89 +196,6 @@ body {
     outline: none;
 }
 
-/* Main Workspace */
-.main-content {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    max-width: 900px;
-    margin: 0 auto;
-    padding: 20px;
-    gap: 12px;
-    height: 100vh;
-    height: 100dvh;
-}
-
-/* Navbar & Branding */
-.navbar {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding-bottom: 12px;
-    border-bottom: 1px solid var(--color-border-subtle);
-    gap: 15px;
-}
-
-.logo-text {
-    font-size: 24px;
-    font-weight: 700;
-    letter-spacing: -0.5px;
-    color: var(--color-text-primary);
-}
-
-.tagline {
-    font-size: 12px;
-    color: var(--gray-550);
-    margin-top: 2px;
-}
-
-/* Context Selectors */
-.context-selector {
-    display: flex;
-    gap: 8px;
-}
-
-.context-dropdown {
-    background: var(--color-surface-secondary);
-    color: var(--color-text-tertiary);
-    border: 1px solid var(--color-border);
-    padding: 6px 10px;
-    border-radius: 6px;
-    font-size: 12px;
-    outline: none;
-    cursor: pointer;
-}
-
-.context-dropdown:hover {
-    border-color: var(--gray-800);
-}
-
-/* Mode Switcher */
-.mode-selector {
-    display: flex;
-    gap: 10px;
-}
-
-.mode-btn {
-    flex: 1;
-    background: var(--color-surface-secondary);
-    border: 1px solid var(--color-border);
-    color: var(--color-text-muted);
-    padding: 10px;
-    border-radius: 8px;
-    cursor: pointer;
-    font-size: 13px;
-    font-weight: 500;
-    transition: 0.2s;
-}
-
-.mode-btn.active {
-    background: var(--color-text-primary);
-    color: var(--color-background);
-    border-color: var(--color-text-primary);
-    font-weight: 600;
-}
-
 /* Chat Box */
 .chat-box {
     flex: 1;
@@ -436,38 +212,6 @@ body {
     display: flex;
     flex-direction: column;
     gap: 16px;
-}
-
-/* PHASE 5: empty-chat greeting.
-   Deliberately NOT a .bot-message - no bubble background, no border, no
-   toolbar - so it reads as an empty-conversation placeholder rather than a
-   stored AI reply. .chat-box is a column flex container (see above); this
-   is always its only child when shown, and flex:1 + centered content lets
-   it fill and center within the available chat area, the same way a
-   ChatGPT/Claude/Gemini-style empty state does. No animation, no card,
-   no shadow - kept intentionally quiet. */
-.empty-chat-greeting {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 14px;
-    text-align: center;
-    padding: 20px;
-}
-
-.empty-chat-greeting-icon {
-    color: var(--color-border-strong);
-    display: flex;
-}
-
-.empty-chat-greeting-text {
-    font-size: 15px;
-    font-weight: 500;
-    color: var(--color-text-muted);
-    max-width: 380px;
-    line-height: 1.5;
 }
 
 /* ========== OVERFLOW FIX: .bot-message and children ========== */
@@ -825,34 +569,6 @@ body {
     color: var(--color-text-muted);
 }
 
-/* Input Bar & Icon Buttons */
-.input-container {
-    display: flex;
-    align-items: flex-end;
-    gap: 8px;
-}
-
-.icon-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--color-surface-secondary);
-    border: 1px solid var(--color-border);
-    color: var(--gray-350);
-    width: 44px;
-    height: 44px;
-    border-radius: 8px;
-    cursor: pointer;
-    transition: 0.2s;
-    flex-shrink: 0;
-}
-
-.icon-btn:hover {
-    color: var(--color-text-primary);
-    border-color: var(--gray-750);
-    background: var(--color-surface-hover);
-}
-
 /* ==========================================================
    PHASE 4: UNIFIED "+" COMPOSER ACTION MENU.
    Replaces the two separate PDF/Image .icon-btn labels that used
@@ -869,37 +585,6 @@ body {
 .composer-attach-wrapper {
     position: relative;
     flex-shrink: 0;
-}
-
-.composer-plus-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--color-surface-secondary);
-    border: 1px solid var(--color-border);
-    color: var(--gray-350);
-    width: 44px;
-    height: 44px;
-    border-radius: 8px;
-    cursor: pointer;
-    transition: 0.2s;
-    flex-shrink: 0;
-}
-
-.composer-plus-btn:hover {
-    color: var(--color-text-primary);
-    border-color: var(--gray-750);
-    background: var(--color-surface-hover);
-}
-
-/* Rotate the "+" into an "x"-ish cross when the menu is open, as a
-   lightweight visual acknowledgement of state - no extra icon swap
-   needed since a 45deg-rotated plus already reads as a close glyph. */
-.composer-plus-btn[aria-expanded="true"] {
-    color: var(--color-text-primary);
-    border-color: var(--gray-750);
-    background: var(--color-border-subtle);
-    transform: rotate(45deg);
 }
 
 /* Opens UPWARD, above the composer, so it can never be clipped by
@@ -973,46 +658,6 @@ body {
     border-radius: 999px;
     padding: 2px 7px;
     white-space: nowrap;
-}
-
-#user-input {
-    flex: 1;
-    background: var(--color-surface-secondary);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    padding: 12px 16px;
-    color: var(--color-text-primary);
-    font-size: 14px;
-    outline: none;
-    min-height: 44px;
-    max-height: 200px;
-    resize: none;
-    font-family: inherit;
-    overflow-y: auto;
-    word-wrap: break-word;
-    overflow-wrap: break-word;
-}
-
-#user-input:focus {
-    border-color: var(--gray-750);
-}
-
-#send-btn {
-    background: var(--color-text-primary);
-    border: none;
-    color: var(--color-background);
-    padding: 0 20px;
-    height: 44px;
-    border-radius: 8px;
-    cursor: pointer;
-    font-weight: 600;
-    font-size: 14px;
-    transition: 0.2s;
-    flex-shrink: 0;
-}
-
-#send-btn:hover {
-    background: var(--color-text-secondary);
 }
 
 /* Quiz Modal Overlay & UI */
@@ -1237,51 +882,6 @@ body {
     margin-top: 4px;
 }
 
-
-/* Export & Share Bar */
-.export-share-bar {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    margin-left: 15px;
-}
-
-.export-btn {
-    background: rgba(255, 255, 255, 0.08);
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    color: var(--gray-150);
-    padding: 6px 12px;
-    border-radius: 8px;
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s ease;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-
-.export-btn:hover {
-    background: rgba(255, 255, 255, 0.18);
-    transform: translateY(-1px);
-}
-
-.share-btn {
-    background: var(--color-accent);
-    border: none;
-    color: white;
-}
-
-.share-btn:hover {
-    background: var(--color-accent-hover);
-}
-
-
-/* Sidebar Search Bar Styling */
-.sidebar-search-container {
-    padding: 2px 0 0 0;
-}
-
 /* FEATURE 8: the search icon used to be typed directly into the input's
    placeholder text as an emoji character (so it disappeared the moment the
    user started typing). It now lives as its own persistent SVG element,
@@ -1303,104 +903,12 @@ body {
     pointer-events: none;
 }
 
-#sidebar-search-input {
-    width: 100%;
-    padding: 8px 12px 8px 32px;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 8px;
-    color: var(--gray-150);
-    font-size: 13px;
-    outline: none;
-    transition: all 0.2s ease;
-}
-
-#sidebar-search-input:focus {
-    border-color: var(--color-accent);
-    background: rgba(255, 255, 255, 0.08);
-}
-
 .no-results {
     padding: 15px;
     color: var(--gray-450);
     font-size: 13px;
     text-align: center;
     font-style: italic;
-}
-
-/* Sidebar Auth Footer UI */
-.sidebar-footer {
-    padding: 12px 4px 2px 4px;
-    border-top: 1px solid rgba(255, 255, 255, 0.08);
-    margin-top: auto;
-}
-
-.btn-auth-login {
-    width: 100%;
-    padding: 9px;
-    background: var(--color-accent);
-    color: white;
-    border: none;
-    border-radius: 8px;
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.2s;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-}
-
-.btn-auth-login:hover {
-    background: var(--color-accent-hover);
-}
-
-.user-profile-bar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-}
-
-.user-info {
-    overflow: hidden;
-}
-
-/* PHASE 6A: sidebar-bottom profile trigger (name + class/stream, opens the
-   profile modal). Sits inside the existing .user-profile-bar row next to
-   the unchanged Logout button. */
-.profile-trigger-btn {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex: 1;
-    min-width: 0;
-    background: transparent;
-    border: none;
-    padding: 4px;
-    border-radius: 6px;
-    color: inherit;
-    text-align: left;
-    cursor: pointer;
-    transition: background 0.15s;
-}
-
-.profile-trigger-btn:hover,
-.profile-trigger-btn:focus-visible {
-    background: rgba(255, 255, 255, 0.06);
-}
-
-.profile-trigger-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 26px;
-    height: 26px;
-    flex-shrink: 0;
-    border-radius: 50%;
-    background: rgba(255, 255, 255, 0.08);
-    color: var(--gray-300);
 }
 
 .user-name-text {
@@ -1465,23 +973,6 @@ body {
     background: var(--indigo-800);
     border-color: var(--indigo-500);
     color: var(--color-text-primary);
-}
-
-.btn-auth-logout {
-    background: rgba(239, 68, 68, 0.2);
-    border: 1px solid rgba(239, 68, 68, 0.4);
-    color: var(--color-error);
-    border-radius: 6px;
-    padding: 4px 8px;
-    cursor: pointer;
-    transition: all 0.2s;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-
-.btn-auth-logout:hover {
-    background: rgba(239, 68, 68, 0.4);
 }
 
 /* Auth Modal Styles */
@@ -1791,47 +1282,6 @@ body {
    and could crowd the selectors against the share button. This tier only
    trims that specific gap; it does not touch anything the 900px/640px
    tiers below already handle. */
-@media (max-width: 1024px) {
-    .sidebar {
-        width: 240px;
-    }
-
-    .main-content {
-        padding: 16px;
-    }
-
-    .context-selector {
-        flex-wrap: wrap;
-        justify-content: flex-end;
-    }
-}
-
-@media (max-width: 900px) {
-    .sidebar {
-        width: 220px;
-        padding: 10px;
-        gap: 10px;
-    }
-
-    .main-content {
-        padding: 12px;
-    }
-}
-
-@media (max-width: 640px) {
-    .sidebar {
-        width: 180px;
-        padding: 8px;
-    }
-
-    .sidebar-header {
-        gap: 4px;
-    }
-
-    .context-selector {
-        flex-wrap: wrap;
-    }
-}
 
 /* ============================================================
    STUDENT PROFILE PANEL (Phase 6E)
@@ -2248,139 +1698,34 @@ body {
     border: 0;
 }
 
-/* ---- Send control (8D) ------------------------------------
-   Icon + label together rather than icon-only. An icon-only send
-   control saves a few pixels but removes a visible affordance for
-   a student who has never used the product; the label is hidden
-   only on narrow viewports where horizontal space is genuinely
-   scarce, and the accessible name (aria-label) is always present. */
-.send-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: var(--space-sm);
-}
-
 .send-btn-icon {
     flex-shrink: 0;
 }
 
-/* ---- Sidebar toggle / mobile drawer (8C) ------------------- */
-.sidebar-toggle-btn {
-    display: none; /* desktop: sidebar is always visible, no trigger needed */
-    align-items: center;
-    justify-content: center;
-    width: var(--touch-target-min);
-    height: var(--touch-target-min);
-    margin-right: var(--space-sm);
-    background: transparent;
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-lg);
-    color: var(--color-text-tertiary);
-    cursor: pointer;
-    flex-shrink: 0;
-    transition: background var(--duration-fast) var(--ease-standard),
-                color var(--duration-fast) var(--ease-standard);
-}
-
-.sidebar-toggle-btn:hover {
-    background: var(--color-surface-hover);
-    color: var(--color-text-primary);
-}
-
-.sidebar-overlay {
-    display: none;
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.6);
-    z-index: var(--z-drawer-overlay);
-    opacity: 0;
-    transition: opacity var(--duration-normal) var(--ease-standard);
-}
-
 @media (max-width: 768px) {
-    .sidebar-toggle-btn {
-        display: inline-flex;
-    }
+    
 
-    /* The drawer. Off-canvas by default; translateX rather than
-       display/width so it animates on the compositor and, more
-       importantly, so the sidebar's DOM and every app.js render
-       path into it stay exactly as they are on desktop. */
-    .sidebar {
-        position: fixed;
-        top: 0;
-        left: 0;
-        bottom: 0;
-        width: min(var(--sidebar-width-drawer), 86vw);
-        max-width: 86vw;
-        padding: var(--space-lg);
-        transform: translateX(-100%);
-        transition: transform var(--duration-slow) var(--ease-standard);
-        z-index: var(--z-drawer);
-        box-shadow: none;
-        /* Respect notches / rounded corners in landscape. */
-        padding-left: max(var(--space-lg), env(safe-area-inset-left));
-    }
+    
 
-    body.sidebar-open .sidebar {
-        transform: translateX(0);
-        box-shadow: var(--shadow-elevated);
-    }
+    
 
-    .sidebar-overlay {
-        display: block;
-        pointer-events: none;
-    }
+    
 
-    body.sidebar-open .sidebar-overlay {
-        opacity: 1;
-        pointer-events: auto;
-    }
+    
 
-    /* The drawer is an overlay, so the conversation keeps the full
-       width underneath it - this is the actual fix for the
-       permanently-cramped mobile chat column. */
-    .main-content {
-        max-width: 100%;
-        padding: var(--space-lg) var(--space-lg) var(--space-md);
-        gap: var(--space-md);
-    }
+    
 
-    /* Prevent the page behind the drawer from scrolling while it is
-       open, without changing body layout (position:fixed here would
-       lose scroll position). */
-    body.sidebar-open {
-        overflow: hidden;
-    }
+    
 
-    .navbar {
-        gap: var(--space-md);
-        padding-bottom: var(--space-md);
-    }
+    
 
-    .tagline {
-        display: none; /* redundant next to the logo on a small screen */
-    }
+    
 
-    /* Touch targets. Several icon-only controls sat below the
-       reliable-tap threshold before this. */
-    .action-btn,
-    .remove-attachment-btn,
-    .close-modal-btn,
-    .btn-auth-logout {
-        min-width: 40px;
-        min-height: 40px;
-    }
+    
 
-    .send-btn-label {
-        display: none; /* icon carries it; aria-label still names it */
-    }
+    
 
-    #send-btn {
-        min-width: var(--touch-target-min);
-        padding: 0 var(--space-lg);
-    }
+    
 
     /* Modals get near-full-screen room rather than a floating card
        squeezed into a phone viewport. */
@@ -2402,34 +1747,6 @@ body {
     .modal-card {
         max-height: 96dvh;
     }
-}
-
-/* ---- Empty state / centered composer (8D) ------------------
-   Only the composer's POSITION changes between states. The
-   composer itself, the mode selector and every handler stay
-   identical, so there is no second composer implementation to
-   keep in sync. */
-.composer-spacer {
-    display: none;
-}
-
-.main-content.is-empty-chat .composer-spacer {
-    display: block;
-    flex: 1 1 auto;
-    min-height: 0;
-}
-
-.main-content.is-empty-chat .chat-box {
-    flex: 1 1 auto;
-    justify-content: flex-end;
-    background: transparent;
-    border-color: transparent;
-    overflow: visible;
-}
-
-.main-content.is-empty-chat .empty-chat-greeting {
-    flex: 0 0 auto;
-    padding-bottom: var(--space-sm);
 }
 
 /* ---- Content width (8E groundwork) ------------------------
@@ -2609,77 +1926,8 @@ body {
 }
 
 /* ============================================================
-   PHASE 9A — THEME TOGGLE
-   ============================================================ */
-.theme-toggle-btn {
-    display: flex;
-    align-items: center;
-    gap: var(--space-sm);
-    width: 100%;
-    padding: var(--space-sm) var(--space-md);
-    margin-bottom: var(--space-sm);
-    background: transparent;
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-lg);
-    color: var(--color-text-tertiary);
-    font-size: var(--font-size-sm);
-    cursor: pointer;
-    min-height: 36px;
-    transition: background var(--duration-fast) var(--ease-standard),
-                color var(--duration-fast) var(--ease-standard);
-}
-
-.theme-toggle-btn:hover {
-    background: var(--color-surface-hover);
-    color: var(--color-text-primary);
-}
-
-.theme-toggle-label {
-    flex: 1;
-    text-align: left;
-}
-
-/* ============================================================
    PHASE 9B — TOP-LEVEL NAVIGATION, QUIZZES VIEW, PROJECTS VIEW
    ============================================================ */
-
-.nav-rail {
-    display: flex;
-    gap: var(--space-xs);
-    padding-bottom: var(--space-md);
-    margin-bottom: var(--space-md);
-    border-bottom: 1px solid var(--color-border-subtle);
-}
-
-.nav-rail-btn {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: var(--space-xs);
-    padding: var(--space-sm) var(--space-xs);
-    background: transparent;
-    border: none;
-    border-radius: var(--radius-md);
-    color: var(--color-text-muted);
-    font-size: var(--font-size-xs);
-    font-weight: var(--font-weight-medium);
-    cursor: pointer;
-    min-height: var(--touch-target-min);
-    transition: background var(--duration-fast) var(--ease-standard),
-                color var(--duration-fast) var(--ease-standard);
-}
-
-.nav-rail-btn:hover {
-    background: var(--color-surface-hover);
-    color: var(--color-text-primary);
-}
-
-.nav-rail-btn.active {
-    background: var(--color-surface-hover);
-    color: var(--color-text-primary);
-    font-weight: var(--font-weight-semibold);
-}
 
 /* A .nav-view fills the same space #chat-view used to occupy alone -
    exactly one is ever visible (JS toggles .hidden), so no layout
@@ -2869,9 +2117,7 @@ body {
 }
 
 @media (max-width: 768px) {
-    .nav-rail-btn span {
-        font-size: 10px;
-    }
+    
 }
 
 /* ============================================================

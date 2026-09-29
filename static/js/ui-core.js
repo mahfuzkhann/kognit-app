@@ -324,7 +324,8 @@
                 if (!isDrawerMode() || !drawerIsOpen()) return;
                 var navTarget = event.target.closest(
                     ".chat-title-text, .project-title-wrapper, .btn-primary, " +
-                    ".btn-secondary, .btn-quiz, .profile-trigger-btn, .nav-rail-btn"
+                    ".btn-secondary, .btn-quiz, .profile-trigger-btn, .nav-rail-btn, " +
+                    ".sidebar-nav-action"
                 );
                 if (!navTarget) return;
                 // Renaming/deleting happens inside the drawer; only

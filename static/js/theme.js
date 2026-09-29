@@ -57,26 +57,42 @@
         setExplicitTheme(currentTheme() === "light" ? "dark" : "light");
     }
 
-    function updateToggleUI(theme) {
-        var btn = document.getElementById("theme-toggle-btn");
-        if (!btn) return;
-        var isLight = theme === "light";
-        btn.setAttribute("aria-pressed", isLight ? "true" : "false");
-        btn.setAttribute(
-            "aria-label",
-            isLight ? "Switch to dark theme" : "Switch to light theme"
+    // PHASE 10: there are now two toggle buttons (the circular one in the
+    // desktop top bar and its twin in the mobile drawer). Both carry
+    // [data-theme-toggle] and both drive this ONE theme state - there is no
+    // second theme system. #theme-toggle-btn is kept as a fallback selector
+    // so a page without the attribute still works.
+    function toggleButtons() {
+        var list = Array.prototype.slice.call(
+            document.querySelectorAll("[data-theme-toggle]")
         );
-        btn.title = isLight ? "Switch to dark theme" : "Switch to light theme";
-        var sunIcon = btn.querySelector(".theme-icon-sun");
-        var moonIcon = btn.querySelector(".theme-icon-moon");
-        if (sunIcon) sunIcon.classList.toggle("hidden", !isLight);
-        if (moonIcon) moonIcon.classList.toggle("hidden", isLight);
+        var legacy = document.getElementById("theme-toggle-btn");
+        if (legacy && list.indexOf(legacy) === -1) list.push(legacy);
+        return list;
+    }
+
+    function updateToggleUI(theme) {
+        var isLight = theme === "light";
+        var label = isLight ? "Switch to dark theme" : "Switch to light theme";
+        toggleButtons().forEach(function (btn) {
+            btn.setAttribute("aria-pressed", isLight ? "true" : "false");
+            btn.setAttribute("aria-label", label);
+            btn.title = label;
+            // PHASE 10 (design): the icon shows the theme a click switches
+            // TO - a sun while dark, a moon while light - matching the
+            // reference. (Phase 9A showed the CURRENT theme's icon.) The
+            // aria-label above still describes the action, unchanged.
+            var sunIcon = btn.querySelector(".theme-icon-sun");
+            var moonIcon = btn.querySelector(".theme-icon-moon");
+            if (sunIcon) sunIcon.classList.toggle("hidden", isLight);
+            if (moonIcon) moonIcon.classList.toggle("hidden", !isLight);
+        });
     }
 
     function wireToggleButton() {
-        var btn = document.getElementById("theme-toggle-btn");
-        if (!btn) return;
-        btn.addEventListener("click", toggleTheme);
+        toggleButtons().forEach(function (btn) {
+            btn.addEventListener("click", toggleTheme);
+        });
         updateToggleUI(currentTheme());
     }
 
