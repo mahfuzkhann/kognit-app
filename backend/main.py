@@ -12,7 +12,10 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from backend.ai_engine import stream_ai_response, GENERIC_CHAT_ERROR, generate_ai_response, generate_quiz_questions, generate_chat_title, MODEL_NAME
+from backend.ai_engine import (
+    stream_ai_response, GENERIC_CHAT_ERROR, generate_ai_response, generate_quiz_questions,
+    generate_chat_title, MODEL_NAME, new_request_id, ERROR_INTERNAL, ERROR_STREAM_INTERRUPTED,
+)
 from backend.research_decision import decide_research
 from backend.research_models import normalize_grounding_metadata, research_result_to_dict
 from backend.rag_engine import extract_text_from_pdf, PDFExtractionError
@@ -996,8 +999,14 @@ async def chat_endpoint(
 #   {"type":"delta",       "text":"<incremental piece>"}
 #   {"type":"retry"}
 #   {"type":"done",        "reply":"<full final answer>", "research":{...}|null}
-#   {"type":"interrupted", "reply":"<whatever was genuinely generated, may be partial>"}
-#   {"type":"error",       "reply":"<student-facing message>"}
+#   {"type":"interrupted", "reply":"<whatever was genuinely generated, may be partial>", "code":"<ERROR_*>"}
+#   {"type":"error",       "reply":"<student-facing message>", "code":"<ERROR_*>"}
+# P0 STABILIZATION: "code" is a stable machine-readable category (see the
+# ERROR_* constants in backend/ai_engine.py, e.g. PROVIDER_UNAVAILABLE,
+# PROVIDER_RATE_LIMITED, STREAM_INTERRUPTED, INTERNAL_ERROR). It never holds
+# provider text; "reply" stays the only student-facing string. Older clients
+# ignore the extra field. The request id is NOT put in the body - it is
+# returned as the X-Request-ID response header and in every server log line.
 # Exactly one terminal event (done|interrupted|error) is always sent.
 # "retry" is the one NON-terminal, additive-in-Phase-2 event - it may appear
 # at most once, mid-stream, and is always followed by more delta/terminal
@@ -1030,6 +1039,13 @@ async def chat_stream_endpoint(
     background_tasks: BackgroundTasks = None,
     user_and_token: Tuple[str, str] = Depends(_rate_limited_chat)
 ):
+    # P0 STABILIZATION: one id per chat request, used in every log line of
+    # this request (here and in stream_ai_response) and returned to the
+    # browser as the X-Request-ID header. Requests rejected earlier by the
+    # auth/rate-limit dependency (401/429) never reach this point and so have
+    # no id - they are logged by those dependencies.
+    request_id = new_request_id()
+
     # Auth and rate limiting are enforced by the SAME dependency the
     # non-streaming endpoint uses (_rate_limited_chat -> get_current_user_and_token),
     # so a 401/429 is still a real HTTP status BEFORE any streaming starts -
@@ -1055,6 +1071,14 @@ async def chat_stream_endpoint(
 
     research_decision = decide_research(prompt)
     enable_research = research_decision.research_requested
+
+    # Metadata only - never the prompt or any student content.
+    logger.info(
+        "request_id=%s chat_stream_endpoint received mode=%s has_image=%s has_pdf=%s "
+        "history_len=%d research=%s chat_id=%s",
+        request_id, mode, bool(image_bytes), bool(pdf_context), len(conversation_history),
+        enable_research, chat_id or "(none)"
+    )
 
     # Loading copy must describe what is ACTUALLY happening. The frontend
     # renders this; it never guesses. "document" is only ever sent when this
@@ -1095,6 +1119,7 @@ async def chat_stream_endpoint(
                 pdf_context=pdf_context,
                 history=conversation_history,
                 enable_research=enable_research,
+                request_id=request_id,
             )
 
             async for chunk in iterate_in_threadpool(gen):
@@ -1118,16 +1143,26 @@ async def chat_stream_endpoint(
                     # stream in), but tagged so the frontend cannot mistake
                     # it for a completed answer.
                     terminal_sent = True
-                    yield _line({"type": "interrupted", "reply": chunk.text})
+                    yield _line({
+                        "type": "interrupted", "reply": chunk.text,
+                        "code": chunk.error_code or ERROR_STREAM_INTERRUPTED,
+                    })
                     return
                 elif chunk.kind == "error":
                     terminal_sent = True
-                    yield _line({"type": "error", "reply": chunk.text})
+                    yield _line({
+                        "type": "error", "reply": chunk.text,
+                        "code": chunk.error_code or ERROR_INTERNAL,
+                    })
                     return
 
             if not final_text:
+                logger.error(
+                    "request_id=%s chat_stream_endpoint: generator finished with no terminal event "
+                    "and no text", request_id
+                )
                 terminal_sent = True
-                yield _line({"type": "error", "reply": GENERIC_CHAT_ERROR})
+                yield _line({"type": "error", "reply": GENERIC_CHAT_ERROR, "code": ERROR_INTERNAL})
                 return
 
             # Research metadata is normalized through the EXISTING Phase 7C
@@ -1148,8 +1183,8 @@ async def chat_stream_endpoint(
                     research_payload = research_result_to_dict(research_result)
                 except Exception:
                     logger.exception(
-                        "chat_stream_endpoint: research normalization failed - "
-                        "answer is unaffected, sources omitted"
+                        "request_id=%s chat_stream_endpoint: research normalization failed - "
+                        "answer is unaffected, sources omitted", request_id
                     )
                     research_payload = None
 
@@ -1164,9 +1199,9 @@ async def chat_stream_endpoint(
             )
 
             logger.info(
-                "chat_stream_endpoint timing: request_total=%.3fs (mode=%s, has_image=%s, "
+                "request_id=%s chat_stream_endpoint timing: request_total=%.3fs (mode=%s, has_image=%s, "
                 "has_pdf=%s, research=%s, history_len=%d, chat_id=%s)",
-                time.perf_counter() - t_request_start, mode, bool(image_bytes),
+                request_id, time.perf_counter() - t_request_start, mode, bool(image_bytes),
                 bool(pdf_context), enable_research, len(conversation_history), chat_id or "(none)"
             )
 
@@ -1174,7 +1209,10 @@ async def chat_stream_endpoint(
             yield _line({"type": "done", "reply": final_text, "research": research_payload})
 
         except Exception:
-            logger.exception("chat_stream_endpoint: unexpected failure mid-stream")
+            logger.exception(
+                "request_id=%s chat_stream_endpoint: unexpected failure mid-stream code=%s",
+                request_id, ERROR_INTERNAL
+            )
             if not terminal_sent:
                 # The client must never be left waiting on a stream that
                 # stopped producing. If partial text was already delivered,
@@ -1183,7 +1221,7 @@ async def chat_stream_endpoint(
                 if final_text:
                     yield _line({"type": "done", "reply": final_text, "research": None})
                 else:
-                    yield _line({"type": "error", "reply": GENERIC_CHAT_ERROR})
+                    yield _line({"type": "error", "reply": GENERIC_CHAT_ERROR, "code": ERROR_INTERNAL})
 
     return StreamingResponse(
         event_stream(),
@@ -1193,6 +1231,7 @@ async def chat_stream_endpoint(
             # Stops nginx and similar proxies buffering the whole body, which
             # would silently defeat streaming in production.
             "X-Accel-Buffering": "no",
+            "X-Request-ID": request_id,
         },
     )
 

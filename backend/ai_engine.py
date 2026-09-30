@@ -3,7 +3,9 @@ import io
 import json
 import logging
 import random
+import re
 import time
+import uuid
 from typing import Optional
 
 import httpx
@@ -39,7 +41,47 @@ logger = logging.getLogger("kognit.ai_engine")
 # ---------------------------------------------------------------------------
 _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-MODEL_NAME = "gemini-3.6-flash"
+# P0 STABILIZATION - model configuration.
+#
+# The model name used to be a hardcoded literal. It is now read from the
+# GEMINI_MODEL environment variable (set it in .env - see .env.example) and
+# falls back to DEFAULT_MODEL_NAME when the variable is absent, empty, or not
+# a plausible model identifier. The DEFAULT is intentionally unchanged from
+# the previous hardcoded value, so behavior is identical unless GEMINI_MODEL
+# is set. This is configuration only: there is no model routing and no
+# automatic fallback to a different model.
+DEFAULT_MODEL_NAME = "gemini-3.6-flash"
+MODEL_ENV_VAR = "GEMINI_MODEL"
+_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
+
+
+def _resolve_model_name(env=None) -> str:
+    """Return the model to use: env override if valid, else the default.
+
+    `env` is any mapping with .get (defaults to os.environ) so this can be
+    unit-tested without touching the real process environment. An invalid
+    value (whitespace inside, odd characters, too long) is ignored with a
+    warning rather than sent to the provider - a typo in .env must not turn
+    every request into a provider 4xx.
+    """
+    source = os.environ if env is None else env
+    configured = (source.get(MODEL_ENV_VAR) or "").strip()
+    if not configured:
+        return DEFAULT_MODEL_NAME
+    if not _MODEL_NAME_PATTERN.match(configured):
+        logger.warning(
+            "%s is set but is not a valid model identifier - ignoring it and using the default model %s",
+            MODEL_ENV_VAR, DEFAULT_MODEL_NAME,
+        )
+        return DEFAULT_MODEL_NAME
+    return configured
+
+
+MODEL_NAME = _resolve_model_name()
+logger.info(
+    "ai_engine model=%s (source=%s)",
+    MODEL_NAME, MODEL_ENV_VAR if MODEL_NAME != DEFAULT_MODEL_NAME else "default",
+)
 
 # Phase 7B (evaluation subsystem) prompt-versioning support.
 #
@@ -154,6 +196,63 @@ IMAGE_DECODE_ERROR = (
     "Kognit couldn't read the image you attached - it may be corrupted or in an "
     "unsupported format. Please try uploading it again or use a different photo."
 )
+
+# P0 STABILIZATION - stable machine-readable error codes.
+#
+# Carried on the "error" and "interrupted" stream events (field "code") and in
+# every stream_telemetry line, so a provider 503 no longer looks identical to
+# every other failure. These are internal labels - they never contain raw
+# provider text, keys, stack traces or student content. The student-facing
+# message is a separate, safe string (see the *_ERROR constants above).
+ERROR_PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"        # 5xx / 409 after bounded retries
+ERROR_PROVIDER_RATE_LIMITED = "PROVIDER_RATE_LIMITED"      # 429
+ERROR_PROVIDER_SAFETY = "PROVIDER_SAFETY"                  # blocked by a safety-type finish reason
+ERROR_PROVIDER_MAX_TOKENS = "PROVIDER_MAX_TOKENS"          # ran out of output budget
+ERROR_PROVIDER_EMPTY_RESPONSE = "PROVIDER_EMPTY_RESPONSE"  # no text and no recognised reason
+ERROR_PROVIDER_INVALID_REQUEST = "PROVIDER_INVALID_REQUEST"  # non-retryable 4xx (e.g. 400/404)
+ERROR_PROVIDER_AUTH_FAILED = "PROVIDER_AUTH_FAILED"        # 401/403 - bad/blocked API key
+ERROR_PROVIDER_TIMEOUT = "PROVIDER_TIMEOUT"                # our client deadline / connect failure
+ERROR_REQUEST_INVALID = "REQUEST_INVALID"                  # request could not be built (bad image)
+ERROR_STREAM_INTERRUPTED = "STREAM_INTERRUPTED"            # cut off after partial output
+ERROR_INTERNAL = "INTERNAL_ERROR"                          # anything unexpected
+
+# Shown when the provider is temporarily unavailable/overloaded (5xx) and the
+# bounded retries are exhausted. Distinct from GENERIC_CHAT_ERROR so a
+# student knows this is temporary and worth retrying shortly; never contains
+# provider text.
+PROVIDER_UNAVAILABLE_ERROR = (
+    "Kognit's AI service is very busy right now. Please try again in a minute.\n"
+    "Kognit-এর AI সার্ভিসে এই মুহূর্তে অনেক চাপ আছে। এক মিনিট পর আবার চেষ্টা করুন।"
+)
+
+
+def new_request_id() -> str:
+    """One short, opaque, non-guessable id per chat request (12 hex chars)."""
+    return uuid.uuid4().hex[:12]
+
+
+_SAFETY_FINISH_REASON_NAMES = frozenset({
+    "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII",
+    "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION",
+})
+
+
+def _finish_reason_name(finish_reason) -> Optional[str]:
+    if finish_reason is None:
+        return None
+    name = getattr(finish_reason, "name", None)
+    return str(name if name else finish_reason).split(".")[-1].upper()
+
+
+def _error_code_for_finish_reason(finish_reason, default: str) -> str:
+    """Map a provider finish_reason to a stable internal error code."""
+    name = _finish_reason_name(finish_reason)
+    if name == "MAX_TOKENS":
+        return ERROR_PROVIDER_MAX_TOKENS
+    if name in _SAFETY_FINISH_REASON_NAMES:
+        return ERROR_PROVIDER_SAFETY
+    return default
+
 
 # ---------------------------------------------------------------------------
 # PDF CONTEXT BUDGET (Phase 1 fix: confirmed truncation problem).
@@ -361,6 +460,62 @@ RETRY_DELAY_BASE_SECONDS = 1.5
 RETRY_DELAY_JITTER_SECONDS = 0.5
 
 # ---------------------------------------------------------------------------
+# P0 STABILIZATION - bounded retry backoff for the STREAMING path.
+#
+# Problem (audit, confirmed by simulation): stream_ai_response retried a
+# provider 5xx immediately - 3 provider calls in ~0.02s - so its whole retry
+# budget was spent inside a single capacity spike. The non-streaming path
+# already slept between attempts; the streaming path did not.
+#
+# Delay before the Nth retry (N = 1 for the first retry):
+#     base = min(RETRY_DELAY_BASE_SECONDS * RETRY_BACKOFF_MULTIPLIER**(N-1),
+#                RETRY_BACKOFF_MAX_SECONDS)
+#     delay = uniform(base - jitter, base + jitter), then capped again at
+#             RETRY_BACKOFF_MAX_SECONDS
+# With the defaults (1.5s base, x2, 0.5s jitter, 8s cap) and 3 attempts that
+# is ~[1.0-2.0]s before retry 1 and ~[2.5-3.5]s before retry 2, i.e. about
+# 3.5-5.5s of added wait in the worst case. This changes ONLY how long we
+# wait - never how many attempts are made (MAX_ATTEMPTS_BUCKET_A/B and the
+# single mid-stream recovery are unchanged).
+# ---------------------------------------------------------------------------
+RETRY_BACKOFF_MULTIPLIER = 2.0
+RETRY_BACKOFF_MAX_SECONDS = 8.0
+
+
+def _compute_retry_backoff(retry_number: int, rand=random.uniform) -> float:
+    """Seconds to wait before retry number `retry_number` (1-based).
+
+    Pure apart from `rand`, which tests inject to make the result exact.
+    """
+    n = max(1, int(retry_number))
+    base = min(
+        RETRY_DELAY_BASE_SECONDS * (RETRY_BACKOFF_MULTIPLIER ** (n - 1)),
+        RETRY_BACKOFF_MAX_SECONDS,
+    )
+    jitter = min(RETRY_DELAY_JITTER_SECONDS, base)
+    delay = rand(base - jitter, base + jitter)
+    return max(0.0, min(delay, RETRY_BACKOFF_MAX_SECONDS))
+
+
+def _sleep(seconds: float) -> None:
+    """Single indirection over time.sleep. Looked up at call time so tests
+    can replace this module attribute (or patch time.sleep) - no test ever
+    has to wait for a real backoff."""
+    time.sleep(seconds)
+
+
+def _backoff_before_retry(retry_number: int, request_id: str, reason: str) -> float:
+    """Log and wait out the backoff for one retry. Returns the delay used."""
+    delay = _compute_retry_backoff(retry_number)
+    logger.info(
+        "request_id=%s retry backoff retry=%d delay=%.2fs reason=%s",
+        request_id, retry_number, delay, reason,
+    )
+    _sleep(delay)
+    return delay
+
+
+# ---------------------------------------------------------------------------
 # SINGLE RETRY AUTHORITY.
 #
 # google-genai's own HTTP layer will ONLY retry a request if HttpOptions.
@@ -481,6 +636,8 @@ def _log_stream_telemetry(
     total_duration: float,
     explicit_completion_received: bool,
     recovery_used: bool = False,
+    request_id: Optional[str] = None,
+    error_code: Optional[str] = None,
 ) -> None:
     """
     BUG 3 INSTRUMENTATION - exactly one structured summary line per
@@ -513,13 +670,14 @@ def _log_stream_telemetry(
         "stream_telemetry outcome=%s mode=%s attempt=%d/%d model=%s ttft=%s "
         "chunk_count=%d last_chunk_at=%s finish_reason=%s exception_type=%s "
         "http_status=%s total_duration=%.3fs explicit_completion_received=%s "
-        "recovery_used=%s",
+        "recovery_used=%s error_code=%s request_id=%s",
         outcome, mode, attempt, MAX_ATTEMPTS, MODEL_NAME,
         ("%.3fs" % ttft_seconds) if ttft_seconds is not None else None,
         chunk_count,
         ("%.3fs" % last_chunk_elapsed) if last_chunk_elapsed is not None else None,
         finish_reason, exception_type, http_status,
         total_duration, explicit_completion_received, recovery_used,
+        error_code, request_id,
     )
 
 
@@ -1294,6 +1452,9 @@ class StreamChunk:
     grounding_metadata: Optional[object] = None
     usage_metadata: Optional[object] = None
     elapsed_seconds: Optional[float] = None
+    # P0 STABILIZATION: stable machine-readable code (ERROR_* above) on
+    # "error" and "interrupted" chunks. None on text/retry/done.
+    error_code: Optional[str] = None
 
 
 def stream_ai_response(
@@ -1306,6 +1467,7 @@ def stream_ai_response(
     pdf_context: str = "",
     history: list = None,
     enable_research: bool = False,
+    request_id: Optional[str] = None,
 ):
     """Streaming counterpart of generate_ai_response().
 
@@ -1355,7 +1517,19 @@ def stream_ai_response(
     ("done"/"interrupted"/"error") instead, so the HTTP layer always has
     something well-formed to send. Exactly one terminal event per call
     ("retry" is NOT terminal - more chunks always follow it).
+
+    P0 STABILIZATION (this pass): (1) every retry - pre-first-token and the
+    one mid-stream recovery - now waits a bounded, jittered backoff first
+    (see _compute_retry_backoff); the attempt limits themselves are
+    unchanged. For the recovery, the "retry" event is yielded BEFORE the
+    wait so the client resets its bubble immediately. (2) A non-retryable
+    ClientError (400/401/403/404...) is no longer retried - only 409 is,
+    matching the non-streaming path's documented policy. (3) Recovery is
+    only granted when an attempt remains to run it. (4) error/interrupted
+    chunks carry a stable `error_code`, and every log line carries
+    `request_id` (generated here if the caller did not supply one).
     """
+    request_id = request_id or new_request_id()
     t_stream_start = time.perf_counter()
     ttft_seconds = None
     chunk_count = 0
@@ -1369,6 +1543,33 @@ def stream_ai_response(
     # recovery grant - so that iteration gets the FULL request timeout
     # (it's a complete fresh generation, not a quick incremental retry).
     pending_recovery = False
+    # P0 STABILIZATION: how many retries (pre-first-token retries plus the
+    # one recovery) have been granted so far. Drives ONLY how long the next
+    # backoff is - it is never a limit; the attempt ceilings are unchanged.
+    retries_granted = 0
+
+    def _telemetry(outcome, attempt, *, finish_reason=None, exc=None, http_status=None,
+                   error_code=None, complete=False):
+        # One place that adds request_id/error_code to the per-request
+        # summary line. Reads the live loop state at call time.
+        _log_stream_telemetry(
+            outcome=outcome, mode=mode, attempt=attempt,
+            ttft_seconds=ttft_seconds, chunk_count=chunk_count,
+            last_chunk_elapsed=last_chunk_elapsed, finish_reason=finish_reason,
+            exception_type=type(exc).__name__ if exc is not None else None,
+            http_status=http_status,
+            total_duration=time.perf_counter() - t_stream_start,
+            explicit_completion_received=complete,
+            recovery_used=recovery_used,
+            request_id=request_id, error_code=error_code,
+        )
+
+    logger.info(
+        "request_id=%s stream_ai_response start model=%s mode=%s has_image=%s has_pdf=%s "
+        "history_len=%d research=%s",
+        request_id, MODEL_NAME, mode, bool(image_bytes), bool(pdf_context),
+        len(history or []), enable_research,
+    )
 
     try:
         req = _build_chat_request(
@@ -1382,7 +1583,11 @@ def stream_ai_response(
             history=history,
         )
     except _ChatRequestBuildError as exc:
-        yield StreamChunk(kind="error", text=exc.message)
+        logger.warning(
+            "request_id=%s request build failed - student-facing message returned code=%s",
+            request_id, ERROR_REQUEST_INVALID,
+        )
+        yield StreamChunk(kind="error", text=exc.message, error_code=ERROR_REQUEST_INVALID)
         return
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -1409,6 +1614,11 @@ def stream_ai_response(
         usage_metadata = None
         last_finish_reason = None
         last_finish_message = None
+
+        logger.info(
+            "request_id=%s provider attempt=%d/%d model=%s timeout=%ds recovery_attempt=%s",
+            request_id, attempt, MAX_ATTEMPTS, MODEL_NAME, attempt_timeout, is_recovery_attempt,
+        )
 
         try:
             chat_session = _client.chats.create(
@@ -1447,13 +1657,9 @@ def stream_ai_response(
                     # BUG 3 FIX: finish_reason is the only signal that can
                     # distinguish a clean STOP from MAX_TOKENS/SAFETY/
                     # RECITATION/etc when the iterator exits with NO
-                    # exception at all. Verified directly against the
-                    # installed google-genai==2.20.0 Candidate model
-                    # (finish_reason is documented as unset while the model
-                    # is still generating) - an intermediate None is
-                    # expected and must not erase an earlier real value, so
-                    # keep the most recent non-None one, same pattern as
-                    # grounding_metadata above.
+                    # exception at all. An intermediate None is expected and
+                    # must not erase an earlier real value, so keep the most
+                    # recent non-None one, same pattern as grounding_metadata.
                     fr = getattr(cand, "finish_reason", None)
                     if fr is not None:
                         last_finish_reason = fr
@@ -1463,39 +1669,26 @@ def stream_ai_response(
                     usage_metadata = response.usage_metadata
 
             elapsed = time.perf_counter() - t_attempt_start
-            total_elapsed = time.perf_counter() - t_stream_start
             final_text = "".join(collected)
 
             if not final_text:
                 # Same meaning as the non-streaming path's empty .text: almost
                 # always a safety-filter block. Not retried - an identical
                 # request would be blocked again.
+                code = _error_code_for_finish_reason(last_finish_reason, ERROR_PROVIDER_EMPTY_RESPONSE)
                 logger.warning(
-                    "stream_ai_response got a blocked/empty stream attempt=%d/%d elapsed=%.3fs "
-                    "finish_reason=%s (mode=%s, board=%s, user_class=%s)",
-                    attempt, MAX_ATTEMPTS, elapsed, last_finish_reason, mode, board, user_class
+                    "request_id=%s stream_ai_response got a blocked/empty stream attempt=%d/%d "
+                    "elapsed=%.3fs finish_reason=%s code=%s (mode=%s, board=%s, user_class=%s)",
+                    request_id, attempt, MAX_ATTEMPTS, elapsed, last_finish_reason, code,
+                    mode, board, user_class
                 )
-                _log_stream_telemetry(
-                    outcome="blocked_empty", mode=mode, attempt=attempt,
-                    ttft_seconds=ttft_seconds, chunk_count=chunk_count,
-                    last_chunk_elapsed=last_chunk_elapsed, finish_reason=last_finish_reason,
-                    exception_type=None, http_status=None, total_duration=total_elapsed,
-                    explicit_completion_received=False,
-                    recovery_used=recovery_used,
-                )
-                yield StreamChunk(kind="error", text=BLOCKED_RESPONSE_ERROR)
+                _telemetry("blocked_empty", attempt, finish_reason=last_finish_reason, error_code=code)
+                yield StreamChunk(kind="error", text=BLOCKED_RESPONSE_ERROR, error_code=code)
                 return
 
             if _is_successful_finish(last_finish_reason):
                 _log_usage(usage_metadata, attempt, elapsed, mode, bool(image_bytes), bool(pdf_context))
-                _log_stream_telemetry(
-                    outcome="success", mode=mode, attempt=attempt,
-                    ttft_seconds=ttft_seconds, chunk_count=chunk_count,
-                    last_chunk_elapsed=last_chunk_elapsed, finish_reason=last_finish_reason,
-                    exception_type=None, http_status=None, total_duration=total_elapsed,
-                    explicit_completion_received=True,
-                    recovery_used=recovery_used,
-                )
+                _telemetry("success", attempt, finish_reason=last_finish_reason, complete=True)
                 yield StreamChunk(
                     kind="done",
                     text=final_text,
@@ -1506,235 +1699,237 @@ def stream_ai_response(
                 return
 
             # BUG 3 FIX: the iterator exited with NO exception, yet the last
-            # observed finish_reason is not STOP. Before this fix this branch
-            # did not exist - any non-empty final_text fell straight through
-            # to "done" regardless of finish_reason. This is exactly the
-            # silent-truncation mode the investigation found had zero
-            # visibility: no exception is raised anywhere in this case.
+            # observed finish_reason is not STOP - the silent-truncation mode.
+            code = _error_code_for_finish_reason(last_finish_reason, ERROR_STREAM_INTERRUPTED)
             logger.warning(
-                "stream_ai_response non-success finish_reason=%s finish_message=%s "
-                "attempt=%d/%d elapsed=%.3fs chunk_count=%d (mode=%s, board=%s, "
+                "request_id=%s stream_ai_response non-success finish_reason=%s finish_message=%s "
+                "attempt=%d/%d elapsed=%.3fs chunk_count=%d code=%s (mode=%s, board=%s, "
                 "user_class=%s) - finalizing as interrupted, not done",
-                last_finish_reason, last_finish_message, attempt, MAX_ATTEMPTS, elapsed,
-                chunk_count, mode, board, user_class
+                request_id, last_finish_reason, last_finish_message, attempt, MAX_ATTEMPTS,
+                elapsed, chunk_count, code, mode, board, user_class
             )
-            _log_stream_telemetry(
-                outcome="interrupted_finish_reason", mode=mode, attempt=attempt,
-                ttft_seconds=ttft_seconds, chunk_count=chunk_count,
-                last_chunk_elapsed=last_chunk_elapsed, finish_reason=last_finish_reason,
-                exception_type=None, http_status=None, total_duration=total_elapsed,
-                explicit_completion_received=False,
-                recovery_used=recovery_used,
-            )
+            _telemetry("interrupted_finish_reason", attempt, finish_reason=last_finish_reason, error_code=code)
             yield StreamChunk(
                 kind="interrupted",
                 text=final_text,
                 grounding_metadata=grounding_metadata,
                 usage_metadata=usage_metadata,
                 elapsed_seconds=elapsed,
+                error_code=code,
             )
             return
 
         except genai_errors.ClientError as e:
             elapsed = time.perf_counter() - t_attempt_start
-            total_elapsed = time.perf_counter() - t_stream_start
+            status_code = getattr(e, "code", None)
             if produced_any_text:
+                # Unexpected (a 4xx after bytes already flowed) - keep the
+                # full traceback, this is not a known transient condition.
                 logger.exception(
-                    "stream_ai_response client error AFTER first output - finalizing as "
-                    "interrupted attempt=%d elapsed=%.3fs chunk_count=%d finish_reason=%s "
-                    "(mode=%s)", attempt, elapsed, chunk_count, last_finish_reason, mode
+                    "request_id=%s stream_ai_response client error AFTER first output - finalizing "
+                    "as interrupted attempt=%d elapsed=%.3fs chunk_count=%d finish_reason=%s "
+                    "http_status=%s (mode=%s)",
+                    request_id, attempt, elapsed, chunk_count, last_finish_reason, status_code, mode
                 )
-                _log_stream_telemetry(
-                    outcome="interrupted_exception", mode=mode, attempt=attempt,
-                    ttft_seconds=ttft_seconds, chunk_count=chunk_count,
-                    last_chunk_elapsed=last_chunk_elapsed, finish_reason=last_finish_reason,
-                    exception_type=type(e).__name__, http_status=getattr(e, "code", None),
-                    total_duration=total_elapsed, explicit_completion_received=False,
-                    recovery_used=recovery_used,
-                )
+                _telemetry("interrupted_exception", attempt, finish_reason=last_finish_reason, exc=e,
+                           http_status=status_code, error_code=ERROR_STREAM_INTERRUPTED)
                 yield StreamChunk(
                     kind="interrupted",
                     text="".join(collected),
                     grounding_metadata=grounding_metadata,
                     usage_metadata=usage_metadata,
                     elapsed_seconds=elapsed,
+                    error_code=ERROR_STREAM_INTERRUPTED,
                 )
                 return
-            if getattr(e, "code", None) == 429:
-                logger.exception(
-                    "stream_ai_response quota exhausted attempt=%d elapsed=%.3fs (mode=%s)",
-                    attempt, elapsed, mode
+            if status_code == 429:
+                # Known condition (quota) - a warning, not a traceback.
+                logger.warning(
+                    "request_id=%s stream_ai_response quota exhausted attempt=%d elapsed=%.3fs "
+                    "status=%s (mode=%s)",
+                    request_id, attempt, elapsed, getattr(e, "status", None), mode
                 )
-                _log_stream_telemetry(
-                    outcome="quota_exhausted", mode=mode, attempt=attempt,
-                    ttft_seconds=ttft_seconds, chunk_count=chunk_count,
-                    last_chunk_elapsed=last_chunk_elapsed, finish_reason=None,
-                    exception_type=type(e).__name__, http_status=429,
-                    total_duration=total_elapsed, explicit_completion_received=False,
-                    recovery_used=recovery_used,
-                )
-                yield StreamChunk(kind="error", text=QUOTA_EXHAUSTED_ERROR)
+                _telemetry("quota_exhausted", attempt, exc=e, http_status=429,
+                           error_code=ERROR_PROVIDER_RATE_LIMITED)
+                yield StreamChunk(kind="error", text=QUOTA_EXHAUSTED_ERROR,
+                                  error_code=ERROR_PROVIDER_RATE_LIMITED)
                 return
+            if status_code in TRANSIENT_RETRYABLE_CLIENT_HTTP_CODES:
+                # Bucket B (409 Aborted-equivalent) - the only ClientError
+                # class that is retried, same as the non-streaming path.
+                if attempt < MAX_ATTEMPTS_BUCKET_B:
+                    logger.warning(
+                        "request_id=%s stream_ai_response transient client error http_status=%s "
+                        "attempt=%d/%d elapsed=%.3fs (mode=%s) - will retry after backoff",
+                        request_id, status_code, attempt, MAX_ATTEMPTS_BUCKET_B, elapsed, mode
+                    )
+                    retries_granted += 1
+                    _backoff_before_retry(retries_granted, request_id, "client_%s" % status_code)
+                    continue
+                logger.error(
+                    "request_id=%s stream_ai_response transient client error http_status=%s - "
+                    "gave up after %d attempts (mode=%s)",
+                    request_id, status_code, attempt, mode
+                )
+                _telemetry("error_client", attempt, exc=e, http_status=status_code,
+                           error_code=ERROR_PROVIDER_UNAVAILABLE)
+                yield StreamChunk(kind="error", text=PROVIDER_UNAVAILABLE_ERROR,
+                                  error_code=ERROR_PROVIDER_UNAVAILABLE)
+                return
+            # Any other 4xx (bad request, permission denied, not found...) is
+            # a request/configuration problem - retrying cannot fix it, and
+            # with backoff it would only make the student wait. Logged ONCE,
+            # with a traceback, because it needs a developer.
+            code = (ERROR_PROVIDER_AUTH_FAILED if status_code in (401, 403)
+                    else ERROR_PROVIDER_INVALID_REQUEST)
             logger.exception(
-                "stream_ai_response client error attempt=%d/%d elapsed=%.3fs (mode=%s)",
-                attempt, MAX_ATTEMPTS, elapsed, mode
+                "request_id=%s stream_ai_response non-retryable client error http_status=%s "
+                "code=%s attempt=%d elapsed=%.3fs (mode=%s) - not retried",
+                request_id, status_code, code, attempt, elapsed, mode
             )
-            if attempt >= MAX_ATTEMPTS_BUCKET_A:
-                _log_stream_telemetry(
-                    outcome="error_client", mode=mode, attempt=attempt,
-                    ttft_seconds=ttft_seconds, chunk_count=chunk_count,
-                    last_chunk_elapsed=last_chunk_elapsed, finish_reason=None,
-                    exception_type=type(e).__name__, http_status=getattr(e, "code", None),
-                    total_duration=total_elapsed, explicit_completion_received=False,
-                    recovery_used=recovery_used,
-                )
-                yield StreamChunk(kind="error", text=GENERIC_CHAT_ERROR)
-                return
-            continue
+            _telemetry("error_client", attempt, exc=e, http_status=status_code, error_code=code)
+            yield StreamChunk(kind="error", text=GENERIC_CHAT_ERROR, error_code=code)
+            return
 
         except genai_errors.ServerError as e:
             # BUG 3 PHASE 2 - the confirmed-transient recovery path.
             # ServerError means Gemini's own infrastructure (5xx), not the
             # request, is the problem - this is the ONLY exception class
-            # this phase treats as safe to recover from after partial
-            # output, and it is scoped this narrowly deliberately: the real
-            # production telemetry that motivated this phase showed exactly
-            # "HTTP 200, streaming began, N chunks delivered, then 503
-            # UNAVAILABLE (high demand... usually temporary)" - a provider
-            # capacity problem, not a request problem. ClientError (429
-            # included) and a bare unexpected Exception after text still
-            # finalize as "interrupted" immediately, same as Phase 1 - see
-            # those branches. Retrying either of those would either burn
-            # latency on an unwinnable quota wait (429) or blindly retry a
-            # Kognit-side bug that would just fail identically again.
+            # treated as safe to recover from after partial output. The real
+            # production telemetry that motivated this showed "HTTP 200,
+            # streaming began, N chunks delivered, then 503 UNAVAILABLE (high
+            # demand... usually temporary)" - a provider capacity problem.
             elapsed = time.perf_counter() - t_attempt_start
-            total_elapsed = time.perf_counter() - t_stream_start
+            status_code = getattr(e, "code", None)
             if produced_any_text:
-                if not recovery_used:
+                # P0: recovery is only granted when an attempt remains to run
+                # it. (Before, granting it on the final attempt emitted a
+                # "retry" event and then fell out of the loop into a generic
+                # error, discarding the partial answer for nothing.)
+                if not recovery_used and attempt < MAX_ATTEMPTS:
                     # Grant the ONE bounded recovery generation. The partial
                     # text collected so far is discarded completely, never
                     # concatenated - continuing this same `for attempt` loop
                     # resets `collected`/`grounding_metadata`/
                     # `usage_metadata`/`last_finish_reason` fresh at the top
-                    # of the next iteration (identical to how a
-                    # before-first-token retry already worked), and a
-                    # brand-new chat_session is created from the SAME frozen
-                    # `req` - so the recovery is the same prompt/system
-                    # instruction/history/image/PDF context, a completely
-                    # fresh generation, not a continuation.
+                    # of the next iteration, and a brand-new chat_session is
+                    # created from the SAME frozen `req` - so the recovery is
+                    # the same prompt/system instruction/history/image/PDF
+                    # context, a completely fresh generation.
                     recovery_used = True
                     pending_recovery = True
+                    retries_granted += 1
                     logger.warning(
-                        "stream_ai_response transient server error AFTER first output - "
+                        "request_id=%s stream_ai_response transient server error AFTER first output - "
                         "triggering ONE bounded recovery generation, discarding partial "
                         "attempt=%d elapsed=%.3fs chunk_count=%d http_status=%s (mode=%s)",
-                        attempt, elapsed, chunk_count, getattr(e, "code", None), mode
+                        request_id, attempt, elapsed, chunk_count, status_code, mode
                     )
-                    _log_stream_telemetry(
-                        outcome="recovery_triggered", mode=mode, attempt=attempt,
-                        ttft_seconds=ttft_seconds, chunk_count=chunk_count,
-                        last_chunk_elapsed=last_chunk_elapsed, finish_reason=last_finish_reason,
-                        exception_type=type(e).__name__, http_status=getattr(e, "code", None),
-                        total_duration=total_elapsed, explicit_completion_received=False,
-                        recovery_used=True,
-                    )
+                    _telemetry("recovery_triggered", attempt, finish_reason=last_finish_reason, exc=e,
+                               http_status=status_code)
+                    # The client resets its bubble on this event, so it is
+                    # sent BEFORE the backoff wait - the student sees the
+                    # "retrying" state immediately, not after the delay.
                     yield StreamChunk(kind="retry")
+                    _backoff_before_retry(retries_granted, request_id, "recovery_after_partial_output")
                     continue
-                # The recovery generation ITSELF also failed transiently
-                # after producing its OWN partial output. Bounded means
-                # bounded - no second recovery. Finalize as interrupted with
-                # THIS attempt's own text only, never combined with the
-                # first (discarded) attempt's text.
-                logger.exception(
-                    "stream_ai_response transient server error AFTER the recovery "
-                    "attempt's own output - no further recovery, finalizing as "
-                    "interrupted attempt=%d elapsed=%.3fs chunk_count=%d (mode=%s)",
-                    attempt, elapsed, chunk_count, mode
+                # Recovery already used (or no attempt left to run it):
+                # bounded means bounded. Finalize as interrupted with THIS
+                # attempt's own text only, never combined with a discarded
+                # earlier attempt. Known transient condition -> no traceback.
+                logger.error(
+                    "request_id=%s stream_ai_response transient server error AFTER output and no "
+                    "recovery available - finalizing as interrupted attempt=%d elapsed=%.3fs "
+                    "chunk_count=%d http_status=%s (mode=%s)",
+                    request_id, attempt, elapsed, chunk_count, status_code, mode
                 )
-                _log_stream_telemetry(
-                    outcome="interrupted_exception", mode=mode, attempt=attempt,
-                    ttft_seconds=ttft_seconds, chunk_count=chunk_count,
-                    last_chunk_elapsed=last_chunk_elapsed, finish_reason=last_finish_reason,
-                    exception_type=type(e).__name__, http_status=getattr(e, "code", None),
-                    total_duration=total_elapsed, explicit_completion_received=False,
-                    recovery_used=True,
-                )
+                _telemetry("interrupted_exception", attempt, finish_reason=last_finish_reason, exc=e,
+                           http_status=status_code, error_code=ERROR_PROVIDER_UNAVAILABLE)
                 yield StreamChunk(
                     kind="interrupted",
                     text="".join(collected),
                     grounding_metadata=grounding_metadata,
                     usage_metadata=usage_metadata,
                     elapsed_seconds=elapsed,
+                    error_code=ERROR_PROVIDER_UNAVAILABLE,
                 )
                 return
             # Transient server error BEFORE any output on this attempt: the
-            # existing bucket-B "maybe it fails before first token, try
-            # again" protection (unchanged in effect - MAX_ATTEMPTS_BUCKET_B
-            # is the same 3 this case already retried up to when it fell
-            # through the generic Exception branch pre-Phase-2; it is now
-            # just correctly classified as ServerError). This is NOT the new
-            # recovery grant and does not set recovery_used.
-            logger.exception(
-                "stream_ai_response server error attempt=%d/%d elapsed=%.3fs http_status=%s "
-                "(mode=%s)", attempt, MAX_ATTEMPTS_BUCKET_B, elapsed, getattr(e, "code", None), mode
-            )
-            if attempt >= MAX_ATTEMPTS_BUCKET_B:
-                _log_stream_telemetry(
-                    outcome="error_server", mode=mode, attempt=attempt,
-                    ttft_seconds=ttft_seconds, chunk_count=chunk_count,
-                    last_chunk_elapsed=last_chunk_elapsed, finish_reason=None,
-                    exception_type=type(e).__name__, http_status=getattr(e, "code", None),
-                    total_duration=total_elapsed, explicit_completion_received=False,
-                    recovery_used=recovery_used,
+            # existing bucket-B "fails before first token, try again"
+            # protection (same MAX_ATTEMPTS_BUCKET_B ceiling as before), now
+            # with a bounded backoff between attempts. Not the recovery
+            # grant; does not set recovery_used.
+            if attempt < MAX_ATTEMPTS_BUCKET_B:
+                logger.warning(
+                    "request_id=%s stream_ai_response server error attempt=%d/%d elapsed=%.3fs "
+                    "http_status=%s status=%s (mode=%s) - will retry after backoff",
+                    request_id, attempt, MAX_ATTEMPTS_BUCKET_B, elapsed, status_code,
+                    getattr(e, "status", None), mode
                 )
-                yield StreamChunk(kind="error", text=GENERIC_CHAT_ERROR)
-                return
-            continue
+                retries_granted += 1
+                _backoff_before_retry(retries_granted, request_id, "server_error_%s" % status_code)
+                continue
+            # Exhausted. A 5xx is a well-understood provider condition, so
+            # this is one clear ERROR line with the status - not a traceback.
+            logger.error(
+                "request_id=%s stream_ai_response provider unavailable - gave up after %d attempts "
+                "http_status=%s status=%s (mode=%s)",
+                request_id, attempt, status_code, getattr(e, "status", None), mode
+            )
+            _telemetry("error_server", attempt, exc=e, http_status=status_code,
+                       error_code=ERROR_PROVIDER_UNAVAILABLE)
+            yield StreamChunk(kind="error", text=PROVIDER_UNAVAILABLE_ERROR,
+                              error_code=ERROR_PROVIDER_UNAVAILABLE)
+            return
 
         except Exception as e:
             elapsed = time.perf_counter() - t_attempt_start
-            total_elapsed = time.perf_counter() - t_stream_start
+            is_timeout = isinstance(e, (httpx.TimeoutException, httpx.ConnectError))
+            status_code = getattr(e, "code", None)
             if produced_any_text:
                 # Network drop / timeout mid-answer, or any other unexpected
-                # exception - the exact type/status is now captured in the
-                # telemetry line below (previously only a generic
-                # "failed" log with no exception identity at all).
+                # exception - the exact type/status is in the telemetry line.
                 logger.exception(
-                    "stream_ai_response failed AFTER first output - finalizing as interrupted "
-                    "attempt=%d elapsed=%.3fs chunk_count=%d exception_type=%s (mode=%s)",
-                    attempt, elapsed, chunk_count, type(e).__name__, mode
+                    "request_id=%s stream_ai_response failed AFTER first output - finalizing as "
+                    "interrupted attempt=%d elapsed=%.3fs chunk_count=%d exception_type=%s (mode=%s)",
+                    request_id, attempt, elapsed, chunk_count, type(e).__name__, mode
                 )
-                _log_stream_telemetry(
-                    outcome="interrupted_exception", mode=mode, attempt=attempt,
-                    ttft_seconds=ttft_seconds, chunk_count=chunk_count,
-                    last_chunk_elapsed=last_chunk_elapsed, finish_reason=last_finish_reason,
-                    exception_type=type(e).__name__, http_status=getattr(e, "code", None),
-                    total_duration=total_elapsed, explicit_completion_received=False,
-                    recovery_used=recovery_used,
-                )
+                _telemetry("interrupted_exception", attempt, finish_reason=last_finish_reason, exc=e,
+                           http_status=status_code, error_code=ERROR_STREAM_INTERRUPTED)
                 yield StreamChunk(
                     kind="interrupted",
                     text="".join(collected),
                     grounding_metadata=grounding_metadata,
                     usage_metadata=usage_metadata,
                     elapsed_seconds=elapsed,
+                    error_code=ERROR_STREAM_INTERRUPTED,
                 )
                 return
-            logger.exception(
-                "stream_ai_response failed attempt=%d/%d elapsed=%.3fs exception_type=%s (mode=%s)",
-                attempt, MAX_ATTEMPTS, elapsed, type(e).__name__, mode
-            )
+            code = ERROR_PROVIDER_TIMEOUT if is_timeout else ERROR_INTERNAL
             if attempt >= MAX_ATTEMPTS:
-                _log_stream_telemetry(
-                    outcome="error_exception", mode=mode, attempt=attempt,
-                    ttft_seconds=ttft_seconds, chunk_count=chunk_count,
-                    last_chunk_elapsed=last_chunk_elapsed, finish_reason=None,
-                    exception_type=type(e).__name__, http_status=getattr(e, "code", None),
-                    total_duration=total_elapsed, explicit_completion_received=False,
-                    recovery_used=recovery_used,
+                # Final failure: the one place an unexpected exception gets
+                # its full traceback (earlier attempts log a one-line warning).
+                logger.exception(
+                    "request_id=%s stream_ai_response failed attempt=%d/%d elapsed=%.3fs "
+                    "exception_type=%s code=%s (mode=%s)",
+                    request_id, attempt, MAX_ATTEMPTS, elapsed, type(e).__name__, code, mode
                 )
-                yield StreamChunk(kind="error", text=GENERIC_CHAT_ERROR)
+                _telemetry("error_exception", attempt, exc=e, http_status=status_code, error_code=code)
+                yield StreamChunk(kind="error", text=GENERIC_CHAT_ERROR, error_code=code)
                 return
+            logger.warning(
+                "request_id=%s stream_ai_response failed before first output attempt=%d/%d "
+                "elapsed=%.3fs exception_type=%s code=%s (mode=%s) - will retry",
+                request_id, attempt, MAX_ATTEMPTS, elapsed, type(e).__name__, code, mode
+            )
+            retries_granted += 1
+            if is_timeout:
+                # Our own client deadline already consumed the wait; adding a
+                # backoff on top would only lengthen the student's wait.
+                logger.info("request_id=%s retry without extra backoff (client timeout already waited)", request_id)
+            else:
+                _backoff_before_retry(retries_granted, request_id, "exception_%s" % type(e).__name__)
             continue
 
-    yield StreamChunk(kind="error", text=GENERIC_CHAT_ERROR)
+    logger.error("request_id=%s stream_ai_response exited the retry loop without a terminal event", request_id)
+    yield StreamChunk(kind="error", text=GENERIC_CHAT_ERROR, error_code=ERROR_INTERNAL)
