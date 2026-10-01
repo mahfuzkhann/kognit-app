@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from backend import ai_engine
+from backend.providers import get_provider
 from evaluation import authoring, db as evaldb
 from evaluation.regression import compare_runs
 from evaluation.report import generate_report, render_markdown
@@ -70,7 +71,7 @@ def _run_with_answer_text(conn, evaluator_version_id, answer_text: str, dataset_
     del usage.cached_content_token_count
     response.usage_metadata = usage
 
-    with patch.object(ai_engine, "_client") as client:
+    with patch.object(get_provider(), "client") as client:
         chat = MagicMock()
         chat.send_message.return_value = response
         client.chats.create.return_value = chat

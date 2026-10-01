@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from google.genai import types
 
+from backend.providers.gemini import map_grounding
 from backend.research_models import (
     is_safe_citation_url,
     normalize_grounding_metadata,
@@ -60,7 +61,7 @@ class TestNormalizeGroundingMetadata:
     def test_metadata_with_no_search_queries_is_not_used(self):
         metadata = types.GroundingMetadata(web_search_queries=[], grounding_chunks=[], grounding_supports=[])
         result = normalize_grounding_metadata(
-            metadata, provider="google", provider_model="gemini-3.6-flash",
+            map_grounding(metadata), provider="google", provider_model="gemini-3.6-flash",
             research_latency_seconds=0.9, decision_reason="test", decision_category=None,
         )
         assert result.grounding_status == "not_used"
@@ -84,7 +85,7 @@ class TestNormalizeGroundingMetadata:
             grounding_supports=[support],
         )
         result = normalize_grounding_metadata(
-            metadata, provider="google", provider_model="gemini-3.6-flash-001",
+            map_grounding(metadata), provider="google", provider_model="gemini-3.6-flash-001",
             research_latency_seconds=2.1, decision_reason="temporal signal", decision_category="temporal_signal",
         )
         assert result.grounding_status == "used"
@@ -107,7 +108,7 @@ class TestNormalizeGroundingMetadata:
             )],
         )
         result = normalize_grounding_metadata(
-            metadata, provider="google", provider_model="gemini-3.6-flash",
+            map_grounding(metadata), provider="google", provider_model="gemini-3.6-flash",
             research_latency_seconds=1.0, decision_reason="r", decision_category=None,
         )
         assert result.citations[0].citation_status == "source_unmapped"
@@ -123,7 +124,7 @@ class TestNormalizeGroundingMetadata:
             )],
         )
         result = normalize_grounding_metadata(
-            metadata, provider="google", provider_model="gemini-3.6-flash",
+            map_grounding(metadata), provider="google", provider_model="gemini-3.6-flash",
             research_latency_seconds=1.0, decision_reason="r", decision_category=None,
         )
         assert result.citations[0].citation_status == "malformed"
@@ -137,7 +138,7 @@ class TestNormalizeGroundingMetadata:
             grounding_supports=[],
         )
         result = normalize_grounding_metadata(
-            metadata, provider="google", provider_model="gemini-3.6-flash",
+            map_grounding(metadata), provider="google", provider_model="gemini-3.6-flash",
             research_latency_seconds=1.0, decision_reason="r", decision_category=None,
         )
         assert result.sources == []
@@ -151,7 +152,7 @@ class TestResearchResultToDict:
             web_search_queries=["q"], grounding_chunks=[chunk_safe, chunk_unsafe], grounding_supports=[],
         )
         result = normalize_grounding_metadata(
-            metadata, provider="google", provider_model="gemini-3.6-flash",
+            map_grounding(metadata), provider="google", provider_model="gemini-3.6-flash",
             research_latency_seconds=1.0, decision_reason="r", decision_category=None,
         )
         payload = research_result_to_dict(result)
@@ -163,7 +164,7 @@ class TestResearchResultToDict:
     def test_not_used_result_has_empty_sources_and_citations(self):
         metadata = types.GroundingMetadata(web_search_queries=[], grounding_chunks=[], grounding_supports=[])
         result = normalize_grounding_metadata(
-            metadata, provider="google", provider_model="gemini-3.6-flash",
+            map_grounding(metadata), provider="google", provider_model="gemini-3.6-flash",
             research_latency_seconds=0.5, decision_reason="r", decision_category=None,
         )
         payload = research_result_to_dict(result)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from backend import ai_engine
+from backend.providers import get_provider
 from evaluation.model_adapter import GeminiAdapter, ModelRequest
 
 
@@ -24,7 +25,7 @@ class TestGeminiAdapter:
         del usage.cached_content_token_count
         response.usage_metadata = usage
 
-        with patch.object(ai_engine, "_client") as client:
+        with patch.object(get_provider(), "client") as client:
             chat = MagicMock()
             chat.send_message.return_value = response
             client.chats.create.return_value = chat
@@ -47,7 +48,7 @@ class TestGeminiAdapter:
     def test_operational_error_is_captured_without_crashing(self):
         # e.g. a quota-exhausted response - generate_ai_response() itself
         # already returns a controlled error string, not an exception.
-        with patch.object(ai_engine, "_client") as client:
+        with patch.object(get_provider(), "client") as client:
             from google.genai import errors as genai_errors
 
             mock_error_response = MagicMock()

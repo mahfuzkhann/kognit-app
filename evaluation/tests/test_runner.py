@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from backend import ai_engine
+from backend.providers import get_provider
 from evaluation import authoring, db as evaldb
 from evaluation.runner import RunConfig, run_evaluation
 
@@ -68,7 +69,7 @@ class TestRunnerHappyPath:
         del usage.cached_content_token_count
         response.usage_metadata = usage
 
-        with patch.object(ai_engine, "_client") as client:
+        with patch.object(get_provider(), "client") as client:
             chat = MagicMock()
             chat.send_message.return_value = response
             client.chats.create.return_value = chat
@@ -114,7 +115,7 @@ class TestRunnerHappyPath:
         del usage.cached_content_token_count
         response.usage_metadata = usage
 
-        with patch.object(ai_engine, "_client") as client:
+        with patch.object(get_provider(), "client") as client:
             chat = MagicMock()
             chat.send_message.return_value = response
             client.chats.create.return_value = chat
@@ -161,7 +162,7 @@ class TestRunnerFailureIsolation:
                 result.is_error = False
                 result.resolved_model_version = None
                 result.response_id = None
-                result.usage_metadata = None
+                result.usage = None
                 result.elapsed_seconds = 0.1
                 return result
             mock_generate.side_effect = side_effect

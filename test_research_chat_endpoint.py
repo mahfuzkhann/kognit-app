@@ -18,6 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 from google.genai import types
 
+from backend.providers.gemini import map_grounding
 from backend import main as main_module
 from backend.ai_engine import AIGenerationResult
 
@@ -83,7 +84,7 @@ class TestResearchPath:
                 grounding_chunk_indices=[0],
             )],
         )
-        return AIGenerationResult(text=text, is_error=False, grounding_metadata=metadata)
+        return AIGenerationResult(text=text, is_error=False, grounding=map_grounding(metadata))
 
     def test_research_triggering_question_calls_with_correct_kwargs(self, client):
         _override_auth_as("user-1")
@@ -114,7 +115,7 @@ class TestResearchPath:
         # decorated with a research payload - Kognit must not imply an
         # error reply was web-grounded.
         _override_auth_as("user-1")
-        error_result = AIGenerationResult(text="Sorry, the AI service is temporarily busy...", is_error=True, grounding_metadata=None)
+        error_result = AIGenerationResult(text="Sorry, the AI service is temporarily busy...", is_error=True, grounding=None)
         with patch.object(main_module, "generate_ai_response", return_value=error_result), \
              patch.object(main_module, "get_student_profile", new=AsyncMock(return_value=PROFILE)):
             resp = client.post("/api/chat", data={"prompt": "What is the current BDT to USD exchange rate?", "mode": "direct"})
@@ -125,7 +126,7 @@ class TestResearchPath:
 
     def test_research_requested_but_no_grounding_metadata_is_failed_not_used(self, client):
         _override_auth_as("user-1")
-        no_grounding_result = AIGenerationResult(text="I don't have current data on that.", is_error=False, grounding_metadata=None)
+        no_grounding_result = AIGenerationResult(text="I don't have current data on that.", is_error=False, grounding=None)
         with patch.object(main_module, "generate_ai_response", return_value=no_grounding_result), \
              patch.object(main_module, "get_student_profile", new=AsyncMock(return_value=PROFILE)):
             resp = client.post("/api/chat", data={"prompt": "What is the current BDT to USD exchange rate?", "mode": "direct"})
@@ -140,7 +141,7 @@ class TestResearchPath:
         # outcome, distinct from a failure.
         _override_auth_as("user-1")
         metadata = types.GroundingMetadata(web_search_queries=[], grounding_chunks=[], grounding_supports=[])
-        result = AIGenerationResult(text="Some answer.", is_error=False, grounding_metadata=metadata)
+        result = AIGenerationResult(text="Some answer.", is_error=False, grounding=map_grounding(metadata))
         with patch.object(main_module, "generate_ai_response", return_value=result), \
              patch.object(main_module, "get_student_profile", new=AsyncMock(return_value=PROFILE)):
             resp = client.post("/api/chat", data={"prompt": "What is the current BDT to USD exchange rate?", "mode": "direct"})

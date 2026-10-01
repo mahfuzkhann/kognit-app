@@ -2,10 +2,12 @@
 Kognit Phase 7C - Normalized research data model.
 
 The rest of Kognit (main.py, the frontend) depends ONLY on the dataclasses
-below, never on raw google-genai grounding types directly - this is the
-"normalized internal representation" the approved architecture requires,
-so switching search providers later never means touching main.py or the
-frontend, only normalize_grounding_metadata() here.
+below. PHASE 10: provider-specific grounding parsing no longer happens in
+this module at all - the provider adapter (backend/providers/gemini.py)
+converts its SDK's grounding metadata into the provider-neutral
+backend.providers.GroundingResult, and normalize_grounding_metadata() here
+turns that into Kognit's ResearchResult. This module imports no provider SDK
+and reads no SDK-shaped objects.
 
 GROUNDING STATUS is the honesty-critical field: 'used' is only ever set
 when the provider's own response proves search happened
@@ -21,6 +23,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import urlparse
+
+from backend.providers.base import GroundingResult, GroundingSource, GroundingSupport
 
 # Only these two schemes are ever considered safe to render as a clickable
 # citation URL - explicitly rejects javascript:, data:, file:, and any
@@ -78,27 +82,25 @@ class ResearchResult:
     decision_category: Optional[str]
 
 
-def _normalize_source(index: int, chunk) -> Optional[ResearchSource]:
-    """chunk is a google.genai.types.GroundingChunk. Returns None if the
-    chunk has no web sub-object at all (e.g. a maps/retrieved_context
-    chunk type this normalizer does not yet support) - never fabricates
-    a source from nothing."""
-    web = getattr(chunk, "web", None)
-    if web is None:
+def _normalize_source(index: int, source: Optional[GroundingSource]) -> Optional[ResearchSource]:
+    """`source` is the provider-neutral GroundingSource at position `index`
+    (positions mirror the provider's own chunk list). Returns None if that
+    position holds no source at all (a chunk type the provider adapter does
+    not support) - never fabricates a source from nothing."""
+    if source is None:
         return None
     return ResearchSource(
         source_id=f"src-{index}",
-        title=getattr(web, "title", None),
-        url=getattr(web, "uri", None),
-        domain=getattr(web, "domain", None),
+        title=source.title,
+        url=source.url,
+        domain=source.domain,
         provider_reference=index,
     )
 
 
-def _normalize_citation(index: int, support, sources_by_index: dict) -> ResearchCitation:
-    """support is a google.genai.types.GroundingSupport."""
-    segment = getattr(support, "segment", None)
-    chunk_indices = list(getattr(support, "grounding_chunk_indices", None) or [])
+def _normalize_citation(index: int, support: GroundingSupport, sources_by_index: dict) -> ResearchCitation:
+    """`support` is the provider-neutral GroundingSupport."""
+    chunk_indices = list(support.source_indices or ())
     source_ids = [sources_by_index[i].source_id for i in chunk_indices if i in sources_by_index]
 
     if not chunk_indices:
@@ -113,33 +115,32 @@ def _normalize_citation(index: int, support, sources_by_index: dict) -> Research
 
     return ResearchCitation(
         citation_id=f"cite-{index}",
-        answer_segment=getattr(segment, "text", None) if segment else None,
+        answer_segment=support.text,
         source_ids=source_ids,
-        start_index=getattr(segment, "start_index", None) if segment else None,
-        end_index=getattr(segment, "end_index", None) if segment else None,
+        start_index=support.start_index,
+        end_index=support.end_index,
         citation_status=status,
     )
 
 
 def normalize_grounding_metadata(
-    grounding_metadata,
+    grounding: Optional[GroundingResult],
     provider: str,
     provider_model: str,
     research_latency_seconds: Optional[float],
     decision_reason: Optional[str],
     decision_category: Optional[str],
 ) -> ResearchResult:
-    """Converts a raw google.genai.types.GroundingMetadata (or None) into
-    a ResearchResult. This is the ONE place provider-specific grounding
-    structure is read - everything downstream uses ResearchResult only.
+    """Converts a provider-neutral GroundingResult (or None) into a
+    ResearchResult. Everything downstream uses ResearchResult only.
 
-    grounding_metadata=None (the tool was enabled but the provider
-    returned no grounding_metadata at all) is treated as 'failed', not
-    'not_used' - the caller only calls this function when research WAS
-    requested, so an absent metadata object here means grounding did not
-    come through, not that it was never attempted.
+    grounding=None (the tool was enabled but the provider returned no
+    grounding at all) is treated as 'failed', not 'not_used' - the caller
+    only calls this function when research WAS requested, so an absent
+    grounding here means it did not come through, not that it was never
+    attempted.
     """
-    if grounding_metadata is None:
+    if grounding is None:
         return ResearchResult(
             research_used=False, provider=provider, provider_model=provider_model,
             search_queries=[], sources=[], citations=[], grounding_status="failed",
@@ -148,23 +149,21 @@ def normalize_grounding_metadata(
             decision_reason=decision_reason, decision_category=decision_category,
         )
 
-    search_queries = list(getattr(grounding_metadata, "web_search_queries", None) or [])
-    raw_chunks = list(getattr(grounding_metadata, "grounding_chunks", None) or [])
-    raw_supports = list(getattr(grounding_metadata, "grounding_supports", None) or [])
+    search_queries = list(grounding.search_queries or ())
 
     sources = []
     sources_by_index = {}
-    for i, chunk in enumerate(raw_chunks):
-        source = _normalize_source(i, chunk)
+    for i, raw_source in enumerate(grounding.sources or ()):
+        source = _normalize_source(i, raw_source)
         if source is not None:
             sources.append(source)
             sources_by_index[i] = source
 
-    citations = [_normalize_citation(i, support, sources_by_index) for i, support in enumerate(raw_supports)]
+    citations = [_normalize_citation(i, support, sources_by_index) for i, support in enumerate(grounding.supports or ())]
 
     if not search_queries:
         # The tool was enabled, the model responded, but it genuinely
-        # decided not to search (a real, correct Gemini behavior for a
+        # decided not to search (a real, correct provider behavior for a
         # borderline prompt) - this is 'not_used', not 'failed'. Kognit
         # must not claim research happened when the model itself chose
         # not to search.

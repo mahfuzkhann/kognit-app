@@ -6,6 +6,7 @@ import hashlib
 from unittest.mock import MagicMock, patch
 
 from backend import ai_engine
+from backend.providers import get_provider
 from evaluation import git_identity, prompt_identity
 
 
@@ -55,7 +56,7 @@ class TestReturnMetadataBackwardCompatibility:
         return response
 
     def test_default_call_still_returns_bare_string(self):
-        with patch.object(ai_engine, "_client") as client:
+        with patch.object(get_provider(), "client") as client:
             chat = MagicMock()
             chat.send_message.return_value = self._mock_success_response()
             client.chats.create.return_value = chat
@@ -65,7 +66,7 @@ class TestReturnMetadataBackwardCompatibility:
             assert result == "The force is 6 N."
 
     def test_return_metadata_true_returns_structured_result_on_success(self):
-        with patch.object(ai_engine, "_client") as client:
+        with patch.object(get_provider(), "client") as client:
             chat = MagicMock()
             chat.send_message.return_value = self._mock_success_response()
             client.chats.create.return_value = chat
@@ -78,11 +79,11 @@ class TestReturnMetadataBackwardCompatibility:
             assert result.is_error is False
             assert result.resolved_model_version == "gemini-3.6-flash-001"
             assert result.response_id == "resp-abc123"
-            assert result.usage_metadata.prompt_token_count == 120
+            assert result.usage.prompt_tokens == 120
             assert isinstance(result.elapsed_seconds, float)
 
     def test_return_metadata_true_on_image_decode_failure_is_error(self):
-        # No mocking of _client needed - this fails before any API call.
+        # No mocking of the provider client needed - this fails before any API call.
         result = ai_engine.generate_ai_response(
             "describe this", image_bytes=b"not a real image",
             return_metadata=True,
@@ -90,11 +91,11 @@ class TestReturnMetadataBackwardCompatibility:
         assert isinstance(result, ai_engine.AIGenerationResult)
         assert result.is_error is True
         assert result.text == ai_engine.IMAGE_DECODE_ERROR
-        assert result.usage_metadata is None
+        assert result.usage is None
         assert result.resolved_model_version is None
 
     def test_return_metadata_true_on_blocked_response_is_error_with_no_usage(self):
-        with patch.object(ai_engine, "_client") as client:
+        with patch.object(get_provider(), "client") as client:
             blocked = MagicMock()
             blocked.text = None
             chat = MagicMock()
@@ -106,10 +107,10 @@ class TestReturnMetadataBackwardCompatibility:
             )
             assert result.is_error is True
             assert result.text == ai_engine.BLOCKED_RESPONSE_ERROR
-            assert result.usage_metadata is None
+            assert result.usage is None
 
     def test_default_call_on_blocked_response_still_returns_bare_error_string(self):
-        with patch.object(ai_engine, "_client") as client:
+        with patch.object(get_provider(), "client") as client:
             blocked = MagicMock()
             blocked.text = None
             chat = MagicMock()
@@ -124,7 +125,7 @@ class TestReturnMetadataBackwardCompatibility:
         # Confirms the extraction refactor produced byte-identical output -
         # the same substring assertions kognit_smoke_test.py already makes,
         # re-checked here specifically against the refactored construction.
-        with patch.object(ai_engine, "_client") as client:
+        with patch.object(get_provider(), "client") as client:
             chat = MagicMock()
             chat.send_message.return_value = self._mock_success_response()
             client.chats.create.return_value = chat

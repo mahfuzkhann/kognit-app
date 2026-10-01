@@ -7,7 +7,7 @@ import uuid
 from collections import deque
 import httpx
 from datetime import datetime, timedelta, timezone
-from fastapi import FastAPI, Request, Form, File, UploadFile, Header, HTTPException, Depends, BackgroundTasks
+from fastapi import FastAPI, Request, Response, Form, File, UploadFile, Header, HTTPException, Depends, BackgroundTasks
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -817,8 +817,15 @@ async def chat_endpoint(
     # actions are meaningless without a chat to attach to.
     chat_id: str = Form(""),
     background_tasks: BackgroundTasks = None,
+    response_headers: Response = None,
     user_and_token: Tuple[str, str] = Depends(_rate_limited_chat)
 ):
+    # PHASE 10 parity with /api/chat/stream: one request id per call, used in
+    # every ai_engine log line for this request and returned to the browser as
+    # the X-Request-ID header (never in the response body).
+    request_id = new_request_id()
+    if response_headers is not None:
+        response_headers.headers["X-Request-ID"] = request_id
 
     # Read and validate the image BEFORE the try/except below. HTTPException
     # is a subclass of Exception, so raising it inside that broad handler
@@ -864,7 +871,7 @@ async def chat_endpoint(
         # synchronous heuristic (no I/O) - safe to call inline. It decides
         # ONLY whether to enable Gemini's Google Search grounding tool for
         # THIS call; it is never treated as proof research happened - that
-        # proof only ever comes from the response's own grounding_metadata,
+        # proof only ever comes from the response's own grounding,
         # normalized below. When research is not requested, this call is
         # byte-identical to the pre-Phase-7C code path (same kwargs, no
         # return_metadata/enable_research at all).
@@ -885,6 +892,7 @@ async def chat_endpoint(
                 history=conversation_history,
                 return_metadata=True,
                 enable_research=True,
+                request_id=request_id,
             )
             research_latency = time.perf_counter() - t_research_start
             response = ai_result.text
@@ -895,7 +903,7 @@ async def chat_endpoint(
                 # attached, so Kognit can never imply an error reply was
                 # web-grounded.
                 research_result = normalize_grounding_metadata(
-                    ai_result.grounding_metadata,
+                    ai_result.grounding,
                     provider="google",
                     provider_model=MODEL_NAME,
                     research_latency_seconds=research_latency,
@@ -913,13 +921,14 @@ async def chat_endpoint(
                 stream=stream,
                 image_bytes=image_bytes,
                 pdf_context=pdf_context,
-                history=conversation_history
+                history=conversation_history,
+                request_id=request_id,
             )
         t_after_ai = time.perf_counter()
         logger.info(
-            "chat_endpoint timing: parse=%.3fs ai_total=%.3fs request_total=%.3fs "
+            "request_id=%s chat_endpoint timing: parse=%.3fs ai_total=%.3fs request_total=%.3fs "
             "(mode=%s, has_image=%s, has_pdf=%s, history_len=%d, chat_id=%s)",
-            t_after_parsing - t_request_start,
+            request_id, t_after_parsing - t_request_start,
             t_after_ai - t_after_parsing,
             t_after_ai - t_request_start,
             mode, bool(image_bytes), bool(pdf_context), len(conversation_history), chat_id or "(none)"
@@ -1099,7 +1108,7 @@ async def chat_stream_endpoint(
         yield _line({"type": "start", "context": context_label})
 
         final_text = ""
-        grounding_metadata = None
+        grounding = None
         terminal_sent = False
 
         try:
@@ -1134,7 +1143,7 @@ async def chat_stream_endpoint(
                     yield _line({"type": "retry"})
                 elif chunk.kind == "done":
                     final_text = chunk.text
-                    grounding_metadata = chunk.grounding_metadata
+                    grounding = chunk.grounding
                 elif chunk.kind == "interrupted":
                     # BUG 3 FIX: a genuinely partial/non-success stream. This
                     # must NEVER be forwarded as "done" - see the event
@@ -1166,16 +1175,24 @@ async def chat_stream_endpoint(
                 return
 
             # Research metadata is normalized through the EXISTING Phase 7C
-            # models - raw provider grounding structures never reach the
-            # client. A research-requested call whose response carried no
-            # usable grounding_metadata normalizes to "failed"/not-used and
+            # models - provider grounding never reaches the client except as
+            # that normalized payload. A research-requested call whose
+            # response carried no usable grounding normalizes to "failed"/not-used and
             # therefore yields no sources, rather than fabricating any.
             research_payload = None
             if enable_research:
                 try:
+                    # PHASE 10 FIX: this call previously passed a
+                    # `research_requested` argument that
+                    # normalize_grounding_metadata() does not accept and
+                    # omitted its required provider/provider_model, so it
+                    # always raised TypeError - swallowed by the except below -
+                    # and a streamed research answer never carried sources or
+                    # citations. Same arguments as the /api/chat call above.
                     research_result = normalize_grounding_metadata(
-                        grounding_metadata,
-                        research_requested=True,
+                        grounding,
+                        provider="google",
+                        provider_model=MODEL_NAME,
                         research_latency_seconds=None,
                         decision_reason=research_decision.reason,
                         decision_category=research_decision.category,

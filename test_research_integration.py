@@ -14,6 +14,7 @@ import pytest
 from google.genai import types
 
 from backend import ai_engine
+from backend.providers import get_provider
 
 
 @pytest.fixture(autouse=True)
@@ -24,7 +25,7 @@ def no_real_sleep():
 
 @pytest.fixture
 def mock_client():
-    with patch.object(ai_engine, "_client") as client:
+    with patch.object(get_provider(), "client") as client:
         yield client
 
 
@@ -73,7 +74,7 @@ class TestEnableResearchTrue:
         assert len(config.tools) == 1
         assert isinstance(config.tools[0].google_search, types.GoogleSearch)
 
-    def test_grounding_metadata_captured_when_return_metadata_true(self, mock_client):
+    def test_grounding_captured_and_normalized_when_return_metadata_true(self, mock_client):
         metadata = types.GroundingMetadata(web_search_queries=["current rate"], grounding_chunks=[], grounding_supports=[])
         chat = MagicMock()
         chat.send_message.return_value = _response_with_grounding("110 BDT/USD.", metadata)
@@ -84,8 +85,10 @@ class TestEnableResearchTrue:
             enable_research=True, return_metadata=True,
         )
         assert isinstance(result, ai_engine.AIGenerationResult)
-        assert result.grounding_metadata is metadata
-        assert result.grounding_metadata.web_search_queries == ["current rate"]
+        # PHASE 10: the provider adapter normalized the SDK metadata - the
+        # raw SDK object never reaches AIGenerationResult.
+        assert not isinstance(result.grounding, types.GroundingMetadata)
+        assert result.grounding.search_queries == ("current rate",)
 
     def test_grounding_metadata_none_when_return_metadata_false_even_with_research(self, mock_client):
         # Bare-string callers never see grounding_metadata regardless -
@@ -100,7 +103,7 @@ class TestEnableResearchTrue:
         )
         assert isinstance(result, str)  # unaffected by enable_research when return_metadata=False
 
-    def test_missing_grounding_metadata_on_research_call_is_none_not_fabricated(self, mock_client):
+    def test_missing_grounding_on_research_call_is_none_not_fabricated(self, mock_client):
         # The tool was enabled but the response has no grounding_metadata
         # at all (e.g. candidates list came back empty) - must be None,
         # never an empty-but-truthy stand-in object.
@@ -118,7 +121,7 @@ class TestEnableResearchTrue:
             "current exchange rate?", user_class="Class 10",
             enable_research=True, return_metadata=True,
         )
-        assert result.grounding_metadata is None
+        assert result.grounding is None
 
     def test_research_call_error_path_still_returns_error_string_normally(self, mock_client):
         # A blocked/empty response with enable_research=True must behave

@@ -2,7 +2,7 @@
 Mocked test suite for backend/ai_engine.py after the google-genai SDK
 migration.
 
-Everything here mocks backend.ai_engine._client (the module-level
+Everything here mocks the Gemini provider's SDK client (backend.providers.get_provider().client, formerly the module-level
 google.genai.Client instance) - no real network calls, no API key needed.
 Covers:
   - happy path (text, image, multi-turn history)
@@ -30,6 +30,7 @@ from google.genai import types as genai_types
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from backend import ai_engine  # noqa: E402
+from backend.providers import ProviderMessage, get_provider
 
 
 # ---------------------------------------------------------------------------
@@ -72,8 +73,8 @@ def no_real_sleep():
 
 @pytest.fixture
 def mock_client():
-    """Patches backend.ai_engine._client, returns the mock for assertions."""
-    with patch.object(ai_engine, "_client") as client:
+    """Patches the Gemini provider's SDK client, returns the mock for assertions."""
+    with patch.object(get_provider(), "client") as client:
         yield client
 
 
@@ -594,34 +595,36 @@ class TestRetryPolicy:
 
 
 # ---------------------------------------------------------------------------
-# _build_gemini_history unit tests
+# _build_provider_history unit tests (PHASE 10: the provider-neutral history
+# builder; mapping "assistant" -> Gemini's "model" role is the adapter's job and
+# is covered in test_providers.py and by the chats.create(history=...) test above)
 # ---------------------------------------------------------------------------
 
-class TestBuildGeminiHistory:
+class TestBuildProviderHistory:
     def test_empty_history(self):
-        assert ai_engine._build_gemini_history([]) == []
-        assert ai_engine._build_gemini_history(None) == []
+        assert ai_engine._build_provider_history([]) == []
+        assert ai_engine._build_provider_history(None) == []
 
     def test_role_mapping(self):
         history = [
             {"role": "user", "text": "hi"},
             {"role": "bot", "text": "hello"},
         ]
-        result = ai_engine._build_gemini_history(history)
+        result = ai_engine._build_provider_history(history)
         assert result == [
-            {"role": "user", "parts": [{"text": "hi"}]},
-            {"role": "model", "parts": [{"text": "hello"}]},
+            ProviderMessage(role="user", text="hi"),
+            ProviderMessage(role="assistant", text="hello"),
         ]
 
     def test_unrecognized_role_skipped(self):
         history = [{"role": "system", "text": "should be skipped"}, {"role": "user", "text": "kept"}]
-        result = ai_engine._build_gemini_history(history)
-        assert result == [{"role": "user", "parts": [{"text": "kept"}]}]
+        result = ai_engine._build_provider_history(history)
+        assert result == [ProviderMessage(role="user", text="kept")]
 
     def test_empty_text_skipped(self):
         history = [{"role": "user", "text": ""}, {"role": "user", "text": "kept"}]
-        result = ai_engine._build_gemini_history(history)
-        assert result == [{"role": "user", "parts": [{"text": "kept"}]}]
+        result = ai_engine._build_provider_history(history)
+        assert result == [ProviderMessage(role="user", text="kept")]
 
 
 # ---------------------------------------------------------------------------

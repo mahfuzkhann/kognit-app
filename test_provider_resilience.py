@@ -29,6 +29,7 @@ from google.genai import types
 import httpx
 
 import backend.ai_engine as ai_engine
+from backend.providers import get_provider
 import backend.main as main
 
 
@@ -78,7 +79,7 @@ def _install_sequence(monkeypatch, sessions):
             chunks, raise_after, exc = sessions[i]
             return _FakeChatSession(chunks, raise_after=raise_after, exc=exc)
 
-    monkeypatch.setattr(ai_engine, "_client", type("C", (), {"chats": _Chats()})())
+    monkeypatch.setattr(get_provider(), "client", type("C", (), {"chats": _Chats()})())
     return state
 
 

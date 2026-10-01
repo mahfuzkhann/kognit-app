@@ -8,14 +8,26 @@ import time
 import uuid
 from typing import Optional
 
-import httpx
 from PIL import Image
-from google import genai
-from google.genai import types
-from google.genai import errors as genai_errors
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# PHASE 10: this module no longer imports any provider SDK. Everything
+# Gemini-specific (client, request/response translation, exception
+# translation, grounding parsing) lives in backend/providers/gemini.py;
+# this module speaks only the provider-neutral contract in
+# backend/providers/base.py and keeps Kognit's own policy (prompts, history,
+# retry/backoff/recovery, error codes, student-facing messages, telemetry).
+from backend.providers import (
+    FinishReason,
+    ProviderError,
+    ProviderErrorKind,
+    ProviderMessage,
+    ProviderRequest,
+    ProviderUsage,
+    get_provider,
+)
 
 logger = logging.getLogger("kognit.ai_engine")
 
@@ -39,7 +51,11 @@ logger = logging.getLogger("kognit.ai_engine")
 # "real-time chat" and other latency-critical interactive use cases - see
 # CHAT_THINKING_LEVEL below.
 # ---------------------------------------------------------------------------
-_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+# PHASE 10: the SDK client now belongs to the Gemini provider
+# (backend/providers/gemini.py). The provider is created here, once, at import,
+# so a missing GEMINI_API_KEY still fails at startup exactly as the old
+# module-level client did - never on a student's first request.
+get_provider()
 
 # P0 STABILIZATION - model configuration.
 #
@@ -164,7 +180,7 @@ GENERIC_CHAT_ERROR = (
 )
 
 # Shown specifically when the Gemini API rejects a request due to quota
-# exhaustion (google.genai.errors.ClientError, HTTP 429 / RESOURCE_EXHAUSTED).
+# exhaustion (ProviderErrorKind.RATE_LIMITED - HTTP 429 / RESOURCE_EXHAUSTED).
 # Never interpolate str(exception) into this - the raw error contains
 # provider-internal details (quota metric names, limits, status codes)
 # that must not reach the client. See GENERIC_CHAT_ERROR comment above.
@@ -175,9 +191,8 @@ QUOTA_EXHAUSTED_ERROR = (
 
 # Shown when Gemini returns a response with no usable content - almost
 # always because its safety filters blocked the prompt or the generated
-# candidate (finish_reason != STOP). In google-genai, response.text simply
-# returns None in this case (it does NOT raise, unlike the old SDK - see
-# the ValueError handling this replaces, below). This is NOT a network/
+# candidate (finish_reason != STOP). The provider returns no text in this
+# case rather than raising (unlike the old SDK's ValueError). This is NOT a network/
 # provider failure, so retrying would not help - kept as a distinct,
 # non-retried message so it's diagnosable from a student's report without
 # needing server log access.
@@ -231,27 +246,37 @@ def new_request_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
-_SAFETY_FINISH_REASON_NAMES = frozenset({
-    "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII",
-    "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION",
-})
-
-
-def _finish_reason_name(finish_reason) -> Optional[str]:
-    if finish_reason is None:
-        return None
-    name = getattr(finish_reason, "name", None)
-    return str(name if name else finish_reason).split(".")[-1].upper()
-
-
 def _error_code_for_finish_reason(finish_reason, default: str) -> str:
-    """Map a provider finish_reason to a stable internal error code."""
-    name = _finish_reason_name(finish_reason)
-    if name == "MAX_TOKENS":
+    """Map a normalized FinishReason to a stable internal error code."""
+    if finish_reason == FinishReason.MAX_TOKENS:
         return ERROR_PROVIDER_MAX_TOKENS
-    if name in _SAFETY_FINISH_REASON_NAMES:
+    if finish_reason == FinishReason.SAFETY:
         return ERROR_PROVIDER_SAFETY
     return default
+
+
+# PHASE 10: the single place a normalized ProviderErrorKind becomes one of
+# Kognit's wire error codes. CONFLICT (a transient 409) is reported as
+# UNAVAILABLE - to a student it is the same "try again shortly" situation.
+_ERROR_CODE_BY_KIND = {
+    ProviderErrorKind.UNAVAILABLE: ERROR_PROVIDER_UNAVAILABLE,
+    ProviderErrorKind.CONFLICT: ERROR_PROVIDER_UNAVAILABLE,
+    ProviderErrorKind.RATE_LIMITED: ERROR_PROVIDER_RATE_LIMITED,
+    ProviderErrorKind.TIMEOUT: ERROR_PROVIDER_TIMEOUT,
+    ProviderErrorKind.AUTH: ERROR_PROVIDER_AUTH_FAILED,
+    ProviderErrorKind.INVALID_REQUEST: ERROR_PROVIDER_INVALID_REQUEST,
+    ProviderErrorKind.UNKNOWN: ERROR_INTERNAL,
+}
+
+
+def _error_code_for_kind(kind: ProviderErrorKind) -> str:
+    return _ERROR_CODE_BY_KIND.get(kind, ERROR_INTERNAL)
+
+
+def _exception_type_name(exc: BaseException) -> str:
+    """Name of the ORIGINAL failure for logs: a ProviderError remembers the
+    SDK/transport exception type it was translated from."""
+    return exc.original_type if isinstance(exc, ProviderError) else type(exc).__name__
 
 
 # ---------------------------------------------------------------------------
@@ -316,8 +341,13 @@ MAX_PDF_CONTEXT_CHARS = 300_000
 #     in perceived latency. Not tuned yet - revisit once we have real
 #     quiz-generation latency numbers.
 # ---------------------------------------------------------------------------
-CHAT_THINKING_LEVEL = types.ThinkingLevel.LOW
-TITLE_THINKING_LEVEL = types.ThinkingLevel.LOW
+#
+# PHASE 10: these now hold a provider-neutral reasoning-effort string ("low" /
+# "medium" / "high" / None), which ProviderRequest.reasoning_effort carries and
+# the Gemini adapter maps to its SDK's thinking level. The constant names are
+# kept (evaluation/runner.py records CHAT_THINKING_LEVEL in run configs).
+CHAT_THINKING_LEVEL = "low"
+TITLE_THINKING_LEVEL = "low"
 QUIZ_THINKING_LEVEL = None
 
 # How long to wait on a single Gemini call before giving up. HttpOptions.timeout
@@ -343,17 +373,17 @@ AI_REQUEST_TIMEOUT_SECONDS = 30
 # retries the failure types where a second attempt is actually likely to
 # help:
 #
-#   A. Client/request deadline exceeded (httpx.TimeoutException /
-#      httpx.ConnectError - i.e. OUR OWN configured timeout fired, or we
-#      could not even connect): NOT retried by default. With
+#   A. Client/request deadline exceeded (ProviderErrorKind.TIMEOUT - the
+#      adapter maps httpx timeouts/connect failures to it; i.e. OUR OWN
+#      configured timeout fired, or we could not even connect): NOT retried by default. With
 #      CHAT_THINKING_LEVEL=LOW, hitting this ceiling should now be rare -
 #      when it happens, the model was doing real (if slow) work, and
 #      immediately repeating the same expensive call is not proven to help.
 #      RETRY_ON_CLIENT_TIMEOUT below is the single toggle to revisit this
 #      once we have real elapsed= timing data post-fix.
 #
-#   B. Genuine transient provider failures - google.genai.errors.ServerError
-#      (any 5xx: 500/502/503/504) or ClientError with an HTTP 409 ("Aborted"
+#   B. Genuine transient provider failures - ProviderErrorKind.UNAVAILABLE
+#      (any 5xx: 500/502/503/504) or CONFLICT, an HTTP 409 ("Aborted"
 #      - a genuinely transient conflict per Google's own error semantics,
 #      not a client mistake): these return from Google FAST (an error
 #      response, not a slow success), so retrying with a full timeout budget
@@ -445,11 +475,12 @@ RETRY_REQUEST_TIMEOUT_SECONDS = AI_REQUEST_TIMEOUT_SECONDS
 # stall).
 RETRY_ON_CLIENT_TIMEOUT = True
 
-# HTTP status codes, other than 5xx, that are treated as bucket B (genuine
-# transient failures) rather than bucket E (unexpected/programming errors).
-# 409 = Aborted/conflict, which Google's own client libraries have
-# historically classified as retryable.
-TRANSIENT_RETRYABLE_CLIENT_HTTP_CODES = (409,)
+# PHASE 10: HTTP 409 (Aborted/conflict) is still bucket B - a genuine transient
+# failure, rather than bucket E (unexpected/programming error), as Google's
+# own client libraries have historically classified it. What changed is only
+# WHERE the classification lives: the Gemini adapter maps 409 to
+# ProviderErrorKind.CONFLICT, and this policy layer retries CONFLICT as
+# bucket B. (The old TRANSIENT_RETRYABLE_CLIENT_HTTP_CODES constant is gone.)
 
 # Jittered retry delay (bucket B only) - a fixed delay means that if Gemini
 # has a real transient outage affecting several concurrent Kognit requests
@@ -533,57 +564,49 @@ def _backoff_before_retry(retry_number: int, request_id: str, reason: str) -> fl
 # roles. Gemini's chats.create(history=...) requires "user"/"model"; Kognit
 # stores assistant turns as "bot". This mapping must stay in sync with
 # whatever role strings the frontend sends in the "history" field.
-_KOGNIT_ROLE_TO_GEMINI_ROLE = {"user": "user", "bot": "model"}
+_KOGNIT_ROLE_TO_PROVIDER_ROLE = {"user": "user", "bot": "assistant"}
 
 
-def _seconds_to_ms(seconds: float) -> int:
-    """google-genai's HttpOptions.timeout is documented in milliseconds."""
-    return int(seconds * 1000)
-
-
-def _build_gemini_history(history: list) -> list:
+def _build_provider_history(history: list) -> list:
     """
     Convert Kognit's validated [{"role": "user"|"bot", "text": str}, ...]
-    history into the google-genai SDK's expected
-    [{"role": "user"|"model", "parts": [{"text": str}]}, ...] shape (a plain
-    dict list - google-genai validates this against its Content/Part models
-    itself, no need to construct typed objects here).
+    history into the provider-neutral list of ProviderMessage(role="user"|
+    "assistant", text). Mapping those roles onto a specific API's role names
+    (Gemini calls the assistant role "model") is the provider adapter's job.
 
-    Any entry with an unrecognized role is skipped defensively (should not
-    happen if main.py's validation ran first, but this function does not
-    assume that and re-checks independently).
+    Any entry with an unrecognized role or empty text is skipped defensively
+    (should not happen if main.py's validation ran first, but this function
+    does not assume that and re-checks independently).
     """
     if not history:
         return []
 
-    gemini_history = []
+    messages = []
     for entry in history:
-        role = entry.get("role")
+        role = _KOGNIT_ROLE_TO_PROVIDER_ROLE.get(entry.get("role"))
         text = entry.get("text")
-        gemini_role = _KOGNIT_ROLE_TO_GEMINI_ROLE.get(role)
-        if gemini_role is None or not text:
+        if role is None or not text:
             continue
-        gemini_history.append({"role": gemini_role, "parts": [{"text": text}]})
-    return gemini_history
+        messages.append(ProviderMessage(role=role, text=text))
+    return messages
 
 
-def _log_usage(usage, attempt: int, elapsed: float, mode: str, image: bool, pdf: bool) -> None:
+def _log_usage(usage: Optional[ProviderUsage], attempt: int, elapsed: float, mode: str, image: bool, pdf: bool) -> None:
     """
-    Best-effort observability log for a successful call. usage_metadata's
-    thoughts_token_count in particular is the direct, measurable signal for
-    the root cause this migration addresses - how many tokens the model
-    spent "thinking" versus answering - so future latency investigations
-    have real data instead of a single incident's log lines.
+    Best-effort observability log for a successful call. The thoughts-token
+    count in particular is the direct, measurable signal for how many tokens
+    the model spent "thinking" versus answering - so future latency
+    investigations have real data instead of a single incident's log lines.
     """
-    prompt_tokens = getattr(usage, "prompt_token_count", None) if usage else None
-    thought_tokens = getattr(usage, "thoughts_token_count", None) if usage else None
-    output_tokens = getattr(usage, "candidates_token_count", None) if usage else None
-    total_tokens = getattr(usage, "total_token_count", None) if usage else None
+    prompt_tokens = usage.prompt_tokens if usage else None
+    thought_tokens = usage.thoughts_tokens if usage else None
+    output_tokens = usage.output_tokens if usage else None
+    total_tokens = usage.total_tokens if usage else None
     logger.info(
         "generate_ai_response success attempt=%d/%d model=%s thinking_level=%s elapsed=%.3fs "
         "prompt_tokens=%s thought_tokens=%s output_tokens=%s total_tokens=%s "
         "(mode=%s, has_image=%s, has_pdf=%s)",
-        attempt, MAX_ATTEMPTS, MODEL_NAME, CHAT_THINKING_LEVEL.value, elapsed,
+        attempt, MAX_ATTEMPTS, MODEL_NAME, CHAT_THINKING_LEVEL, elapsed,
         prompt_tokens, thought_tokens, output_tokens, total_tokens,
         mode, image, pdf,
     )
@@ -594,15 +617,14 @@ def _is_successful_finish(finish_reason) -> bool:
     BUG 3 FIX - the explicit completion rule.
 
     A streamed answer is only a genuine success if:
-      - the SDK's send_message_stream() iterator completed with NO
-        exception, AND
+      - the provider's stream iterator completed with NO exception, AND
       - the last finish_reason observed across all chunks is either
-        absent (None) or exactly types.FinishReason.STOP.
+        absent (None) or exactly FinishReason.STOP (the provider-neutral
+        enum; the Gemini adapter maps every Gemini reason onto it).
 
-    Any other observed value (MAX_TOKENS, SAFETY, RECITATION, LANGUAGE,
-    OTHER, BLOCKLIST, PROHIBITED_CONTENT, SPII, etc. - the full enum was
-    read directly off the installed google-genai==2.20.0 package, not
-    guessed) is explicitly non-success.
+    Any other observed value (MAX_TOKENS, SAFETY, OTHER - where SAFETY and
+    OTHER cover Gemini's RECITATION, LANGUAGE, BLOCKLIST, PROHIBITED_CONTENT,
+    SPII, etc.) is explicitly non-success.
 
     On `finish_reason is None`: verified directly against the installed
     SDK's own chats.py (send_message_stream's internal history-recording
@@ -620,7 +642,7 @@ def _is_successful_finish(finish_reason) -> bool:
     interrupted if this SDK/model combination doesn't always populate it.
     REQUIRES LIVE GEMINI VALIDATION - see the Bug 3 report.
     """
-    return finish_reason is None or finish_reason == types.FinishReason.STOP
+    return finish_reason is None or finish_reason == FinishReason.STOP
 
 
 def _log_stream_telemetry(
@@ -693,19 +715,20 @@ class AIGenerationResult:
     gets a plain str, unchanged."""
     text: str
     is_error: bool
-    usage_metadata: Optional[object] = None
+    usage: Optional[ProviderUsage] = None
     resolved_model_version: Optional[str] = None
     response_id: Optional[str] = None
     elapsed_seconds: Optional[float] = None
-    grounding_metadata: Optional[object] = None
-    # Phase 7C: the raw google.genai.types.GroundingMetadata from the
-    # response, when enable_research=True. Always None when
-    # enable_research=False (the default) or on any error path -
-    # normalization into Kognit's provider-neutral ResearchResult
-    # happens in backend/research_models.py, never here; this function
-    # never interprets grounding content, only passes through what the
-    # SDK returned.
-
+    grounding: Optional[object] = None
+    # Phase 7C / Phase 10: the provider-neutral GroundingResult
+    # (backend.providers.GroundingResult) from the response, when
+    # enable_research=True. Always None when enable_research=False (the
+    # default) or on any error path. The Gemini adapter already converted the
+    # SDK's grounding metadata; backend/research_models.py turns this into
+    # Kognit's ResearchResult. This function never interprets grounding
+    # content, only passes through what the provider returned.
+    # PHASE 10 parity: stable error code (ERROR_*) on error results, else None.
+    error_code: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -737,10 +760,11 @@ class _ChatRequestBuildError(Exception):
 
 @dataclass
 class _ChatRequest:
-    """Everything needed to issue one Gemini chat call, streaming or not."""
+    """Everything needed to issue one chat call, streaming or not, in
+    provider-neutral form (see backend.providers.ProviderRequest)."""
     system_instruction: str
-    contents: list
-    gemini_history: list
+    user_parts: list
+    history: list
 
 
 def _build_chat_request(
@@ -818,7 +842,7 @@ def _build_chat_request(
     # accepted directly as a message part by google-genai's chat.send_message
     # the same way they were accepted by the old SDK's generate_content.
     t_stage_start = time.perf_counter()
-    contents = []
+    user_parts = []
     if image_bytes:
         try:
             img = Image.open(io.BytesIO(image_bytes))
@@ -829,18 +853,18 @@ def _build_chat_request(
                 mode, board, user_class
             )
             raise _ChatRequestBuildError(IMAGE_DECODE_ERROR)
-        contents.append(img)
+        user_parts.append(img)
     logger.info("generate_ai_response timing: image_decode=%.3fs", time.perf_counter() - t_stage_start)
 
-    contents.append(prompt if prompt else "Please analyze this request based on the context.")
+    user_parts.append(prompt if prompt else "Please analyze this request based on the context.")
 
     # CHAT-04: history is built once - identical on every retry attempt below.
-    gemini_history = _build_gemini_history(history or [])
+    provider_history = _build_provider_history(history or [])
 
     return _ChatRequest(
         system_instruction=system_instruction,
-        contents=contents,
-        gemini_history=gemini_history,
+        user_parts=user_parts,
+        history=provider_history,
     )
 
 
@@ -856,7 +880,8 @@ def generate_ai_response(
     pdf_context: str = "",
     history: list = None,
     return_metadata: bool = False,
-    enable_research: bool = False
+    enable_research: bool = False,
+    request_id: Optional[str] = None,
 ):
     # return_metadata (Phase 7B): see AIGenerationResult docstring.
     #
@@ -871,21 +896,27 @@ def generate_ai_response(
     # (backend/main.py's non-research path) uses the default False and
     # is completely unaffected - no tools are added to the config at all
     # in that case, byte-identical to pre-Phase-7C behavior.
-    def _wrap(text: str, *, is_error: bool, usage_metadata=None,
+    request_id = request_id or new_request_id()
+
+    def _wrap(text: str, *, is_error: bool, usage=None,
               resolved_model_version: Optional[str] = None,
               response_id: Optional[str] = None,
               elapsed_seconds: Optional[float] = None,
-              grounding_metadata=None):
+              grounding=None,
+              error_code: Optional[str] = None):
+        # Bare-string callers (return_metadata=False, the default) get exactly
+        # the text they always got; metadata callers get an AIGenerationResult.
         if not return_metadata:
             return text
         return AIGenerationResult(
             text=text,
             is_error=is_error,
-            usage_metadata=usage_metadata,
+            usage=usage,
             resolved_model_version=resolved_model_version,
             response_id=response_id,
             elapsed_seconds=elapsed_seconds,
-            grounding_metadata=grounding_metadata,
+            grounding=grounding,
+            error_code=error_code,
         )
 
     try:
@@ -900,167 +931,145 @@ def generate_ai_response(
             history=history,
         )
     except _ChatRequestBuildError as exc:
-        return _wrap(exc.message, is_error=True)
-
-    system_instruction = _req.system_instruction
-    contents = _req.contents
-    gemini_history = _req.gemini_history
+        return _wrap(exc.message, is_error=True, error_code=ERROR_REQUEST_INVALID)
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         t_attempt_start = time.perf_counter()
         attempt_timeout = AI_REQUEST_TIMEOUT_SECONDS if attempt == 1 else RETRY_REQUEST_TIMEOUT_SECONDS
 
         # Built fresh each attempt (cheap, local - no network call) so the
-        # per-attempt timeout below is always the one actually in effect.
-        # retry_options is deliberately never set - see "SINGLE RETRY
-        # AUTHORITY" comment above.
-        # Phase 7C: the Google Search grounding tool is added ONLY when
-        # enable_research=True - the config object for a normal (non-
-        # research) call is built exactly as before, with no tools=[]
-        # key at all, so this change cannot affect any existing request.
-        config_kwargs = dict(
-            system_instruction=system_instruction,
-            thinking_config=types.ThinkingConfig(thinking_level=CHAT_THINKING_LEVEL),
-            http_options=types.HttpOptions(timeout=_seconds_to_ms(attempt_timeout)),
+        # per-attempt timeout is always the one actually in effect. The
+        # provider never retries on its own (no SDK retry_options) - see the
+        # "SINGLE RETRY AUTHORITY" comment above: this loop is the one owner.
+        # Web search is requested ONLY when enable_research=True, so a normal
+        # call carries no search tool at all.
+        provider_request = ProviderRequest(
+            system_instruction=_req.system_instruction,
+            user_parts=_req.user_parts,
+            history=_req.history,
+            model=MODEL_NAME,
+            timeout_seconds=attempt_timeout,
+            reasoning_effort=CHAT_THINKING_LEVEL,
+            enable_web_search=enable_research,
+            request_id=request_id,
         )
-        if enable_research:
-            config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
-        config = types.GenerateContentConfig(**config_kwargs)
 
         try:
-            # CHAT-04: multi-turn chat session so prior turns in THIS chat
-            # are actually part of the request Gemini sees. history is empty
-            # on a chat's first message, equivalent to the old behavior.
-            chat_session = _client.chats.create(
-                model=MODEL_NAME,
-                config=config,
-                history=gemini_history,
-            )
-            response = chat_session.send_message(contents)
+            # CHAT-04: a multi-turn chat call so prior turns in THIS chat are
+            # actually part of the request the model sees. History is empty on
+            # a chat's first message.
+            result = get_provider().chat(provider_request)
             elapsed = time.perf_counter() - t_attempt_start
 
-            result_text = response.text
+            result_text = result.text
             if not result_text:
-                # google-genai returns None here instead of raising (unlike
-                # the old SDK's ValueError) - almost always a safety-filter
-                # block. Not retried: an identical request would just get
-                # blocked again.
+                # No text at all - almost always a safety-filter block. Not
+                # retried: an identical request would just get blocked again.
+                code = _error_code_for_finish_reason(result.finish_reason, ERROR_PROVIDER_EMPTY_RESPONSE)
                 logger.warning(
-                    "generate_ai_response got a blocked/empty response attempt=%d/%d elapsed=%.3fs "
-                    "(mode=%s, board=%s, user_class=%s)",
-                    attempt, MAX_ATTEMPTS, elapsed, mode, board, user_class
+                    "request_id=%s generate_ai_response got a blocked/empty response attempt=%d/%d "
+                    "elapsed=%.3fs code=%s (mode=%s, board=%s, user_class=%s)",
+                    request_id, attempt, MAX_ATTEMPTS, elapsed, code, mode, board, user_class
                 )
-                return _wrap(BLOCKED_RESPONSE_ERROR, is_error=True, elapsed_seconds=elapsed)
+                return _wrap(BLOCKED_RESPONSE_ERROR, is_error=True, elapsed_seconds=elapsed, error_code=code)
 
-            _log_usage(response.usage_metadata, attempt, elapsed, mode, bool(image_bytes), bool(pdf_context))
-            grounding_metadata = None
-            if enable_research:
-                # Best-effort, never fabricated: candidates[0] and its
-                # grounding_metadata attribute are read defensively - an
-                # unexpected empty candidates list or a response shape
-                # without this attribute results in None, handled
-                # explicitly downstream (research_models.py treats a
-                # None grounding_metadata on a research-requested call
-                # as 'failed', never as 'used').
-                candidates = getattr(response, "candidates", None) or []
-                if candidates:
-                    grounding_metadata = getattr(candidates[0], "grounding_metadata", None)
+            _log_usage(result.usage, attempt, elapsed, mode, bool(image_bytes), bool(pdf_context))
+            # Grounding comes back already normalized by the provider, and is
+            # None unless web search was requested (and on every error path);
+            # research_models.py treats a None grounding on a research-
+            # requested call as 'failed', never as 'used'.
             return _wrap(
                 result_text,
                 is_error=False,
-                usage_metadata=response.usage_metadata,
-                resolved_model_version=getattr(response, "model_version", None),
-                response_id=getattr(response, "response_id", None),
+                usage=result.usage,
+                resolved_model_version=result.model_version,
+                response_id=result.response_id,
                 elapsed_seconds=elapsed,
-                grounding_metadata=grounding_metadata,
+                grounding=result.grounding,
             )
 
-        except genai_errors.ClientError as e:
+        except Exception as e:
+            # PHASE 10: decide purely on the provider-neutral error kind. The
+            # retry classification is unchanged from before:
+            #   quota (never retried) / bucket B (5xx + 409, retried with a
+            #   jittered delay) / bucket A (our own client timeout, at most
+            #   once) / bucket E (everything else, never retried).
             elapsed = time.perf_counter() - t_attempt_start
-            if e.code == 429:
+            kind = e.kind if isinstance(e, ProviderError) else ProviderErrorKind.UNKNOWN
+            status_code = getattr(e, "http_status", None)
+            status_label = getattr(e, "status", None)
+
+            if kind == ProviderErrorKind.RATE_LIMITED:
                 # Bucket C: quota exhaustion. Never retried.
                 logger.exception(
-                    "generate_ai_response quota exhausted attempt=%d elapsed=%.3fs (mode=%s, board=%s, user_class=%s)",
-                    attempt, elapsed, mode, board, user_class
+                    "request_id=%s generate_ai_response quota exhausted attempt=%d elapsed=%.3fs "
+                    "(mode=%s, board=%s, user_class=%s)",
+                    request_id, attempt, elapsed, mode, board, user_class
                 )
-                return _wrap(QUOTA_EXHAUSTED_ERROR, is_error=True, elapsed_seconds=elapsed)
-            if e.code in TRANSIENT_RETRYABLE_CLIENT_HTTP_CODES and attempt < MAX_ATTEMPTS_BUCKET_B:
-                # Bucket B (409 Aborted-equivalent).
-                retry_delay = random.uniform(
-                    RETRY_DELAY_BASE_SECONDS - RETRY_DELAY_JITTER_SECONDS,
-                    RETRY_DELAY_BASE_SECONDS + RETRY_DELAY_JITTER_SECONDS,
-                )
-                logger.warning(
-                    "generate_ai_response transient provider error code=%s attempt=%d/%d timeout=%ds "
-                    "elapsed=%.3fs (mode=%s, board=%s, user_class=%s): %s - retrying in %.2fs",
-                    e.code, attempt, MAX_ATTEMPTS_BUCKET_B, attempt_timeout, elapsed,
-                    mode, board, user_class, e.status, retry_delay
-                )
-                time.sleep(retry_delay)
-                continue
-            # Bucket E: any other 4xx (bad request, permission denied, etc.)
-            # is a programming/config error, not something a retry fixes.
-            logger.exception(
-                "generate_ai_response client error code=%s attempt=%d/%d elapsed=%.3fs (mode=%s, board=%s, user_class=%s)",
-                e.code, attempt, MAX_ATTEMPTS_BUCKET_B, elapsed, mode, board, user_class
-            )
-            return _wrap(GENERIC_CHAT_ERROR, is_error=True, elapsed_seconds=elapsed)
+                return _wrap(QUOTA_EXHAUSTED_ERROR, is_error=True, elapsed_seconds=elapsed,
+                             error_code=ERROR_PROVIDER_RATE_LIMITED)
 
-        except genai_errors.ServerError as e:
-            # Bucket B: genuine transient provider failure (5xx).
-            elapsed = time.perf_counter() - t_attempt_start
-            if attempt < MAX_ATTEMPTS_BUCKET_B:
-                retry_delay = random.uniform(
-                    RETRY_DELAY_BASE_SECONDS - RETRY_DELAY_JITTER_SECONDS,
-                    RETRY_DELAY_BASE_SECONDS + RETRY_DELAY_JITTER_SECONDS,
+            if kind in (ProviderErrorKind.UNAVAILABLE, ProviderErrorKind.CONFLICT):
+                # Bucket B: genuine transient provider failure (5xx, or a 409).
+                if attempt < MAX_ATTEMPTS_BUCKET_B:
+                    retry_delay = random.uniform(
+                        RETRY_DELAY_BASE_SECONDS - RETRY_DELAY_JITTER_SECONDS,
+                        RETRY_DELAY_BASE_SECONDS + RETRY_DELAY_JITTER_SECONDS,
+                    )
+                    logger.warning(
+                        "request_id=%s generate_ai_response transient provider error code=%s attempt=%d/%d "
+                        "timeout=%ds elapsed=%.3fs (mode=%s, board=%s, user_class=%s): %s - retrying in %.2fs",
+                        request_id, status_code, attempt, MAX_ATTEMPTS_BUCKET_B, attempt_timeout, elapsed,
+                        mode, board, user_class, status_label, retry_delay
+                    )
+                    time.sleep(retry_delay)
+                    continue
+                logger.exception(
+                    "request_id=%s generate_ai_response failed after %d attempts with transient provider "
+                    "error code=%s (mode=%s, board=%s, user_class=%s)",
+                    request_id, MAX_ATTEMPTS_BUCKET_B, status_code, mode, board, user_class
                 )
-                logger.warning(
-                    "generate_ai_response transient provider error code=%s attempt=%d/%d timeout=%ds "
-                    "elapsed=%.3fs (mode=%s, board=%s, user_class=%s): %s - retrying in %.2fs",
-                    e.code, attempt, MAX_ATTEMPTS_BUCKET_B, attempt_timeout, elapsed,
-                    mode, board, user_class, e.status, retry_delay
-                )
-                time.sleep(retry_delay)
-                continue
-            logger.exception(
-                "generate_ai_response failed after %d attempts with server error code=%s (mode=%s, board=%s, user_class=%s)",
-                MAX_ATTEMPTS_BUCKET_B, e.code, mode, board, user_class
-            )
-            return _wrap(GENERIC_CHAT_ERROR, is_error=True, elapsed_seconds=elapsed)
+                return _wrap(GENERIC_CHAT_ERROR, is_error=True, elapsed_seconds=elapsed,
+                             error_code=ERROR_PROVIDER_UNAVAILABLE)
 
-        except (httpx.TimeoutException, httpx.ConnectError) as e:
-            # Bucket A: OUR OWN client-side deadline fired (or we could not
-            # connect). Retried at most once - see RETRY_ON_CLIENT_TIMEOUT
-            # and MAX_ATTEMPTS_BUCKET_A comments above for why this ceiling
-            # is intentionally kept lower than bucket B's.
-            elapsed = time.perf_counter() - t_attempt_start
-            if RETRY_ON_CLIENT_TIMEOUT and attempt < MAX_ATTEMPTS_BUCKET_A:
-                logger.warning(
-                    "generate_ai_response client deadline exceeded attempt=%d/%d timeout=%ds elapsed=%.3fs "
-                    "(mode=%s, board=%s, user_class=%s): %s - retrying (RETRY_ON_CLIENT_TIMEOUT=True)",
-                    attempt, MAX_ATTEMPTS_BUCKET_A, attempt_timeout, elapsed, mode, board, user_class, type(e).__name__
+            if kind == ProviderErrorKind.TIMEOUT:
+                # Bucket A: OUR OWN client-side deadline fired (or we could not
+                # connect). Retried at most once - see RETRY_ON_CLIENT_TIMEOUT
+                # and MAX_ATTEMPTS_BUCKET_A comments above for why this ceiling
+                # is intentionally kept lower than bucket B's.
+                if RETRY_ON_CLIENT_TIMEOUT and attempt < MAX_ATTEMPTS_BUCKET_A:
+                    logger.warning(
+                        "request_id=%s generate_ai_response client deadline exceeded attempt=%d/%d "
+                        "timeout=%ds elapsed=%.3fs (mode=%s, board=%s, user_class=%s): %s - retrying "
+                        "(RETRY_ON_CLIENT_TIMEOUT=True)",
+                        request_id, attempt, MAX_ATTEMPTS_BUCKET_A, attempt_timeout, elapsed,
+                        mode, board, user_class, _exception_type_name(e)
+                    )
+                    continue
+                logger.exception(
+                    "request_id=%s generate_ai_response client deadline exceeded attempt=%d/%d "
+                    "timeout=%ds elapsed=%.3fs (mode=%s, board=%s, user_class=%s) - not retried further "
+                    "(RETRY_ON_CLIENT_TIMEOUT=%s, MAX_ATTEMPTS_BUCKET_A=%d)",
+                    request_id, attempt, MAX_ATTEMPTS_BUCKET_A, attempt_timeout, elapsed, mode, board,
+                    user_class, RETRY_ON_CLIENT_TIMEOUT, MAX_ATTEMPTS_BUCKET_A
                 )
-                continue
-            logger.exception(
-                "generate_ai_response client deadline exceeded attempt=%d/%d timeout=%ds elapsed=%.3fs "
-                "(mode=%s, board=%s, user_class=%s) - not retried further (RETRY_ON_CLIENT_TIMEOUT=%s, "
-                "MAX_ATTEMPTS_BUCKET_A=%d)",
-                attempt, MAX_ATTEMPTS_BUCKET_A, attempt_timeout, elapsed, mode, board, user_class,
-                RETRY_ON_CLIENT_TIMEOUT, MAX_ATTEMPTS_BUCKET_A
-            )
-            return _wrap(GENERIC_CHAT_ERROR, is_error=True, elapsed_seconds=elapsed)
+                return _wrap(GENERIC_CHAT_ERROR, is_error=True, elapsed_seconds=elapsed,
+                             error_code=ERROR_PROVIDER_TIMEOUT)
 
-        except Exception:
-            # Bucket E: unexpected/programming error.
-            elapsed = time.perf_counter() - t_attempt_start
+            # Bucket E: any other 4xx (bad request, permission denied, etc.) is
+            # a programming/config error, and an unexpected/unrecognised error
+            # is a bug - neither is something a retry fixes.
+            code = _error_code_for_kind(kind)
             logger.exception(
-                "generate_ai_response failed unexpectedly attempt=%d elapsed=%.3fs (mode=%s, board=%s, user_class=%s)",
-                attempt, elapsed, mode, board, user_class
+                "request_id=%s generate_ai_response failed attempt=%d/%d elapsed=%.3fs kind=%s "
+                "http_status=%s code=%s (mode=%s, board=%s, user_class=%s) - not retried",
+                request_id, attempt, MAX_ATTEMPTS_BUCKET_B, elapsed, kind.value, status_code, code,
+                mode, board, user_class
             )
-            return _wrap(GENERIC_CHAT_ERROR, is_error=True, elapsed_seconds=elapsed)
+            return _wrap(GENERIC_CHAT_ERROR, is_error=True, elapsed_seconds=elapsed, error_code=code)
 
     # Not reachable (the loop always returns), kept as a defensive fallback.
-    return _wrap(GENERIC_CHAT_ERROR, is_error=True)
+    return _wrap(GENERIC_CHAT_ERROR, is_error=True, error_code=ERROR_INTERNAL)
 
 
 # ---------------------------------------------------------------------------
@@ -1159,7 +1168,7 @@ def generate_quiz_questions(
     MAX_ATTEMPTS_BUCKET_A / RETRY_ON_CLIENT_TIMEOUT in generate_ai_response)
     is NOT reused here - that was a separate, independently-tuned decision
     for the chat path and was not part of the approved scope for this fix.
-    A client-side timeout here (httpx.TimeoutException/ConnectError) falls
+    A client-side timeout here (ProviderErrorKind.TIMEOUT) falls
     through to the generic "unexpected error" handling below and is not
     retried, matching this task's "unexpected errors -> do not retry"
     instruction. If real-world data later shows quiz generation also needs
@@ -1196,25 +1205,18 @@ def generate_quiz_questions(
         attempt_timeout = AI_REQUEST_TIMEOUT_SECONDS if attempt == 1 else RETRY_REQUEST_TIMEOUT_SECONDS
 
         try:
-            config_kwargs = dict(
+            # QUIZ_THINKING_LEVEL is None -> no reasoning setting is sent at all
+            # (the model default), exactly as before.
+            result = get_provider().generate(ProviderRequest(
                 system_instruction=system_instruction,
-                http_options=types.HttpOptions(timeout=_seconds_to_ms(attempt_timeout)),
-            )
-            if QUIZ_THINKING_LEVEL is not None:
-                config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=QUIZ_THINKING_LEVEL)
-
-            response = _client.models.generate_content(
+                user_parts=[f"Create {count} MCQ questions on {topic}."],
                 model=MODEL_NAME,
-                contents=f"Create {count} MCQ questions on {topic}.",
-                config=types.GenerateContentConfig(**config_kwargs),
-            )
+                timeout_seconds=attempt_timeout,
+                reasoning_effort=QUIZ_THINKING_LEVEL,
+            ))
 
-            raw_text = (response.text or "").strip()
+            raw_text = (result.text or "").strip()
             if not raw_text:
-                # Blocked/empty response (almost always a safety-filter
-                # block) - not retried, matching generate_ai_response's
-                # bucket D: an identical request would just get blocked
-                # again.
                 logger.warning(
                     "generate_quiz_questions got a blocked/empty response attempt=%d/%d "
                     "(board=%s, user_class=%s, subject=%s, stream=%s, topic=%s)",
@@ -1231,89 +1233,59 @@ def generate_quiz_questions(
             validated = validate_quiz_questions(parsed)
             if not validated:
                 logger.error(
-                    "generate_quiz_questions: Gemini output had no valid MCQ entries after "
+                    "generate_quiz_questions: model output had no valid MCQ entries after "
                     "validation (board=%s, user_class=%s, subject=%s, stream=%s, topic=%s, raw_count=%s)",
                     board, user_class, subject, stream, topic,
                     len(parsed) if isinstance(parsed, list) else "not-a-list"
                 )
             return validated
 
-        except genai_errors.ClientError as e:
-            if e.code == 429:
-                # Bucket C: quota exhaustion. Never retried - quota will
-                # not clear in a few seconds.
+        except Exception as e:
+            # PHASE 10: provider-neutral kinds. Same policy as before: quota is
+            # never retried; bucket B (5xx + 409) is retried with the jittered
+            # delay; a client timeout, any other provider error, and any
+            # unexpected error (including malformed JSON) return [] unretried.
+            kind = e.kind if isinstance(e, ProviderError) else ProviderErrorKind.UNKNOWN
+            status_code = getattr(e, "http_status", None)
+            status_label = getattr(e, "status", None)
+
+            if kind == ProviderErrorKind.RATE_LIMITED:
                 logger.exception(
                     "generate_quiz_questions quota exhausted attempt=%d "
                     "(board=%s, user_class=%s, subject=%s, stream=%s, topic=%s)",
                     attempt, board, user_class, subject, stream, topic
                 )
                 return []
-            if e.code in TRANSIENT_RETRYABLE_CLIENT_HTTP_CODES and attempt < MAX_ATTEMPTS_BUCKET_B:
-                # Bucket B (409 Aborted-equivalent) - same classification
-                # and constants as generate_ai_response.
-                retry_delay = random.uniform(
-                    RETRY_DELAY_BASE_SECONDS - RETRY_DELAY_JITTER_SECONDS,
-                    RETRY_DELAY_BASE_SECONDS + RETRY_DELAY_JITTER_SECONDS,
+
+            if kind in (ProviderErrorKind.UNAVAILABLE, ProviderErrorKind.CONFLICT):
+                if attempt < MAX_ATTEMPTS_BUCKET_B:
+                    retry_delay = random.uniform(
+                        RETRY_DELAY_BASE_SECONDS - RETRY_DELAY_JITTER_SECONDS,
+                        RETRY_DELAY_BASE_SECONDS + RETRY_DELAY_JITTER_SECONDS,
+                    )
+                    logger.warning(
+                        "generate_quiz_questions transient provider error code=%s attempt=%d/%d "
+                        "timeout=%ds (board=%s, user_class=%s, subject=%s, stream=%s, topic=%s): %s - retrying in %.2fs",
+                        status_code, attempt, MAX_ATTEMPTS_BUCKET_B, attempt_timeout,
+                        board, user_class, subject, stream, topic, status_label, retry_delay
+                    )
+                    time.sleep(retry_delay)
+                    continue
+                logger.exception(
+                    "generate_quiz_questions failed after %d attempts with transient provider error code=%s "
+                    "(board=%s, user_class=%s, subject=%s, stream=%s, topic=%s)",
+                    MAX_ATTEMPTS_BUCKET_B, status_code, board, user_class, subject, stream, topic
                 )
-                logger.warning(
-                    "generate_quiz_questions transient provider error code=%s attempt=%d/%d "
-                    "timeout=%ds (board=%s, user_class=%s, subject=%s, stream=%s, topic=%s): %s - retrying in %.2fs",
-                    e.code, attempt, MAX_ATTEMPTS_BUCKET_B, attempt_timeout,
-                    board, user_class, subject, stream, topic, e.status, retry_delay
-                )
-                time.sleep(retry_delay)
-                continue
-            # Bucket E: any other 4xx (bad request, permission denied, etc.)
-            # is a programming/config error, not something a retry fixes.
+                return []
+
             logger.exception(
-                "generate_quiz_questions client error code=%s attempt=%d/%d "
-                "(board=%s, user_class=%s, subject=%s, stream=%s, topic=%s)",
-                e.code, attempt, MAX_ATTEMPTS_BUCKET_B, board, user_class, subject, stream, topic
+                "generate_quiz_questions failed attempt=%d/%d kind=%s http_status=%s "
+                "(board=%s, user_class=%s, subject=%s, stream=%s, topic=%s) - not retried",
+                attempt, MAX_ATTEMPTS_BUCKET_B, kind.value, status_code,
+                board, user_class, subject, stream, topic
             )
             return []
 
-        except genai_errors.ServerError as e:
-            # Bucket B: genuine transient provider failure (5xx, including
-            # the 504 DEADLINE_EXCEEDED this fix was written for). Returns
-            # from Google fast (an error response, not a slow success), so
-            # retrying with a full timeout budget does not meaningfully
-            # raise the worst-case wait - same reasoning as chat's bucket B.
-            if attempt < MAX_ATTEMPTS_BUCKET_B:
-                retry_delay = random.uniform(
-                    RETRY_DELAY_BASE_SECONDS - RETRY_DELAY_JITTER_SECONDS,
-                    RETRY_DELAY_BASE_SECONDS + RETRY_DELAY_JITTER_SECONDS,
-                )
-                logger.warning(
-                    "generate_quiz_questions transient provider error code=%s attempt=%d/%d "
-                    "timeout=%ds (board=%s, user_class=%s, subject=%s, stream=%s, topic=%s): %s - retrying in %.2fs",
-                    e.code, attempt, MAX_ATTEMPTS_BUCKET_B, attempt_timeout,
-                    board, user_class, subject, stream, topic, e.status, retry_delay
-                )
-                time.sleep(retry_delay)
-                continue
-            logger.exception(
-                "generate_quiz_questions failed after %d attempts with server error code=%s "
-                "(board=%s, user_class=%s, subject=%s, stream=%s, topic=%s)",
-                MAX_ATTEMPTS_BUCKET_B, e.code, board, user_class, subject, stream, topic
-            )
-            return []
-
-        except Exception:
-            # Bucket E: unexpected error - malformed JSON from the model,
-            # a client-side timeout/connect error, or a genuine programming
-            # error. Not retried: for JSON/format issues an identical
-            # request would likely fail the same way again, and client-side
-            # timeout handling (bucket A in generate_ai_response) was
-            # deliberately not carried over here - see function docstring.
-            logger.exception(
-                "generate_quiz_questions failed unexpectedly attempt=%d/%d "
-                "(board=%s, user_class=%s, subject=%s, stream=%s, topic=%s)",
-                attempt, MAX_ATTEMPTS_BUCKET_B, board, user_class, subject, stream, topic
-            )
-            return []
-
-    # Not reachable (the loop always returns), kept as a defensive fallback
-    # matching the same pattern generate_ai_response uses.
     return []
 
 
@@ -1364,18 +1336,14 @@ def generate_chat_title(history: list, board: str = "NCTB") -> Optional[str]:
         return None
 
     try:
-        response = _client.models.generate_content(
+        result = get_provider().generate(ProviderRequest(
+            system_instruction=TITLE_SYSTEM_INSTRUCTION,
+            user_parts=[f"Conversation (board: {board}):\n{convo_text}\n\nTitle:"],
             model=MODEL_NAME,
-            contents=f"Conversation (board: {board}):\n{convo_text}\n\nTitle:",
-            config=types.GenerateContentConfig(
-                system_instruction=TITLE_SYSTEM_INSTRUCTION,
-                thinking_config=types.ThinkingConfig(thinking_level=TITLE_THINKING_LEVEL),
-                http_options=types.HttpOptions(timeout=_seconds_to_ms(CHAT_TITLE_TIMEOUT_SECONDS)),
-            ),
-        )
-        title = (response.text or "").strip()
-        # Defensive cleanup: strip accidental wrapping quotes/markdown the
-        # model might still add despite the instruction above.
+            timeout_seconds=CHAT_TITLE_TIMEOUT_SECONDS,
+            reasoning_effort=TITLE_THINKING_LEVEL,
+        ))
+        title = (result.text or "").strip()
         title = title.strip('"\'` \n')
         title = title.split("\n")[0].strip()
         if not title:
@@ -1401,7 +1369,7 @@ class StreamChunk:
                       delta only.
       "retry"       - BUG 3 PHASE 2: a bounded recovery generation is
                       starting after a confirmed transient provider
-                      failure (ServerError/5xx) hit after partial output.
+                      failure (UNAVAILABLE/5xx) hit after partial output.
                       NOT terminal - more "text" chunks and an eventual
                       "done"/"interrupted"/"error" always follow. Carries
                       no text. The consumer MUST discard everything
@@ -1409,8 +1377,8 @@ class StreamChunk:
                       text is never part of the final answer) and treat
                       what follows as a completely fresh generation.
       "done"        - terminal SUCCESS ONLY. `text` is the FULL final
-                      answer; grounding_metadata carries research metadata
-                      (or None). Emitted ONLY when the SDK's stream
+                      answer; `grounding` carries normalized research grounding
+                      (or None). Emitted ONLY when the provider's stream
                       iterator completed with no exception AND the last
                       observed finish_reason is absent or exactly STOP -
                       see _is_successful_finish() below (BUG 3 fix). When
@@ -1449,8 +1417,8 @@ class StreamChunk:
     """
     kind: str
     text: str = ""
-    grounding_metadata: Optional[object] = None
-    usage_metadata: Optional[object] = None
+    grounding: Optional[object] = None      # provider-neutral GroundingResult (or None)
+    usage: Optional[ProviderUsage] = None
     elapsed_seconds: Optional[float] = None
     # P0 STABILIZATION: stable machine-readable code (ERROR_* above) on
     # "error" and "interrupted" chunks. None on text/retry/done.
@@ -1488,16 +1456,16 @@ def stream_ai_response(
     Real production telemetry (Bug 3 Phase 1 validation) showed the actual
     dominant post-first-byte failure is a CONFIRMED TRANSIENT one: Gemini
     returns HTTP 200, streams real content (9 chunks / 34 chunks observed),
-    then fails with ServerError 503 "high demand... usually temporary" -
+    then fails with a 503 "high demand... usually temporary" -
     not a request problem, a provider capacity problem. For exactly this
     evidenced case, Phase 2 grants ONE bounded recovery generation: the
     partial output is discarded completely (never concatenated - a fresh
-    chat_session is created from the SAME frozen `req`, so it is the exact
+    provider call is made from the SAME frozen `req`, so it is the exact
     same prompt/history/context, not a continuation), a "retry" event tells
     the client to reset its in-progress bubble, and a brand new complete
     generation is attempted. See `recovery_used` below.
 
-    Every OTHER after-first-byte failure (ClientError of any kind including
+    Every OTHER after-first-byte failure (any non-5xx provider error including
     429, a non-STOP finish_reason with no exception, or an unexpected bare
     exception) is still finalized immediately as "interrupted" with NO
     retry - none of those are the confirmed-transient case the evidence
@@ -1523,7 +1491,7 @@ def stream_ai_response(
     (see _compute_retry_backoff); the attempt limits themselves are
     unchanged. For the recovery, the "retry" event is yielded BEFORE the
     wait so the client resets its bubble immediately. (2) A non-retryable
-    ClientError (400/401/403/404...) is no longer retried - only 409 is,
+    client error (400/401/403/404...) is no longer retried - only 409 is,
     matching the non-streaming path's documented policy. (3) Recovery is
     only granted when an attempt remains to run it. (4) error/interrupted
     chunks carry a stable `error_code`, and every log line carries
@@ -1537,7 +1505,7 @@ def stream_ai_response(
     # BUG 3 PHASE 2: at most ONE recovery generation is ever granted per
     # call, regardless of how many pre-first-token retries happen on either
     # side of it. This flag is the entire enforcement mechanism - see the
-    # ServerError branch below.
+    # UNAVAILABLE branch below.
     recovery_used = False
     # Set for exactly one loop iteration - the one immediately following a
     # recovery grant - so that iteration gets the FULL request timeout
@@ -1556,7 +1524,7 @@ def stream_ai_response(
             outcome=outcome, mode=mode, attempt=attempt,
             ttft_seconds=ttft_seconds, chunk_count=chunk_count,
             last_chunk_elapsed=last_chunk_elapsed, finish_reason=finish_reason,
-            exception_type=type(exc).__name__ if exc is not None else None,
+            exception_type=_exception_type_name(exc) if exc is not None else None,
             http_status=http_status,
             total_duration=time.perf_counter() - t_stream_start,
             explicit_completion_received=complete,
@@ -1599,20 +1567,26 @@ def stream_ai_response(
             else RETRY_REQUEST_TIMEOUT_SECONDS
         )
 
-        config_kwargs = dict(
+        # Built fresh each attempt (cheap, local) so the per-attempt timeout
+        # is always the one in effect. The SAME frozen `req` content goes into
+        # every attempt, including the recovery generation.
+        provider_request = ProviderRequest(
             system_instruction=req.system_instruction,
-            thinking_config=types.ThinkingConfig(thinking_level=CHAT_THINKING_LEVEL),
-            http_options=types.HttpOptions(timeout=_seconds_to_ms(attempt_timeout)),
+            user_parts=req.user_parts,
+            history=req.history,
+            model=MODEL_NAME,
+            timeout_seconds=attempt_timeout,
+            reasoning_effort=CHAT_THINKING_LEVEL,
+            enable_web_search=enable_research,
+            request_id=request_id,
         )
-        if enable_research:
-            config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
-        config = types.GenerateContentConfig(**config_kwargs)
 
         produced_any_text = False
         collected = []
-        grounding_metadata = None
-        usage_metadata = None
+        grounding = None
+        usage = None
         last_finish_reason = None
+        last_raw_finish_reason = None
         last_finish_message = None
 
         logger.info(
@@ -1621,23 +1595,17 @@ def stream_ai_response(
         )
 
         try:
-            chat_session = _client.chats.create(
-                model=MODEL_NAME,
-                config=config,
-                history=req.gemini_history,
-            )
-
-            for response in chat_session.send_message_stream(req.contents):
-                # BUG 3 INSTRUMENTATION: every chunk the SDK iterator yields
+            for event in get_provider().stream_chat(provider_request):
+                # BUG 3 INSTRUMENTATION: every event the provider yields
                 # counts toward chunk_count, whether or not it carries text -
                 # a metadata-only chunk is still a real provider round trip.
                 chunk_count += 1
                 last_chunk_elapsed = time.perf_counter() - t_stream_start
 
-                # Defensive on every field: a chunk may legitimately carry no
-                # text (e.g. a tool-use or metadata-only chunk). Those are not
-                # errors and must not terminate the stream.
-                piece = getattr(response, "text", None)
+                # An event may legitimately carry no text (e.g. a metadata-
+                # only chunk). Those are not errors and must not terminate
+                # the stream.
+                piece = event.text
                 if piece:
                     if not produced_any_text:
                         ttft_seconds = time.perf_counter() - t_stream_start
@@ -1645,55 +1613,49 @@ def stream_ai_response(
                     collected.append(piece)
                     yield StreamChunk(kind="text", text=piece)
 
-                candidates = getattr(response, "candidates", None) or []
-                if candidates:
-                    cand = candidates[0]
-                    if enable_research:
-                        gm = getattr(cand, "grounding_metadata", None)
-                        # Grounding metadata typically arrives on a later
-                        # chunk; keep the most recent non-None one.
-                        if gm is not None:
-                            grounding_metadata = gm
-                    # BUG 3 FIX: finish_reason is the only signal that can
-                    # distinguish a clean STOP from MAX_TOKENS/SAFETY/
-                    # RECITATION/etc when the iterator exits with NO
-                    # exception at all. An intermediate None is expected and
-                    # must not erase an earlier real value, so keep the most
-                    # recent non-None one, same pattern as grounding_metadata.
-                    fr = getattr(cand, "finish_reason", None)
-                    if fr is not None:
-                        last_finish_reason = fr
-                        last_finish_message = getattr(cand, "finish_message", None)
-
-                if getattr(response, "usage_metadata", None) is not None:
-                    usage_metadata = response.usage_metadata
+                # Grounding typically arrives on a later chunk; keep the most
+                # recent non-None one. (The adapter only produces it when web
+                # search was requested.)
+                if event.grounding is not None:
+                    grounding = event.grounding
+                # BUG 3 FIX: finish_reason is the only signal that can
+                # distinguish a clean STOP from MAX_TOKENS/SAFETY/etc. when
+                # the iterator exits with NO exception at all. An
+                # intermediate None is expected and must not erase an earlier
+                # real value, so keep the most recent non-None one.
+                if event.finish_reason is not None:
+                    last_finish_reason = event.finish_reason
+                    last_raw_finish_reason = event.raw_finish_reason
+                    last_finish_message = event.finish_message
+                if event.usage is not None:
+                    usage = event.usage
 
             elapsed = time.perf_counter() - t_attempt_start
             final_text = "".join(collected)
 
             if not final_text:
-                # Same meaning as the non-streaming path's empty .text: almost
+                # Same meaning as the non-streaming path's empty text: almost
                 # always a safety-filter block. Not retried - an identical
                 # request would be blocked again.
                 code = _error_code_for_finish_reason(last_finish_reason, ERROR_PROVIDER_EMPTY_RESPONSE)
                 logger.warning(
                     "request_id=%s stream_ai_response got a blocked/empty stream attempt=%d/%d "
                     "elapsed=%.3fs finish_reason=%s code=%s (mode=%s, board=%s, user_class=%s)",
-                    request_id, attempt, MAX_ATTEMPTS, elapsed, last_finish_reason, code,
+                    request_id, attempt, MAX_ATTEMPTS, elapsed, last_raw_finish_reason, code,
                     mode, board, user_class
                 )
-                _telemetry("blocked_empty", attempt, finish_reason=last_finish_reason, error_code=code)
+                _telemetry("blocked_empty", attempt, finish_reason=last_raw_finish_reason, error_code=code)
                 yield StreamChunk(kind="error", text=BLOCKED_RESPONSE_ERROR, error_code=code)
                 return
 
             if _is_successful_finish(last_finish_reason):
-                _log_usage(usage_metadata, attempt, elapsed, mode, bool(image_bytes), bool(pdf_context))
-                _telemetry("success", attempt, finish_reason=last_finish_reason, complete=True)
+                _log_usage(usage, attempt, elapsed, mode, bool(image_bytes), bool(pdf_context))
+                _telemetry("success", attempt, finish_reason=last_raw_finish_reason, complete=True)
                 yield StreamChunk(
                     kind="done",
                     text=final_text,
-                    grounding_metadata=grounding_metadata,
-                    usage_metadata=usage_metadata,
+                    grounding=grounding,
+                    usage=usage,
                     elapsed_seconds=elapsed,
                 )
                 return
@@ -1705,69 +1667,173 @@ def stream_ai_response(
                 "request_id=%s stream_ai_response non-success finish_reason=%s finish_message=%s "
                 "attempt=%d/%d elapsed=%.3fs chunk_count=%d code=%s (mode=%s, board=%s, "
                 "user_class=%s) - finalizing as interrupted, not done",
-                request_id, last_finish_reason, last_finish_message, attempt, MAX_ATTEMPTS,
+                request_id, last_raw_finish_reason, last_finish_message, attempt, MAX_ATTEMPTS,
                 elapsed, chunk_count, code, mode, board, user_class
             )
-            _telemetry("interrupted_finish_reason", attempt, finish_reason=last_finish_reason, error_code=code)
+            _telemetry("interrupted_finish_reason", attempt, finish_reason=last_raw_finish_reason, error_code=code)
             yield StreamChunk(
                 kind="interrupted",
                 text=final_text,
-                grounding_metadata=grounding_metadata,
-                usage_metadata=usage_metadata,
+                grounding=grounding,
+                usage=usage,
                 elapsed_seconds=elapsed,
                 error_code=code,
             )
             return
 
-        except genai_errors.ClientError as e:
+        except Exception as e:
+            # PHASE 10: ONE handler. The provider has already translated its
+            # SDK/transport exceptions into ProviderError, so this policy layer
+            # decides purely on the neutral `kind`. Anything that is not a
+            # ProviderError (a bug in our own code, a misbehaving provider) is
+            # treated as UNKNOWN, exactly as the old generic `except Exception`
+            # did. Every branch below ends in `continue` (retry) or `return`.
             elapsed = time.perf_counter() - t_attempt_start
-            status_code = getattr(e, "code", None)
-            if produced_any_text:
-                # Unexpected (a 4xx after bytes already flowed) - keep the
-                # full traceback, this is not a known transient condition.
-                logger.exception(
-                    "request_id=%s stream_ai_response client error AFTER first output - finalizing "
-                    "as interrupted attempt=%d elapsed=%.3fs chunk_count=%d finish_reason=%s "
-                    "http_status=%s (mode=%s)",
-                    request_id, attempt, elapsed, chunk_count, last_finish_reason, status_code, mode
+            kind = e.kind if isinstance(e, ProviderError) else ProviderErrorKind.UNKNOWN
+            status_code = getattr(e, "http_status", None)
+            status_label = getattr(e, "status", None)
+            exc_name = _exception_type_name(e)
+
+            if kind == ProviderErrorKind.UNAVAILABLE:
+                # BUG 3 PHASE 2 - the confirmed-transient recovery path.
+                # UNAVAILABLE means the provider's own infrastructure (5xx),
+                # not the request, is the problem - this is the ONLY failure
+                # kind treated as safe to recover from after partial output.
+                # The real production telemetry that motivated this showed
+                # "HTTP 200, streaming began, N chunks delivered, then 503
+                # UNAVAILABLE (high demand... usually temporary)".
+                if produced_any_text:
+                    # P0: recovery is only granted when an attempt remains to
+                    # run it (granting it on the final attempt would emit a
+                    # "retry" event and then fall out of the loop into a
+                    # generic error, discarding the partial for nothing).
+                    if not recovery_used and attempt < MAX_ATTEMPTS:
+                        # Grant the ONE bounded recovery generation. The
+                        # partial text collected so far is discarded
+                        # completely, never concatenated - continuing this
+                        # same `for attempt` loop resets `collected`/
+                        # `grounding`/`usage`/`last_finish_reason` fresh at
+                        # the top of the next iteration, and a brand-new
+                        # provider call is made from the SAME frozen `req` -
+                        # the same prompt/system instruction/history/image/
+                        # PDF context, a completely fresh generation.
+                        recovery_used = True
+                        pending_recovery = True
+                        retries_granted += 1
+                        logger.warning(
+                            "request_id=%s stream_ai_response transient server error AFTER first output - "
+                            "triggering ONE bounded recovery generation, discarding partial "
+                            "attempt=%d elapsed=%.3fs chunk_count=%d http_status=%s (mode=%s)",
+                            request_id, attempt, elapsed, chunk_count, status_code, mode
+                        )
+                        _telemetry("recovery_triggered", attempt, finish_reason=last_raw_finish_reason,
+                                   exc=e, http_status=status_code)
+                        # The client resets its bubble on this event, so it is
+                        # sent BEFORE the backoff wait - the student sees the
+                        # "retrying" state immediately, not after the delay.
+                        yield StreamChunk(kind="retry")
+                        _backoff_before_retry(retries_granted, request_id, "recovery_after_partial_output")
+                        continue
+                    # Recovery already used (or no attempt left to run it):
+                    # bounded means bounded. Finalize as interrupted with THIS
+                    # attempt's own text only, never combined with a discarded
+                    # earlier attempt. Known transient condition -> no traceback.
+                    logger.error(
+                        "request_id=%s stream_ai_response transient server error AFTER output and no "
+                        "recovery available - finalizing as interrupted attempt=%d elapsed=%.3fs "
+                        "chunk_count=%d http_status=%s (mode=%s)",
+                        request_id, attempt, elapsed, chunk_count, status_code, mode
+                    )
+                    _telemetry("interrupted_exception", attempt, finish_reason=last_raw_finish_reason,
+                               exc=e, http_status=status_code, error_code=ERROR_PROVIDER_UNAVAILABLE)
+                    yield StreamChunk(
+                        kind="interrupted",
+                        text="".join(collected),
+                        grounding=grounding,
+                        usage=usage,
+                        elapsed_seconds=elapsed,
+                        error_code=ERROR_PROVIDER_UNAVAILABLE,
+                    )
+                    return
+                # Transient server error BEFORE any output on this attempt:
+                # the existing bucket-B "fails before first token, try again"
+                # protection (same MAX_ATTEMPTS_BUCKET_B ceiling as before),
+                # with a bounded backoff between attempts. Not the recovery
+                # grant; does not set recovery_used.
+                if attempt < MAX_ATTEMPTS_BUCKET_B:
+                    logger.warning(
+                        "request_id=%s stream_ai_response server error attempt=%d/%d elapsed=%.3fs "
+                        "http_status=%s status=%s (mode=%s) - will retry after backoff",
+                        request_id, attempt, MAX_ATTEMPTS_BUCKET_B, elapsed, status_code,
+                        status_label, mode
+                    )
+                    retries_granted += 1
+                    _backoff_before_retry(retries_granted, request_id, "server_error_%s" % status_code)
+                    continue
+                # Exhausted. A 5xx is a well-understood provider condition, so
+                # this is one clear ERROR line with the status - not a traceback.
+                logger.error(
+                    "request_id=%s stream_ai_response provider unavailable - gave up after %d attempts "
+                    "http_status=%s status=%s (mode=%s)",
+                    request_id, attempt, status_code, status_label, mode
                 )
-                _telemetry("interrupted_exception", attempt, finish_reason=last_finish_reason, exc=e,
+                _telemetry("error_server", attempt, exc=e, http_status=status_code,
+                           error_code=ERROR_PROVIDER_UNAVAILABLE)
+                yield StreamChunk(kind="error", text=PROVIDER_UNAVAILABLE_ERROR,
+                                  error_code=ERROR_PROVIDER_UNAVAILABLE)
+                return
+
+            if produced_any_text:
+                # Any other failure after bytes already flowed (429, 409, a
+                # 4xx, a network drop or timeout mid-answer, or an unexpected
+                # exception) finalizes as interrupted - no recovery, unchanged
+                # from Phase 1. Unexpected, so keep the full traceback; the
+                # exact type/status is also in the telemetry line.
+                logger.exception(
+                    "request_id=%s stream_ai_response failed AFTER first output - finalizing as "
+                    "interrupted attempt=%d elapsed=%.3fs chunk_count=%d kind=%s exception_type=%s "
+                    "http_status=%s (mode=%s)",
+                    request_id, attempt, elapsed, chunk_count, kind.value, exc_name, status_code, mode
+                )
+                _telemetry("interrupted_exception", attempt, finish_reason=last_raw_finish_reason, exc=e,
                            http_status=status_code, error_code=ERROR_STREAM_INTERRUPTED)
                 yield StreamChunk(
                     kind="interrupted",
                     text="".join(collected),
-                    grounding_metadata=grounding_metadata,
-                    usage_metadata=usage_metadata,
+                    grounding=grounding,
+                    usage=usage,
                     elapsed_seconds=elapsed,
                     error_code=ERROR_STREAM_INTERRUPTED,
                 )
                 return
-            if status_code == 429:
-                # Known condition (quota) - a warning, not a traceback.
+
+            if kind == ProviderErrorKind.RATE_LIMITED:
+                # Known condition (quota) - a warning, not a traceback. Never retried.
                 logger.warning(
                     "request_id=%s stream_ai_response quota exhausted attempt=%d elapsed=%.3fs "
                     "status=%s (mode=%s)",
-                    request_id, attempt, elapsed, getattr(e, "status", None), mode
+                    request_id, attempt, elapsed, status_label, mode
                 )
                 _telemetry("quota_exhausted", attempt, exc=e, http_status=429,
                            error_code=ERROR_PROVIDER_RATE_LIMITED)
                 yield StreamChunk(kind="error", text=QUOTA_EXHAUSTED_ERROR,
                                   error_code=ERROR_PROVIDER_RATE_LIMITED)
                 return
-            if status_code in TRANSIENT_RETRYABLE_CLIENT_HTTP_CODES:
-                # Bucket B (409 Aborted-equivalent) - the only ClientError
-                # class that is retried, same as the non-streaming path.
+
+            if kind == ProviderErrorKind.CONFLICT:
+                # Bucket B (409 Aborted-equivalent) - the only non-5xx class
+                # that is retried, same as the non-streaming path.
                 if attempt < MAX_ATTEMPTS_BUCKET_B:
                     logger.warning(
-                        "request_id=%s stream_ai_response transient client error http_status=%s "
+                        "request_id=%s stream_ai_response transient conflict http_status=%s "
                         "attempt=%d/%d elapsed=%.3fs (mode=%s) - will retry after backoff",
                         request_id, status_code, attempt, MAX_ATTEMPTS_BUCKET_B, elapsed, mode
                     )
                     retries_granted += 1
-                    _backoff_before_retry(retries_granted, request_id, "client_%s" % status_code)
+                    _backoff_before_retry(retries_granted, request_id, "conflict_%s" % status_code)
                     continue
                 logger.error(
-                    "request_id=%s stream_ai_response transient client error http_status=%s - "
+                    "request_id=%s stream_ai_response transient conflict http_status=%s - "
                     "gave up after %d attempts (mode=%s)",
                     request_id, status_code, attempt, mode
                 )
@@ -1776,143 +1842,34 @@ def stream_ai_response(
                 yield StreamChunk(kind="error", text=PROVIDER_UNAVAILABLE_ERROR,
                                   error_code=ERROR_PROVIDER_UNAVAILABLE)
                 return
-            # Any other 4xx (bad request, permission denied, not found...) is
-            # a request/configuration problem - retrying cannot fix it, and
-            # with backoff it would only make the student wait. Logged ONCE,
-            # with a traceback, because it needs a developer.
-            code = (ERROR_PROVIDER_AUTH_FAILED if status_code in (401, 403)
-                    else ERROR_PROVIDER_INVALID_REQUEST)
-            logger.exception(
-                "request_id=%s stream_ai_response non-retryable client error http_status=%s "
-                "code=%s attempt=%d elapsed=%.3fs (mode=%s) - not retried",
-                request_id, status_code, code, attempt, elapsed, mode
-            )
-            _telemetry("error_client", attempt, exc=e, http_status=status_code, error_code=code)
-            yield StreamChunk(kind="error", text=GENERIC_CHAT_ERROR, error_code=code)
-            return
 
-        except genai_errors.ServerError as e:
-            # BUG 3 PHASE 2 - the confirmed-transient recovery path.
-            # ServerError means Gemini's own infrastructure (5xx), not the
-            # request, is the problem - this is the ONLY exception class
-            # treated as safe to recover from after partial output. The real
-            # production telemetry that motivated this showed "HTTP 200,
-            # streaming began, N chunks delivered, then 503 UNAVAILABLE (high
-            # demand... usually temporary)" - a provider capacity problem.
-            elapsed = time.perf_counter() - t_attempt_start
-            status_code = getattr(e, "code", None)
-            if produced_any_text:
-                # P0: recovery is only granted when an attempt remains to run
-                # it. (Before, granting it on the final attempt emitted a
-                # "retry" event and then fell out of the loop into a generic
-                # error, discarding the partial answer for nothing.)
-                if not recovery_used and attempt < MAX_ATTEMPTS:
-                    # Grant the ONE bounded recovery generation. The partial
-                    # text collected so far is discarded completely, never
-                    # concatenated - continuing this same `for attempt` loop
-                    # resets `collected`/`grounding_metadata`/
-                    # `usage_metadata`/`last_finish_reason` fresh at the top
-                    # of the next iteration, and a brand-new chat_session is
-                    # created from the SAME frozen `req` - so the recovery is
-                    # the same prompt/system instruction/history/image/PDF
-                    # context, a completely fresh generation.
-                    recovery_used = True
-                    pending_recovery = True
-                    retries_granted += 1
-                    logger.warning(
-                        "request_id=%s stream_ai_response transient server error AFTER first output - "
-                        "triggering ONE bounded recovery generation, discarding partial "
-                        "attempt=%d elapsed=%.3fs chunk_count=%d http_status=%s (mode=%s)",
-                        request_id, attempt, elapsed, chunk_count, status_code, mode
-                    )
-                    _telemetry("recovery_triggered", attempt, finish_reason=last_finish_reason, exc=e,
-                               http_status=status_code)
-                    # The client resets its bubble on this event, so it is
-                    # sent BEFORE the backoff wait - the student sees the
-                    # "retrying" state immediately, not after the delay.
-                    yield StreamChunk(kind="retry")
-                    _backoff_before_retry(retries_granted, request_id, "recovery_after_partial_output")
-                    continue
-                # Recovery already used (or no attempt left to run it):
-                # bounded means bounded. Finalize as interrupted with THIS
-                # attempt's own text only, never combined with a discarded
-                # earlier attempt. Known transient condition -> no traceback.
-                logger.error(
-                    "request_id=%s stream_ai_response transient server error AFTER output and no "
-                    "recovery available - finalizing as interrupted attempt=%d elapsed=%.3fs "
-                    "chunk_count=%d http_status=%s (mode=%s)",
-                    request_id, attempt, elapsed, chunk_count, status_code, mode
-                )
-                _telemetry("interrupted_exception", attempt, finish_reason=last_finish_reason, exc=e,
-                           http_status=status_code, error_code=ERROR_PROVIDER_UNAVAILABLE)
-                yield StreamChunk(
-                    kind="interrupted",
-                    text="".join(collected),
-                    grounding_metadata=grounding_metadata,
-                    usage_metadata=usage_metadata,
-                    elapsed_seconds=elapsed,
-                    error_code=ERROR_PROVIDER_UNAVAILABLE,
-                )
-                return
-            # Transient server error BEFORE any output on this attempt: the
-            # existing bucket-B "fails before first token, try again"
-            # protection (same MAX_ATTEMPTS_BUCKET_B ceiling as before), now
-            # with a bounded backoff between attempts. Not the recovery
-            # grant; does not set recovery_used.
-            if attempt < MAX_ATTEMPTS_BUCKET_B:
-                logger.warning(
-                    "request_id=%s stream_ai_response server error attempt=%d/%d elapsed=%.3fs "
-                    "http_status=%s status=%s (mode=%s) - will retry after backoff",
-                    request_id, attempt, MAX_ATTEMPTS_BUCKET_B, elapsed, status_code,
-                    getattr(e, "status", None), mode
-                )
-                retries_granted += 1
-                _backoff_before_retry(retries_granted, request_id, "server_error_%s" % status_code)
-                continue
-            # Exhausted. A 5xx is a well-understood provider condition, so
-            # this is one clear ERROR line with the status - not a traceback.
-            logger.error(
-                "request_id=%s stream_ai_response provider unavailable - gave up after %d attempts "
-                "http_status=%s status=%s (mode=%s)",
-                request_id, attempt, status_code, getattr(e, "status", None), mode
-            )
-            _telemetry("error_server", attempt, exc=e, http_status=status_code,
-                       error_code=ERROR_PROVIDER_UNAVAILABLE)
-            yield StreamChunk(kind="error", text=PROVIDER_UNAVAILABLE_ERROR,
-                              error_code=ERROR_PROVIDER_UNAVAILABLE)
-            return
-
-        except Exception as e:
-            elapsed = time.perf_counter() - t_attempt_start
-            is_timeout = isinstance(e, (httpx.TimeoutException, httpx.ConnectError))
-            status_code = getattr(e, "code", None)
-            if produced_any_text:
-                # Network drop / timeout mid-answer, or any other unexpected
-                # exception - the exact type/status is in the telemetry line.
+            if kind in (ProviderErrorKind.AUTH, ProviderErrorKind.INVALID_REQUEST):
+                # A request/configuration problem (bad request, permission
+                # denied, not found...) - retrying cannot fix it, and with
+                # backoff it would only make the student wait. Logged ONCE,
+                # with a traceback, because it needs a developer.
+                code = _error_code_for_kind(kind)
                 logger.exception(
-                    "request_id=%s stream_ai_response failed AFTER first output - finalizing as "
-                    "interrupted attempt=%d elapsed=%.3fs chunk_count=%d exception_type=%s (mode=%s)",
-                    request_id, attempt, elapsed, chunk_count, type(e).__name__, mode
+                    "request_id=%s stream_ai_response non-retryable provider error http_status=%s "
+                    "code=%s attempt=%d elapsed=%.3fs (mode=%s) - not retried",
+                    request_id, status_code, code, attempt, elapsed, mode
                 )
-                _telemetry("interrupted_exception", attempt, finish_reason=last_finish_reason, exc=e,
-                           http_status=status_code, error_code=ERROR_STREAM_INTERRUPTED)
-                yield StreamChunk(
-                    kind="interrupted",
-                    text="".join(collected),
-                    grounding_metadata=grounding_metadata,
-                    usage_metadata=usage_metadata,
-                    elapsed_seconds=elapsed,
-                    error_code=ERROR_STREAM_INTERRUPTED,
-                )
+                _telemetry("error_client", attempt, exc=e, http_status=status_code, error_code=code)
+                yield StreamChunk(kind="error", text=GENERIC_CHAT_ERROR, error_code=code)
                 return
-            code = ERROR_PROVIDER_TIMEOUT if is_timeout else ERROR_INTERNAL
+
+            # TIMEOUT (our own client deadline / connect failure) or UNKNOWN
+            # (anything unrecognised) before any output: the existing generic
+            # retry, up to MAX_ATTEMPTS.
+            is_timeout = kind == ProviderErrorKind.TIMEOUT
+            code = _error_code_for_kind(kind)
             if attempt >= MAX_ATTEMPTS:
                 # Final failure: the one place an unexpected exception gets
                 # its full traceback (earlier attempts log a one-line warning).
                 logger.exception(
                     "request_id=%s stream_ai_response failed attempt=%d/%d elapsed=%.3fs "
                     "exception_type=%s code=%s (mode=%s)",
-                    request_id, attempt, MAX_ATTEMPTS, elapsed, type(e).__name__, code, mode
+                    request_id, attempt, MAX_ATTEMPTS, elapsed, exc_name, code, mode
                 )
                 _telemetry("error_exception", attempt, exc=e, http_status=status_code, error_code=code)
                 yield StreamChunk(kind="error", text=GENERIC_CHAT_ERROR, error_code=code)
@@ -1920,7 +1877,7 @@ def stream_ai_response(
             logger.warning(
                 "request_id=%s stream_ai_response failed before first output attempt=%d/%d "
                 "elapsed=%.3fs exception_type=%s code=%s (mode=%s) - will retry",
-                request_id, attempt, MAX_ATTEMPTS, elapsed, type(e).__name__, code, mode
+                request_id, attempt, MAX_ATTEMPTS, elapsed, exc_name, code, mode
             )
             retries_granted += 1
             if is_timeout:
@@ -1928,7 +1885,7 @@ def stream_ai_response(
                 # backoff on top would only lengthen the student's wait.
                 logger.info("request_id=%s retry without extra backoff (client timeout already waited)", request_id)
             else:
-                _backoff_before_retry(retries_granted, request_id, "exception_%s" % type(e).__name__)
+                _backoff_before_retry(retries_granted, request_id, "exception_%s" % exc_name)
             continue
 
     logger.error("request_id=%s stream_ai_response exited the retry loop without a terminal event", request_id)

@@ -107,7 +107,7 @@ class GeminiAdapter:
             )
 
         ai_call_end_ts = time.time()
-        usage = result.usage_metadata
+        usage = result.usage
 
         return ModelResponse(
             text=result.text,
@@ -120,11 +120,11 @@ class GeminiAdapter:
             failure_reason=result.text if result.is_error else None,
             resolved_model_version=result.resolved_model_version,
             response_id=result.response_id,
-            prompt_tokens=getattr(usage, "prompt_token_count", None) if usage else None,
-            output_tokens=getattr(usage, "candidates_token_count", None) if usage else None,
-            thoughts_tokens=getattr(usage, "thoughts_token_count", None) if usage else None,
-            cached_tokens=getattr(usage, "cached_content_token_count", None) if usage else None,
-            total_tokens=getattr(usage, "total_token_count", None) if usage else None,
+            prompt_tokens=usage.prompt_tokens if usage else None,
+            output_tokens=usage.output_tokens if usage else None,
+            thoughts_tokens=usage.thoughts_tokens if usage else None,
+            cached_tokens=usage.cached_tokens if usage else None,
+            total_tokens=usage.total_tokens if usage else None,
             request_start_ts=request_start_ts,
             ai_call_end_ts=ai_call_end_ts,
             elapsed_seconds=result.elapsed_seconds,

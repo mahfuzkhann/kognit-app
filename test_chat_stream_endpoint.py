@@ -15,6 +15,8 @@ from google.genai import types
 from google.genai import errors as genai_errors
 
 import backend.ai_engine as ai_engine
+from backend.providers import get_provider
+from backend.providers.gemini import _seconds_to_ms
 import backend.main as main
 
 
@@ -60,7 +62,7 @@ def _install_fake_stream(monkeypatch, chunks, raise_after=None, exc=None):
     class _Client:
         chats = _Chats()
 
-    monkeypatch.setattr(ai_engine, "_client", _Client())
+    monkeypatch.setattr(get_provider(), "client", _Client())
 
 
 def _server_error(code=503, message="high demand"):
@@ -102,7 +104,7 @@ def _install_fake_stream_sequence(monkeypatch, sessions):
     class _Client:
         chats = _Chats()
 
-    monkeypatch.setattr(ai_engine, "_client", _Client())
+    monkeypatch.setattr(get_provider(), "client", _Client())
     return calls
 
 
@@ -169,7 +171,7 @@ class TestStreamAdapter:
                 attempts["n"] += 1
                 return _FakeChatSession([], raise_after=0, exc=RuntimeError("boom"))
 
-        monkeypatch.setattr(ai_engine, "_client", type("C", (), {"chats": _Chats()})())
+        monkeypatch.setattr(get_provider(), "client", type("C", (), {"chats": _Chats()})())
         out = list(ai_engine.stream_ai_response(prompt="hi"))
         assert out[-1].kind == "error"
         assert attempts["n"] > 1, "retry is safe before any byte is sent"
@@ -179,19 +181,23 @@ class TestStreamAdapter:
         assert len(out) == 1 and out[0].kind == "error"
         assert out[0].text == ai_engine.IMAGE_DECODE_ERROR
 
-    def test_grounding_metadata_captured_when_research_enabled(self, monkeypatch):
-        sentinel = object()
+    def test_grounding_captured_and_normalized_when_research_enabled(self, monkeypatch):
+        # PHASE 10: the adapter normalizes the SDK's GroundingMetadata, so the
+        # stream carries a provider-neutral GroundingResult, never the SDK object.
+        raw = types.GroundingMetadata(web_search_queries=["q1"], grounding_chunks=[], grounding_supports=[])
         _install_fake_stream(
             monkeypatch,
-            [_FakeChunk("answer"), _FakeChunk(" more", grounding=sentinel)],
+            [_FakeChunk("answer"), _FakeChunk(" more", grounding=raw)],
         )
         out = list(ai_engine.stream_ai_response(prompt="hi", enable_research=True))
-        assert out[-1].grounding_metadata is sentinel
+        assert not isinstance(out[-1].grounding, types.GroundingMetadata)
+        assert out[-1].grounding.search_queries == ("q1",)
 
     def test_no_grounding_captured_when_research_disabled(self, monkeypatch):
-        _install_fake_stream(monkeypatch, [_FakeChunk("answer", grounding=object())])
+        raw = types.GroundingMetadata(web_search_queries=["q1"], grounding_chunks=[], grounding_supports=[])
+        _install_fake_stream(monkeypatch, [_FakeChunk("answer", grounding=raw)])
         out = list(ai_engine.stream_ai_response(prompt="hi", enable_research=False))
-        assert out[-1].grounding_metadata is None
+        assert out[-1].grounding is None
 
 
 class TestStreamCompletionIntegrity:
@@ -381,7 +387,7 @@ class TestStreamRecovery:
         class _Client:
             chats = _Chats()
 
-        monkeypatch.setattr(ai_engine, "_client", _Client())
+        monkeypatch.setattr(get_provider(), "client", _Client())
         list(ai_engine.stream_ai_response(prompt="hi", history=[{"role": "user", "parts": [{"text": "earlier"}]}]))
         assert len(seen_models) == 2
         assert seen_models[0] == seen_models[1] == ai_engine.MODEL_NAME, "recovery must use the SAME model"
@@ -406,9 +412,9 @@ class TestStreamRecovery:
         class _Client:
             chats = _Chats()
 
-        monkeypatch.setattr(ai_engine, "_client", _Client())
+        monkeypatch.setattr(get_provider(), "client", _Client())
         list(ai_engine.stream_ai_response(prompt="hi"))
-        expected_full_ms = ai_engine._seconds_to_ms(ai_engine.AI_REQUEST_TIMEOUT_SECONDS)
+        expected_full_ms = _seconds_to_ms(ai_engine.AI_REQUEST_TIMEOUT_SECONDS)
         assert seen_timeouts[0] == expected_full_ms
         assert seen_timeouts[1] == expected_full_ms, "the recovery attempt must get the FULL timeout, not the short retry timeout"
 
@@ -528,8 +534,8 @@ class TestSharedCore:
         a = ai_engine._build_chat_request(**kwargs)
         b = ai_engine._build_chat_request(**kwargs)
         assert a.system_instruction == b.system_instruction
-        assert a.contents == b.contents
-        assert len(a.gemini_history) == len(b.gemini_history)
+        assert a.user_parts == b.user_parts
+        assert len(a.history) == len(b.history)
         # Socratic instruction must be present in the shared core, not bolted
         # on by one adapter only.
         assert "DO NOT give direct answers immediately" in a.system_instruction
