@@ -25,8 +25,10 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
+import textwrap
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -39,7 +41,6 @@ from PIL import Image
 
 import backend.ai_engine as ai_engine
 import backend.main as main
-import backend.providers as providers
 from backend.providers import (
     FinishReason,
     GroundingResult,
@@ -120,13 +121,16 @@ class TestContract:
         assert {m.value for m in FinishReason} == {"STOP", "MAX_TOKENS", "SAFETY", "OTHER"}
 
     def test_contract_and_mock_import_no_sdk(self):
-        code = ("import sys, backend.providers.base, backend.providers.mock, backend.providers; "
-                "bad = [m for m in sys.modules if m == 'google' or m.startswith('google.genai') or m == 'httpx']; "
-                "print('LEAK' if bad else 'CLEAN')")
-        out = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True, timeout=120,
-                             env=dict(os.environ, GEMINI_API_KEY="dummy"))
-        assert out.returncode == 0, out.stderr
-        assert out.stdout.strip().splitlines()[-1] == "CLEAN"
+        # Run in a stdlib-only interpreter (-I -S: no site-packages, no .pth
+        # files, no sitecustomize, no PYTHON* variables). Nothing third-party
+        # can be pre-loaded, and any attempt by these modules to import the
+        # SDK or httpx is recorded by the probe whether or not it is
+        # wrapped in try/except. The result therefore depends only on Kognit's
+        # own code, never on what the developer's virtualenv happens to install.
+        rc, attempts, stderr = _probe_sdk_import_attempts(
+            REPO_ROOT, ["backend.providers.base", "backend.providers.mock", "backend.providers"])
+        assert rc == 0, f"importing the contract/mock needs a third-party package:\n{stderr}"
+        assert attempts == [], f"[module, importer] SDK import attempts by the contract/mock: {attempts}"
 
 
 class TestFactory:
@@ -1128,7 +1132,11 @@ ALLOWED_SDK_IMPORTERS = {
     "evaluation/judge.py": "evaluation tooling: the LLM-as-judge calls Gemini directly via an injected client",
     "evaluation/research_judge.py": "evaluation tooling: the research LLM-as-judge, same reason",
 }
-_SKIP_DIRS = {".git", "venv", "env", "node_modules", "__pycache__", "tests_frontend", "static", "templates", "supabase"}
+
+# Directories that never hold Kognit source, whatever the checkout looks like.
+_NEVER_SCAN_DIRS = {".git", "node_modules", "__pycache__", "site-packages", "dist-packages",
+                    "tests_frontend", "static", "templates", "supabase"}
+_VENV_MARKER = "pyvenv.cfg"  # every virtualenv has one, whatever it is named
 
 
 def _is_test_file(rel):
@@ -1137,26 +1145,238 @@ def _is_test_file(rel):
             or rel.startswith("evaluation/tests/"))
 
 
-def _runtime_python_files():
+def _git_python_files(root):
+    """The repository's own Python files per git (tracked plus untracked-but-not-
+    ignored, so a brand-new module is scanned before it is committed). Honours
+    .gitignore, so a virtualenv is excluded under ANY name. None if git cannot
+    answer (not installed / not a repository / ownership refusal)."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "*.py"],
+            capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return sorted(p for p in proc.stdout.decode("utf-8").split("\0") if p)
+
+
+def _walk_python_files(root):
+    """Filesystem fallback. Prunes by what a directory IS, not what it is
+    called: any directory holding a pyvenv.cfg is a virtualenv (so a venv named
+    `venv`, `venvvenv`, `.myenv` or nested at `x/Scripts/activate` is skipped),
+    and site-packages / dist-packages are never entered."""
     found = []
-    for root, dirs, files in os.walk(REPO_ROOT):
-        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+    for current, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs
+                   if d not in _NEVER_SCAN_DIRS and not os.path.exists(os.path.join(current, d, _VENV_MARKER))]
         for name in files:
             if name.endswith(".py"):
-                rel = os.path.relpath(os.path.join(root, name), REPO_ROOT).replace(os.sep, "/")
-                if not _is_test_file(rel):
-                    found.append(rel)
+                found.append(os.path.relpath(os.path.join(current, name), root).replace(os.sep, "/"))
     return sorted(found)
 
 
-def _imports_sdk(rel):
-    tree = ast.parse(open(os.path.join(REPO_ROOT, rel), encoding="utf-8").read())
+def _runtime_python_files(root=REPO_ROOT):
+    """Kognit's own runtime (non-test) Python files under `root`."""
+    candidates = _git_python_files(root)
+    if candidates is None:
+        candidates = _walk_python_files(root)
+    return sorted(
+        rel for rel in candidates
+        if os.path.exists(os.path.join(root, rel))
+        and not any(part in _NEVER_SCAN_DIRS for part in rel.split("/")[:-1])
+        and not _is_test_file(rel))
+
+
+def _imports_sdk(rel, root=REPO_ROOT):
+    tree = ast.parse(open(os.path.join(root, rel), encoding="utf-8").read())
     for node in ast.walk(tree):
         if isinstance(node, ast.Import) and any(a.name == "google" or a.name.startswith("google.") for a in node.names):
             return True
         if isinstance(node, ast.ImportFrom) and node.module and (node.module == "google" or node.module.startswith("google.")):
             return True
     return False
+
+
+def _sdk_importers_outside_allowlist(root=REPO_ROOT, allowlist=ALLOWED_SDK_IMPORTERS):
+    return [f for f in _runtime_python_files(root) if _imports_sdk(f, root) and f not in allowlist]
+
+
+# A stdlib-only import probe. Runs under `python -I -S`, so no site-packages,
+# .pth files, sitecustomize or PYTHON* variables can pre-load anything. A
+# meta-path finder sits first and records every import of google/httpx that is
+# ATTEMPTED (even one the module swallows with try/except ImportError) together
+# with the module that attempted it. The optional `preload` snippet lets a test
+# simulate an environment that already has a namespace package loaded.
+_IMPORT_PROBE = textwrap.dedent("""
+    import importlib.abc, json, sys
+    root, preload, modules = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
+    sys.path.insert(0, root)
+    exec(preload)
+    def sdkish(name):
+        return name in ("google", "httpx") or name.startswith(("google.", "httpx."))
+    attempts = []
+    class Probe(importlib.abc.MetaPathFinder):
+        def find_spec(self, name, path=None, target=None):
+            if sdkish(name) and name not in sys.modules:
+                frame = sys._getframe(1)
+                while frame is not None and frame.f_globals.get("__name__", "").startswith(
+                        ("importlib", "_frozen_importlib")):
+                    frame = frame.f_back
+                attempts.append([name, frame.f_globals.get("__name__") if frame else None])
+            return None
+    sys.meta_path.insert(0, Probe())
+    for module in modules:
+        __import__(module)
+    print("PROBE:" + json.dumps(attempts))
+""")
+
+
+def _probe_sdk_import_attempts(root, modules, preload=""):
+    """(returncode, attempts or None, stderr). attempts is None if the import
+    itself crashed (e.g. a hard `import httpx` with no site-packages)."""
+    proc = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", _IMPORT_PROBE, root, preload, json.dumps(modules)],
+        capture_output=True, text=True, timeout=120)
+    attempts = None
+    for line in proc.stdout.splitlines():
+        if line.startswith("PROBE:"):
+            attempts = json.loads(line[len("PROBE:"):])
+    return proc.returncode, attempts, proc.stderr
+
+
+def _write(root, rel, text=""):
+    path = os.path.join(str(root), *rel.split("/"))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
+# pip's vendored urllib3 (contrib/appengine.py) really contains this statement.
+_APPENGINE_STUB = "try:\n    from google.appengine.api import urlfetch\nexcept ImportError:\n    urlfetch = None\n"
+_LEAKY_MODULE = "from google.genai import types\n"
+
+
+class TestFileDiscovery:
+    """The SDK-isolation scan must read Kognit's source - never a developer's
+    virtualenv. (Regression: a virtualenv named `venvvenv`, which the old
+    hardcoded skip-list did not know, was scanned and pip's vendored
+    urllib3 was reported as an 'SDK import outside the provider boundary'.)"""
+
+    def _layout(self, root):
+        _write(root, "backend/app.py", "x = 1\n")
+        _write(root, "backend/helper/util.py", "y = 2\n")
+        _write(root, "test_something.py", "assert True\n")
+        _write(root, "conftest.py", "")
+        _write(root, "evaluation/tests/test_eval.py", "")
+        # the reported layout: a venv nested at venvvenv/Scripts/activate
+        _write(root, "venvvenv/Scripts/activate/pyvenv.cfg", "home = C:\\Python312\n")
+        _write(root, "venvvenv/Scripts/activate/Lib/site-packages/pip/_vendor/urllib3/contrib/appengine.py", _APPENGINE_STUB)
+        # a venv under an unrelated name, found only via its pyvenv.cfg
+        _write(root, ".whatever/pyvenv.cfg", "")
+        _write(root, ".whatever/lib/thing.py", _LEAKY_MODULE)
+        # site-packages with no pyvenv.cfg anywhere above it
+        _write(root, "loose/site-packages/dep/mod.py", _LEAKY_MODULE)
+        _write(root, "node_modules/pkg/x.py", _LEAKY_MODULE)
+
+    def test_walk_keeps_kognit_source_and_prunes_every_kind_of_environment(self, tmp_path):
+        self._layout(tmp_path)
+        assert _walk_python_files(str(tmp_path)) == sorted([
+            "backend/app.py", "backend/helper/util.py", "test_something.py", "conftest.py",
+            "evaluation/tests/test_eval.py"])
+
+    def test_runtime_files_drop_tests_and_environments(self, tmp_path):
+        self._layout(tmp_path)  # not a git repo -> exercises the filesystem fallback
+        assert _runtime_python_files(str(tmp_path)) == ["backend/app.py", "backend/helper/util.py"]
+
+    def test_an_environment_named_by_the_gitignore_typo_is_excluded_even_without_pyvenv_cfg(self, tmp_path):
+        _write(tmp_path, "backend/app.py")
+        _write(tmp_path, "venvvenv/Scripts/activate/Lib/site-packages/pip/_vendor/urllib3/contrib/appengine.py", _APPENGINE_STUB)
+        assert _runtime_python_files(str(tmp_path)) == ["backend/app.py"]
+
+    def test_git_listing_honours_gitignore_and_includes_new_untracked_modules(self, tmp_path):
+        if shutil.which("git") is None:
+            pytest.skip("git executable not available; the filesystem fallback is covered by the tests above")
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+        _write(tmp_path, ".gitignore", "venvvenv/\n")
+        _write(tmp_path, "backend/app.py")
+        _write(tmp_path, "backend/brand_new_uncommitted.py")
+        _write(tmp_path, "venvvenv/Scripts/activate/Lib/site-packages/pip/_vendor/urllib3/contrib/appengine.py", _APPENGINE_STUB)
+        listed = _git_python_files(str(tmp_path))
+        assert listed == ["backend/app.py", "backend/brand_new_uncommitted.py"]
+        assert _runtime_python_files(str(tmp_path)) == listed
+
+    def test_git_failure_falls_back_to_the_filesystem_walk(self, tmp_path):
+        _write(tmp_path, "backend/app.py")
+        assert _git_python_files(str(tmp_path)) in (None, [])  # not a repository
+        assert _runtime_python_files(str(tmp_path)) == ["backend/app.py"]
+
+    def test_the_real_repository_scan_contains_no_environment_files(self):
+        files = _runtime_python_files()
+        assert files, "scan found nothing"
+        for rel in files:
+            parts = rel.split("/")
+            assert "site-packages" not in parts and "dist-packages" not in parts, rel
+            current = REPO_ROOT
+            for part in parts[:-1]:
+                current = os.path.join(current, part)
+                assert not os.path.exists(os.path.join(current, _VENV_MARKER)), f"{rel} is inside a virtualenv"
+
+    def test_environment_noise_does_not_hide_or_fake_a_real_violation(self, tmp_path):
+        self._layout(tmp_path)
+        _write(tmp_path, "backend/leaky.py", _LEAKY_MODULE)
+        _write(tmp_path, "backend/providers/gemini.py", _LEAKY_MODULE)  # allowlisted adapter
+        assert _sdk_importers_outside_allowlist(str(tmp_path)) == ["backend/leaky.py"], (
+            "the genuine violation must be reported; venv/site-packages files must not be")
+
+    def test_a_clean_tree_with_a_polluted_environment_reports_nothing(self, tmp_path):
+        self._layout(tmp_path)
+        assert _sdk_importers_outside_allowlist(str(tmp_path)) == []
+
+
+class TestImportProbe:
+    """The probe behind test_contract_and_mock_import_no_sdk has to be able to
+    FAIL, and must not be fooled by a polluted interpreter."""
+
+    def test_detects_an_import_even_when_the_module_swallows_the_failure(self, tmp_path):
+        _write(tmp_path, "swallowing_probe.py",
+               "try:\n    import httpx\nexcept ImportError:\n    httpx = None\n"
+               "try:\n    from google.genai import types\nexcept ImportError:\n    types = None\n")
+        rc, attempts, _ = _probe_sdk_import_attempts(str(tmp_path), ["swallowing_probe"])
+        assert rc == 0
+        assert ["httpx", "swallowing_probe"] in attempts and ["google", "swallowing_probe"] in attempts
+
+    def test_a_hard_import_fails_loudly_with_the_import_chain(self, tmp_path):
+        _write(tmp_path, "hard_probe.py", "import httpx\n")
+        rc, attempts, stderr = _probe_sdk_import_attempts(str(tmp_path), ["hard_probe"])
+        assert rc != 0 and attempts is None
+        assert "ModuleNotFoundError" in stderr and "hard_probe.py" in stderr
+
+    def test_a_transitive_import_is_attributed_to_the_module_that_made_it(self, tmp_path):
+        _write(tmp_path, "outer_probe.py", "import inner_probe\n")
+        _write(tmp_path, "inner_probe.py", "try:\n    import httpx\nexcept ImportError:\n    pass\n")
+        _, attempts, _ = _probe_sdk_import_attempts(str(tmp_path), ["outer_probe"])
+        assert attempts == [["httpx", "inner_probe"]]
+
+    def test_a_module_that_imports_nothing_third_party_is_clean(self, tmp_path):
+        _write(tmp_path, "clean_probe.py", "import dataclasses, enum, typing\n")
+        rc, attempts, stderr = _probe_sdk_import_attempts(str(tmp_path), ["clean_probe"])
+        assert (rc, attempts) == (0, []), stderr
+
+    def test_a_preloaded_google_namespace_is_not_mistaken_for_a_leak(self, tmp_path):
+        # What a legacy namespace-package .pth (e.g. protobuf 3.x) does at
+        # interpreter startup: 'google' is already in sys.modules before any
+        # Kognit code runs. That is the environment, not a provider-boundary
+        # violation, and must not fail the contract/mock check.
+        preload = "import sys, types; sys.modules['google'] = types.ModuleType('google')"
+        rc, attempts, stderr = _probe_sdk_import_attempts(
+            REPO_ROOT, ["backend.providers.base", "backend.providers.mock", "backend.providers"], preload=preload)
+        assert (rc, attempts) == (0, []), stderr
+
+    def test_the_real_contract_and_mock_modules_attempt_no_sdk_import(self):
+        rc, attempts, stderr = _probe_sdk_import_attempts(
+            REPO_ROOT, ["backend.providers.base", "backend.providers.mock", "backend.providers"])
+        assert (rc, attempts) == (0, []), stderr
 
 
 class TestSdkIsolation:
@@ -1166,7 +1386,7 @@ class TestSdkIsolation:
         assert {"backend/ai_engine.py", "backend/main.py", "backend/providers/gemini.py"} <= set(files)
 
     def test_only_allowlisted_runtime_modules_import_the_sdk(self):
-        offenders = [f for f in _runtime_python_files() if _imports_sdk(f) and f not in ALLOWED_SDK_IMPORTERS]
+        offenders = _sdk_importers_outside_allowlist()
         assert offenders == [], f"SDK import outside the provider boundary: {offenders}"
 
     def test_the_allowlist_has_no_stale_entries(self):
