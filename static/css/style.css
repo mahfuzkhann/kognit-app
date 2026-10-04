@@ -822,7 +822,7 @@ body {
 /* Quiz Results */
 .result-summary {
     text-align: center;
-    padding: 12px;
+    padding: var(--space-xs) var(--space-lg);
 }
 
 .result-summary h2 {
@@ -857,29 +857,82 @@ body {
 }
 
 .result-details-list {
-    max-height: 260px;
-    overflow-y: auto;
+    /* UI density pass: this list used to be its own 260px scroll box nested
+       inside the modal card (a scrollbar inside a scrollbar, while the card
+       itself was clipped by the viewport). It now simply grows; the quiz modal
+       card (see "Quiz modal: one scroll context" below) is the single scroll
+       context. */
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    padding-right: 4px;
+    gap: var(--space-md);
 }
 
 .result-item {
     background: var(--color-surface-input);
     border: 1px solid var(--color-border-input);
-    padding: 10px 12px;
+    padding: var(--space-md) var(--space-lg);
     border-radius: 6px;
     font-size: 12px;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: var(--space-2xs);
 }
 
 .result-explanation {
     color: var(--gray-420);
     font-style: italic;
-    margin-top: 4px;
+    margin-top: var(--space-2xs);
+}
+
+/* ---- Quiz modal: one scroll context, never clipped (UI density pass) ----
+   Before: the overlay centres a card that had no max-height. A result with many
+   questions made the card taller than the window, and centring pushed its
+   header above the screen and its "Try Another Test" button below it, with no
+   way to scroll to either. Now the card is capped to the window and scrolls as
+   a whole. Phones keep their existing full-width .modal-card rule (92dvh +
+   overflow already) - hence min-width: 769px. */
+@media (min-width: 769px) {
+    #quiz-modal .modal-card {
+        max-height: calc(100vh - 2 * var(--space-xl));
+        max-height: calc(100dvh - 2 * var(--space-xl));
+        overflow-y: auto;
+    }
+
+    /* The RESULT view is the one that needs room: it is a reading surface
+       (score, takeaway, every question with its explanation), not a form. Widen
+       the card to the app's content width and centre it over the MAIN area -
+       the overlay still covers the whole window, but its left padding equals
+       the sidebar's width, so the layout reads "sidebar + result" rather than
+       "narrow column floating across the sidebar". The offsets use the same
+       tokens and breakpoints as .sidebar in shell.css. Where :has() is not
+       supported these rules are ignored and the result simply keeps the
+       narrow card (still single-scroll). */
+    #quiz-modal:has(#quiz-result-view:not(.hidden)) {
+        padding-left: var(--sidebar-width);
+    }
+
+    #quiz-modal .modal-card:has(#quiz-result-view:not(.hidden)) {
+        width: calc(100% - 2 * var(--space-xl));
+        max-width: var(--content-max-width);
+        padding: var(--space-2xl);
+        gap: var(--space-lg);
+    }
+
+    #quiz-result-view {
+        gap: var(--space-lg);
+    }
+}
+
+@media (min-width: 769px) and (max-width: 1280px) {
+    #quiz-modal:has(#quiz-result-view:not(.hidden)) {
+        padding-left: var(--sidebar-width-laptop);
+    }
+}
+
+@media (min-width: 769px) and (max-width: 1024px) {
+    #quiz-modal:has(#quiz-result-view:not(.hidden)) {
+        padding-left: var(--sidebar-width-tablet);
+    }
 }
 
 /* FEATURE 8: the search icon used to be typed directly into the input's
