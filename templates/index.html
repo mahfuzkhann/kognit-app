@@ -85,7 +85,32 @@
                 // the primary fix is the AI prompt in ai_engine.py now
                 // instructing Gemini not to put Bangla inside math
                 // delimiters at all - this covers cases where it still does.
-                mtextInheritFont: true
+                mtextInheritFont: true,
+                // P1-3 (XSS hardening). AI output is untrusted (a malicious
+                // uploaded PDF can steer it), and by default MathJax turns
+                // LaTeX like  $\href{javascript:...}{x}$  into a real,
+                // clickable javascript: link, and \style / \class /
+                // \cssId / \bbox[...] into arbitrary inline CSS or
+                // class names (UI-redress). HTML sanitization cannot catch
+                // this because the math is still plain text when the
+                // sanitizer runs. A user-defined macro takes precedence
+                // over MathJax's autoloaded html/bbox packages - even after
+                // \require{html} - so each is redefined to just render
+                // its content argument (the visible text/math), dropping
+                // the URL/CSS. All other LaTeX (\ce, \color, \cancel,
+                // aligned, \boxed, ...) is unaffected; verified by
+                // tests_frontend/test_security_hardening.mjs against the
+                // real MathJax 3.2.2 bundle. NOTE: MathJax 3 has no 'safe'
+                // extension (never ported from v2), and a partial
+                // tex.require override crashes startup, so macros are the
+                // supported, low-risk mechanism here.
+                macros: {
+                    href: ['#2', 2],
+                    class: ['#2', 2],
+                    style: ['#2', 2],
+                    cssId: ['#2', 2],
+                    bbox: ['#2', 2, '']
+                }
             },
             options: {
                 skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
@@ -783,6 +808,11 @@
      and choice-changes from here on. -->
 <script src="/static/js/theme.js"></script>
 <script src="/static/js/stream-render.js"></script>
+<!-- P1-3: DOMPurify 3.4.16, vendored (same-origin, version-fixed) so the
+     model-output sanitizer in app.js never depends on a floating CDN URL.
+     Must load BEFORE app.js. If it ever fails to load, app.js fails closed
+     (model output is shown as escaped text, never inserted raw). -->
+<script src="/static/js/vendor/purify.min.js"></script>
 <!-- PHASE 9B: top-level nav rail (Chat/Quizzes/Projects) and the
      Quizzes/Projects view content. Loaded AFTER app.js (see script
      order below) since it depends on the accessor functions app.js

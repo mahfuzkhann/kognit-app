@@ -116,9 +116,40 @@ let searchQuery = "";
 // pre-existing behavior where a project's chats were always visible).
 const COLLAPSED_PROJECTS_STORAGE_KEY = "kognit_collapsed_projects";
 
+// P1-4: localStorage can throw (quota exceeded, SecurityError in private /
+// locked-down browsers, storage disabled). It is only ever a best-effort
+// CACHE in this app - Supabase is the authoritative store for signed-in
+// users - so every access goes through these three wrappers and a storage
+// failure can never abort the calling code path.
+function safeLocalStorageGet(key) {
+    try {
+        return localStorage.getItem(key);
+    } catch (e) {
+        return null;
+    }
+}
+
+function safeLocalStorageSet(key, value) {
+    try {
+        localStorage.setItem(key, value);
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
+function safeLocalStorageRemove(key) {
+    try {
+        localStorage.removeItem(key);
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
 function loadCollapsedProjectIds() {
     try {
-        const raw = localStorage.getItem(COLLAPSED_PROJECTS_STORAGE_KEY);
+        const raw = safeLocalStorageGet(COLLAPSED_PROJECTS_STORAGE_KEY);
         return new Set(raw ? JSON.parse(raw) : []);
     } catch (e) {
         return new Set();
@@ -128,7 +159,7 @@ function loadCollapsedProjectIds() {
 let collapsedProjectIds = loadCollapsedProjectIds();
 
 function saveCollapsedProjectIds() {
-    localStorage.setItem(COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([...collapsedProjectIds]));
+    safeLocalStorageSet(COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([...collapsedProjectIds]));
 }
 
 function toggleProjectCollapsed(projId) {
@@ -291,7 +322,16 @@ async function loadProjectsFromDatabase() {
 }
 
 function loadProjectsFromLocalStorage() {
-    projects = normalizeProjectTitles(JSON.parse(localStorage.getItem("kognit_projects")) || []);
+    // P1-4: unavailable storage or a corrupt cache entry must not break
+    // startup - it simply means there is no cached data to show.
+    let cached = [];
+    try {
+        const parsed = JSON.parse(safeLocalStorageGet("kognit_projects"));
+        if (Array.isArray(parsed)) cached = parsed;
+    } catch (e) {
+        cached = [];
+    }
+    projects = normalizeProjectTitles(cached);
     initializeActiveProject();
 }
 
@@ -354,19 +394,65 @@ function initializeActiveProject() {
     }
 }
 
-async function saveProjectsToStorage() {
-    localStorage.setItem("kognit_projects", JSON.stringify(projects));
+// P1-4: best-effort local cache. NEVER throws. Returns true if something
+// was cached. First tries the full project JSON; if the browser rejects it
+// (typically QuotaExceededError - chat messages carry base64 image
+// previews, which are by far the largest part), retries once WITHOUT the
+// base64 `image` previews so the text of the conversation is still cached.
+// The authoritative copy for a signed-in user is the Supabase upsert, which
+// is unaffected (it keeps the previews exactly as before).
+function cacheProjectsLocally() {
+    let fullJson;
+    try {
+        fullJson = JSON.stringify(projects);
+    } catch (e) {
+        return false;
+    }
+    if (safeLocalStorageSet("kognit_projects", fullJson)) return true;
 
+    let slimJson;
+    try {
+        slimJson = JSON.stringify(projects, (key, value) =>
+            (key === "image" && typeof value === "string" && value.startsWith("data:")) ? undefined : value
+        );
+    } catch (e) {
+        return false;
+    }
+    if (slimJson !== fullJson && safeLocalStorageSet("kognit_projects", slimJson)) return true;
+    return false;
+}
+
+// One notice per failure streak, and only when NOTHING could be saved
+// (local cache AND remote). Reset by the next successful save.
+let _persistenceFailureNotified = false;
+
+async function saveProjectsToStorage() {
+    // Order matters (P1-4): the local cache is attempted first but its
+    // outcome never gates the remote write - the remote write ALWAYS runs
+    // for a signed-in user, even if localStorage threw.
+    const cachedLocally = cacheProjectsLocally();
+
+    let savedRemotely = false;
     if (currentUser) {
         const activeProj = projects.find(p => p.id === activeProjectId);
         if (activeProj) {
-            await syncProjectToDatabase(activeProj);
+            savedRemotely = await syncProjectToDatabase(activeProj);
+        } else {
+            savedRemotely = true; // nothing to sync
         }
+    }
+
+    if (cachedLocally || savedRemotely) {
+        _persistenceFailureNotified = false;
+    } else if (!_persistenceFailureNotified) {
+        _persistenceFailureNotified = true;
+        console.error("Project save failed: local cache and remote sync both unavailable.");
+        alert("Your latest changes could not be saved on this device. Please check your connection or free up browser storage.");
     }
 }
 
 async function syncProjectToDatabase(project) {
-    if (!currentUser) return;
+    if (!currentUser) return false;
 
     const payload = {
         id: project.id,
@@ -376,12 +462,22 @@ async function syncProjectToDatabase(project) {
         updated_at: new Date().toISOString()
     };
 
-    const { error } = await supabaseClient
-        .from("user_projects")
-        .upsert(payload, { onConflict: "id" });
+    // P1-4: returns true only when the upsert is confirmed, and never
+    // throws (a network failure used to surface as an unhandled promise
+    // rejection). Callers that ignore the result behave exactly as before.
+    try {
+        const { error } = await supabaseClient
+            .from("user_projects")
+            .upsert(payload, { onConflict: "id" });
 
-    if (error) {
-        console.error("Supabase Sync Error:", error.message);
+        if (error) {
+            console.error("Supabase Sync Error:", error.message);
+            return false;
+        }
+        return true;
+    } catch (e) {
+        console.error("Supabase Sync Error:", e && e.message ? e.message : e);
+        return false;
     }
 }
 
@@ -505,7 +601,7 @@ window.handleLogout = async function() {
     // Clearing it here ensures the next person to use this browser -
     // whether a guest or a different account - cannot see or inherit this
     // user's chats/projects.
-    localStorage.removeItem("kognit_projects");
+    safeLocalStorageRemove("kognit_projects");  // P1-4: a storage error must not skip the rest of this cleanup
     projects = [];
     activeProjectId = null;
     activeChatId = null;
@@ -966,6 +1062,148 @@ function escapeHtmlForMath(str) {
         .replace(/'/g, "&#39;");
 }
 
+// ==================== P1-3: HTML SANITIZATION (XSS HARDENING) ====================
+// PROBLEM (confirmed against this repo): AI output -> marked.parse() ->
+// innerHTML was unsanitized. marked passes raw HTML through by design, so
+// anything the model emitted (including content steered by a malicious
+// uploaded PDF, i.e. prompt injection) became live DOM: <img onerror=...>,
+// <script>-equivalents, javascript: links, fake <form> login boxes, <style>
+// that restyles the whole app. The Supabase session lives in this origin's
+// localStorage, so script execution here means account takeover.
+//
+// FIX: every HTML string that came from the model goes through
+// sanitizeRenderedHtml() AFTER the math-restore step and BEFORE innerHTML.
+// Order matters and is unchanged for MathJax: protect math -> marked ->
+// restore math (HTML-escaped) -> SANITIZE -> innerHTML -> MathJax typesets
+// the resulting DOM text. Math delimiters/backslashes are plain text nodes,
+// which the sanitizer never alters, so MathJax sees byte-identical input.
+//
+// Uses DOMPurify (mature, maintained; vendored at
+// static/js/vendor/purify.min.js so it is same-origin and version-fixed,
+// NOT loaded from a floating CDN URL). No homemade sanitizer.
+//
+// Two explicit ALLOW-LISTS (not DOMPurify's permissive default profile,
+// which allows <form>/<input>/<style>/inline style=/SVG/MathML):
+//   - "markdown": what marked.parse() legitimately produces + the tags
+//     the app/model use for formatting.
+//   - "inline":   short strings that are shown inside quiz UI.
+// <img> is deliberately NOT allowed in model output: a remote image URL is
+// a tracking/exfiltration beacon (query string can carry chat content) and
+// the tutor has no legitimate use for remote images.
+// FAIL CLOSED: if DOMPurify is unavailable the HTML is shown ESCAPED
+// (as visible text), never inserted raw.
+const SANITIZE_MARKDOWN_TAGS = [
+    "a", "abbr", "b", "blockquote", "br", "caption", "cite", "code", "dd",
+    "del", "details", "div", "dl", "dt", "em", "h1", "h2", "h3", "h4", "h5",
+    "h6", "hr", "i", "input", "ins", "kbd", "li", "mark", "ol", "p", "pre",
+    "q", "s", "samp", "small", "span", "strong", "sub", "summary", "sup",
+    "table", "tbody", "td", "tfoot", "th", "thead", "tr", "u", "ul", "var"
+];
+const SANITIZE_MARKDOWN_ATTRS = [
+    "href", "title", "class", "colspan", "rowspan", "align", "start", "type",
+    "checked", "disabled", "lang", "dir", "open"
+];
+const SANITIZE_INLINE_TAGS = [
+    "b", "strong", "i", "em", "u", "sub", "sup", "code", "br", "span",
+    "small", "mark", "s", "del", "ins", "kbd"
+];
+const SANITIZE_INLINE_ATTRS = ["class"];
+// Links: http(s), mailto and in-page anchors only. Everything else
+// (javascript:, data:, vbscript:, ftp:, tel:, relative paths) loses its
+// href. This is enforced in the afterSanitizeAttributes hook on <a> ONLY.
+// It must NOT be passed as DOMPurify's ALLOWED_URI_REGEXP option: DOMPurify
+// applies that regexp to EVERY attribute that has a value (not just URLs),
+// which would silently strip type="checkbox", align, colspan, rowspan and
+// start. DOMPurify's own default URI check still runs on all attributes and
+// already rejects javascript:/data:/vbscript: values everywhere.
+const SANITIZE_ALLOWED_LINK_REGEXP = /^(?:https?:|mailto:|#)/i;
+// Classes: only the ones the app's own pipeline emits. Arbitrary classes
+// would let model output reuse app CSS (.modal-overlay is a full-screen
+// fixed layer, .hidden hides UI) - a UI-redress vector.
+const SANITIZE_ALLOWED_CLASS_REGEXP =
+    /^(?:kognit-bengali-formula(?:--block)?|language-[A-Za-z0-9_+#.-]{1,40})$/;
+
+let _kognitPurifier = null;
+let _kognitPurifierWarned = false;
+
+function getKognitPurifier() {
+    if (_kognitPurifier) return _kognitPurifier;
+    let instance = null;
+    try {
+        if (typeof DOMPurify === "function") {
+            instance = DOMPurify(window);       // private instance: our hooks
+        } else if (typeof DOMPurify === "object" && DOMPurify) {
+            instance = DOMPurify;
+        }
+    } catch (e) {
+        instance = null;
+    }
+    if (!instance || !instance.isSupported || typeof instance.sanitize !== "function") {
+        return null;
+    }
+    instance.addHook("afterSanitizeAttributes", function (node) {
+        if (!node || !node.nodeName) return;
+
+        // GFM task-list checkboxes are the only <input> kept, and only as
+        // inert, disabled checkboxes. Any other <input> is removed.
+        if (node.nodeName === "INPUT") {
+            if (node.getAttribute("type") !== "checkbox") {
+                if (node.parentNode) node.parentNode.removeChild(node);
+                return;
+            }
+            node.setAttribute("disabled", "");
+        }
+
+        if (node.nodeName === "A" && node.hasAttribute("href")) {
+            const href = (node.getAttribute("href") || "").trim();
+            if (!SANITIZE_ALLOWED_LINK_REGEXP.test(href)) node.removeAttribute("href");
+        }
+
+        if (node.hasAttribute && node.hasAttribute("class")) {
+            const kept = (node.getAttribute("class") || "")
+                .split(/\s+/)
+                .filter(function (c) { return c && SANITIZE_ALLOWED_CLASS_REGEXP.test(c); });
+            if (kept.length) {
+                node.setAttribute("class", kept.join(" "));
+            } else {
+                node.removeAttribute("class");
+            }
+        }
+    });
+    _kognitPurifier = instance;
+    return instance;
+}
+
+// profile: "markdown" (default, bot message bodies) or "inline" (quiz text).
+function sanitizeRenderedHtml(html, profile) {
+    const input = html == null ? "" : String(html);
+    const purifier = getKognitPurifier();
+    if (!purifier) {
+        if (!_kognitPurifierWarned) {
+            _kognitPurifierWarned = true;
+            console.error("HTML sanitizer unavailable - rendering model output as escaped text.");
+        }
+        return escapeHtmlForMath(input);
+    }
+    const inline = profile === "inline";
+    return purifier.sanitize(input, {
+        ALLOWED_TAGS: inline ? SANITIZE_INLINE_TAGS : SANITIZE_MARKDOWN_TAGS,
+        ALLOWED_ATTR: inline ? SANITIZE_INLINE_ATTRS : SANITIZE_MARKDOWN_ATTRS,
+        ALLOW_DATA_ATTR: false,
+        ALLOW_ARIA_ATTR: false,
+        KEEP_CONTENT: true,
+        FORCE_BODY: true,
+        RETURN_DOM: false,
+        RETURN_DOM_FRAGMENT: false
+    });
+}
+
+// Plain text -> safe HTML text, for any user-controlled string (titles,
+// filenames) interpolated into an innerHTML template. Null-safe.
+function escapeUserText(value) {
+    return escapeHtmlForMath(value == null ? "" : String(value));
+}
+
 // Ordered longest-command-first so e.g. "\leq" is matched before the
 // shorter "\le" would otherwise match a prefix of it and leave a
 // stray "q" behind.
@@ -1300,7 +1538,9 @@ function createBotMessageElement(rawText, meta = {}) {
     // above for why this is necessary (marked.js can otherwise corrupt valid
     // LaTeX underscores as Markdown emphasis).
     const { text: protectedText, segments } = protectMathSegments(rawText);
-    contentDiv.innerHTML = restoreProtectedMathSegments(marked.parse(protectedText), segments);
+    contentDiv.innerHTML = sanitizeRenderedHtml(
+        restoreProtectedMathSegments(marked.parse(protectedText), segments)
+    );
     wrapper.appendChild(contentDiv);
 
     // BUG 3 FIX: an interrupted/truncated stream must never look identical
@@ -2444,7 +2684,7 @@ function renderProjectCard(proj) {
         wrapper.className = "project-title-wrapper";
         wrapper.innerHTML =
             `<span class="project-chevron ${isCollapsed ? "collapsed" : ""}">${UI_ICONS.chevron}</span>` +
-            `<span class="project-folder-icon">${UI_ICONS.folder}</span><span class="project-title-text">${proj.title}</span>`;
+            `<span class="project-folder-icon">${UI_ICONS.folder}</span><span class="project-title-text">${escapeUserText(proj.title)}</span>`;
         // Clicking the project row/title ONLY expands or collapses its
         // chat list (per product spec) - it no longer also navigates into
         // the first chat. Opening a specific chat is done by clicking that
@@ -2854,7 +3094,7 @@ window.handlePDFUpload = async function(event) {
 
             const successDiv = document.createElement("div");
             successDiv.className = "bot-message";
-            successDiv.innerHTML = `✅ <b>PDF Loaded Successfully!</b> You can now ask questions directly from <i>${file.name}</i>.`;
+            successDiv.innerHTML = `✅ <b>PDF Loaded Successfully!</b> You can now ask questions directly from <i>${escapeUserText(file.name)}</i>.`;
             chatBox.appendChild(successDiv);
             chatBox.scrollTop = chatBox.scrollHeight;
         }
@@ -3299,7 +3539,7 @@ window.sendMessage = async function() {
                 marked.parse(protectedResult.text), protectedResult.segments
             );
 
-            streamContent.innerHTML = html;
+            streamContent.innerHTML = sanitizeRenderedHtml(html);
 
             if (split.pending) {
                 // Not yet safe to parse - show it as literal text so the
@@ -3687,11 +3927,11 @@ function renderQuizQuestion() {
 
     const container = document.getElementById("quiz-question-container");
     container.innerHTML = `
-        <div class="quiz-q-title"><b>Q${currentQuizIdx + 1}:</b> ${q.question}</div>
+        <div class="quiz-q-title"><b>Q${currentQuizIdx + 1}:</b> ${sanitizeRenderedHtml(q.question, "inline")}</div>
         <div class="quiz-options-list">
             ${q.options.map((opt, i) => `
                 <button class="quiz-opt-btn ${userQuizAnswers[currentQuizIdx] === i ? 'selected' : ''}" onclick="selectQuizOption(${i})">
-                    ${String.fromCharCode(65 + i)}. ${opt}
+                    ${String.fromCharCode(65 + i)}. ${sanitizeRenderedHtml(opt, "inline")}
                 </button>
             `).join('')}
         </div>
@@ -3742,10 +3982,10 @@ function showQuizResults() {
         const isCorrect = userQuizAnswers[i] === q.correct_index;
         return `
             <div class="result-item" style="border-left: 3px solid ${isCorrect ? '#4ade80' : '#f87171'};">
-                <div><b>Q${i + 1}:</b> ${q.question}</div>
-                <div>Your Answer: <span style="color:${isCorrect ? '#4ade80' : '#f87171'};">${q.options[userQuizAnswers[i]]}</span></div>
-                ${!isCorrect ? `<div>Correct Answer: <span style="color:#4ade80;">${q.options[q.correct_index]}</span></div>` : ''}
-                <div class="result-explanation">💡 <b>Explanation:</b> ${q.explanation}</div>
+                <div><b>Q${i + 1}:</b> ${sanitizeRenderedHtml(q.question, "inline")}</div>
+                <div>Your Answer: <span style="color:${isCorrect ? '#4ade80' : '#f87171'};">${sanitizeRenderedHtml(q.options[userQuizAnswers[i]], "inline")}</span></div>
+                ${!isCorrect ? `<div>Correct Answer: <span style="color:#4ade80;">${sanitizeRenderedHtml(q.options[q.correct_index], "inline")}</span></div>` : ''}
+                <div class="result-explanation">💡 <b>Explanation:</b> ${sanitizeRenderedHtml(q.explanation, "inline")}</div>
             </div>
         `;
     }).join('');

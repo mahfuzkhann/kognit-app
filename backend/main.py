@@ -3,6 +3,7 @@ import logging
 import os
 import threading
 import time
+import unicodedata
 import uuid
 from collections import deque
 import httpx
@@ -15,10 +16,11 @@ from fastapi.templating import Jinja2Templates
 from backend.ai_engine import (
     stream_ai_response, GENERIC_CHAT_ERROR, generate_ai_response, generate_quiz_questions,
     generate_chat_title, MODEL_NAME, new_request_id, ERROR_INTERNAL, ERROR_STREAM_INTERRUPTED,
+    MAX_PDF_CONTEXT_CHARS, QUIZ_MIN_QUESTIONS, QUIZ_MAX_QUESTIONS,
 )
 from backend.research_decision import decide_research
 from backend.research_models import normalize_grounding_metadata, research_result_to_dict
-from backend.rag_engine import extract_text_from_pdf, PDFExtractionError
+from backend.rag_engine import extract_text_from_pdf, PDFExtractionError, has_pdf_signature
 from backend.database import (
     save_quiz_attempt,
     get_user_topic_profile,
@@ -51,6 +53,39 @@ templates = Jinja2Templates(directory="templates")
 MAX_PDF_UPLOAD_SIZE_BYTES = 15 * 1024 * 1024  # 15MB - adjust after testing real student PDFs
 ALLOWED_PDF_CONTENT_TYPES = {"application/pdf"}
 MAX_IMAGE_UPLOAD_SIZE_BYTES = 8 * 1024 * 1024  # 8MB - adjust after testing real student photos
+
+# P1-5: PDF extraction work bounds (see backend/rag_engine.py for the page and
+# time caps). The text budget is deliberately LARGER than
+# ai_engine.MAX_PDF_CONTEXT_CHARS (the amount of document text actually sent
+# to the model): ai_engine appends a "document too long, only the first N
+# characters are shown" note to the prompt when the stored text exceeds that
+# size. Cutting extraction at exactly that size would silently stop that
+# notice from ever firing, so extraction keeps headroom above it. Anything
+# past the budget is never used by the model, so nothing is lost.
+PDF_EXTRACTION_TEXT_BUDGET_CHARS = MAX_PDF_CONTEXT_CHARS * 2
+
+# P1-5: at most this many PDFs are being parsed at once in this process.
+# Extraction is CPU-bound and runs in worker threads; without a cap, a burst
+# of uploads (many accounts, each within its own rate limit) could occupy
+# every worker thread and starve chat/quiz requests. Excess uploads get a
+# fast 503 "try again" instead of queueing (queued requests would each keep
+# up to 15MB in memory). Per-process only - a multi-worker/distributed
+# deployment would need shared state, which is explicitly out of scope.
+MAX_CONCURRENT_PDF_EXTRACTIONS = 3
+_pdf_extraction_slots = threading.BoundedSemaphore(MAX_CONCURRENT_PDF_EXTRACTIONS)
+
+# P1-5 / P1-7: uploads are read in chunks and abandoned the moment they pass
+# the size limit, instead of `await file.read()` pulling the entire (possibly
+# huge) body into memory before the limit is even checked.
+_UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
+
+# P1-6: server-side limits for /api/quiz/generate free-text fields. The UI's
+# subject list tops out at 17 characters and real chapter names are rarely
+# over ~80; these leave generous room (incl. Bangla) while stopping
+# oversized prompts. Count bounds come from ai_engine (QUIZ_MIN/MAX_QUESTIONS).
+QUIZ_MAX_SUBJECT_CHARS = 60
+QUIZ_MAX_TOPIC_CHARS = 200
+QUIZ_DEFAULT_TOPIC = "General Practice"
 
 # CHAT-04 fix: bounded same-chat conversation history. MVP window = 10
 # user+assistant exchanges = 20 messages max. Enforced server-side too
@@ -304,6 +339,10 @@ RATE_LIMIT_CONFIG = {
     "chat": (20, 60),
     "chat_title": (10, 60),
     "quiz_generation": (5, 60),
+    # P1-5: PDF parsing is CPU-heavy (it used to be the one expensive endpoint
+    # with no limit at all). 6/min is far above any real student behaviour
+    # (one PDF per chat) and far below a useful abuse rate. Beta value.
+    "pdf_upload": (6, 60),
 }
 
 # (user_id, category) -> deque[float] of request timestamps within the
@@ -462,15 +501,83 @@ async def _rate_limited_quiz_generation(
     return user_and_token
 
 
+async def _rate_limited_pdf_upload(user_id: str = Depends(get_current_user_id)) -> str:
+    """
+    Rate-limit dependency for /api/pdf/upload (P1-5). Same pattern as the
+    dependencies above; it wraps the SAME get_current_user_id the endpoint
+    already used (still exactly one auth lookup per request) and returns the
+    user_id unchanged, so the endpoint body is otherwise untouched.
+    """
+    _check_rate_limit(user_id, "pdf_upload")
+    return user_id
+
+
+# P1-3: narrowest Content-Security-Policy that cannot break the current page.
+# Only the directives that do not interact with scripts/styles are set:
+#   object-src 'none'     - the app uses no <object>/<embed>/plugins.
+#   base-uri 'self'       - blocks an injected <base href> from re-pointing
+#                           every relative URL (incl. the script/API paths).
+#   frame-ancestors 'none'- the app is never meant to be framed (clickjacking).
+# script-src/style-src/default-src are deliberately NOT set: the template has
+# 37 inline on*= handlers, 2 inline <script> blocks and the JS builds more
+# inline handlers/styles, so a script-src that actually blocks injected script
+# needs those refactored first. XSS is instead closed at the source with an
+# output sanitizer (static/js/app.js sanitizeRenderedHtml) - see the P1-3
+# report for the deployment-level follow-up.
+HTML_CONTENT_SECURITY_POLICY = "object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+
+
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request):
-    return templates.TemplateResponse(request=request, name="index.html")
+    response = templates.TemplateResponse(request=request, name="index.html")
+    response.headers["Content-Security-Policy"] = HTML_CONTENT_SECURITY_POLICY
+    return response
+
+
+async def _read_upload_capped(upload: UploadFile, max_bytes: int) -> Optional[bytes]:
+    """
+    Reads an upload in chunks and returns its bytes, or None as soon as it is
+    found to exceed `max_bytes` (the rest is never read). Used instead of
+    `await upload.read()` so an oversized body is abandoned early rather than
+    fully materialised in memory just to be rejected afterwards.
+    """
+    chunks = []
+    total = 0
+    while True:
+        chunk = await upload.read(_UPLOAD_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def _read_capped_image(image: UploadFile) -> bytes:
+    """
+    P1-7: shared by /api/chat and /api/chat/stream. Reads the image in chunks
+    and answers 413 the moment it passes MAX_IMAGE_UPLOAD_SIZE_BYTES (same
+    status and message as before - only the read is bounded now, instead of
+    pulling the whole body into memory first). Judging the image CONTENT
+    (real format, pixel area, corruption) is deliberately NOT done here: that
+    happens in ai_engine's decode step, whose existing clean error path
+    (REQUEST_INVALID on the stream, a plain reply on /api/chat) is the
+    contract the frontend already renders - an HTTP 400 here would degrade
+    the student's message to a generic failure bubble.
+    """
+    image_bytes = await _read_upload_capped(image, MAX_IMAGE_UPLOAD_SIZE_BYTES)
+    if image_bytes is None:
+        max_mb = MAX_IMAGE_UPLOAD_SIZE_BYTES // (1024 * 1024)
+        raise HTTPException(status_code=413, detail=f"Image exceeds the {max_mb}MB limit.")
+    return image_bytes
+
 
 @app.post("/api/pdf/upload")
 async def upload_pdf(
     file: UploadFile = File(...),
     chat_id: str = Form(...),
-    user_id: str = Depends(get_current_user_id)
+    user_id: str = Depends(_rate_limited_pdf_upload)
 ):
     # BUG 2 FIX: chat_id is required here specifically (unlike the softer
     # handling in chat_endpoint below) because an upload with no chat to
@@ -483,18 +590,40 @@ async def upload_pdf(
     if not (is_pdf_content_type or is_pdf_extension):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
-    file_bytes = await file.read()
-    if len(file_bytes) > MAX_PDF_UPLOAD_SIZE_BYTES:
+    file_bytes = await _read_upload_capped(file, MAX_PDF_UPLOAD_SIZE_BYTES)
+    if file_bytes is None:
         max_mb = MAX_PDF_UPLOAD_SIZE_BYTES // (1024 * 1024)
         raise HTTPException(status_code=413, detail=f"PDF exceeds the {max_mb}MB limit.")
 
+    # P1-5: the browser-supplied Content-Type and the filename are only hints
+    # (an attacker controls both). Check the file's own signature before
+    # spending a worker thread on it.
+    if not has_pdf_signature(file_bytes):
+        raise HTTPException(status_code=400, detail="This file does not look like a valid PDF.")
+
+    # P1-5: bounded concurrency (see MAX_CONCURRENT_PDF_EXTRACTIONS above).
+    if not _pdf_extraction_slots.acquire(blocking=False):
+        raise HTTPException(
+            status_code=503,
+            detail="Kognit is busy reading other PDFs right now. Please try again in a moment."
+        )
+
     try:
-        pdf_text = extract_text_from_pdf(file_bytes)
+        # P1-5: extraction is synchronous and CPU-bound; running it directly
+        # inside this async endpoint blocked the whole event loop (every
+        # other request, including streaming chats, stalled) for as long as
+        # a large PDF took. Offloaded to the threadpool exactly like the
+        # chat/quiz endpoints already do for the Gemini calls.
+        pdf_text = await run_in_threadpool(
+            extract_text_from_pdf, file_bytes, PDF_EXTRACTION_TEXT_BUDGET_CHARS
+        )
     except PDFExtractionError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception:
         logger.exception("Unexpected error extracting PDF %s", file.filename)
         raise HTTPException(status_code=500, detail="Could not process this PDF right now.")
+    finally:
+        _pdf_extraction_slots.release()
 
     # BUG 2 FIX: stored under this user's own chat_id bucket only - never
     # overwrites or is visible to any other chat_id, for this user or any
@@ -833,10 +962,7 @@ async def chat_endpoint(
     # untouched so the client actually sees a real 413.
     image_bytes = None
     if image:
-        image_bytes = await image.read()
-        if len(image_bytes) > MAX_IMAGE_UPLOAD_SIZE_BYTES:
-            max_mb = MAX_IMAGE_UPLOAD_SIZE_BYTES // (1024 * 1024)
-            raise HTTPException(status_code=413, detail=f"Image exceeds the {max_mb}MB limit.")
+        image_bytes = await _read_capped_image(image)  # P1-7: bounded read
 
     # LATENCY INSTRUMENTATION: request-side stages timed separately from the
     # AI call itself (which ai_engine.py times internally in more detail -
@@ -1061,10 +1187,7 @@ async def chat_stream_endpoint(
     # never a 200 with an error buried in the stream body.
     image_bytes = None
     if image:
-        image_bytes = await image.read()
-        if len(image_bytes) > MAX_IMAGE_UPLOAD_SIZE_BYTES:
-            max_mb = MAX_IMAGE_UPLOAD_SIZE_BYTES // (1024 * 1024)
-            raise HTTPException(status_code=413, detail=f"Image exceeds the {max_mb}MB limit.")
+        image_bytes = await _read_capped_image(image)  # P1-7: bounded read
 
     user_id, user_token = user_and_token
     t_request_start = time.perf_counter()
@@ -1330,6 +1453,45 @@ async def chat_title_endpoint(
     return {"title": title}
 
 
+def _normalize_quiz_text(value, field_name: str, max_chars: int) -> str:
+    """
+    P1-6: whitespace-normalizes (collapses runs, incl. newlines/tabs, to one
+    space) and bounds a free-text quiz field. Rejects control characters and
+    the invisible Unicode "tag" block (U+E0000-E007F, used to smuggle hidden
+    instructions to LLMs). Deliberately does NOT reject other format
+    characters: ZWJ/ZWNJ (U+200D/200C) are required to spell some Bangla
+    words correctly. Raises HTTPException(400) with a safe message.
+    """
+    text = " ".join(str(value if value is not None else "").split())
+    if len(text) > max_chars:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be at most {max_chars} characters.")
+    for ch in text:
+        if unicodedata.category(ch) in ("Cc", "Cs") or 0xE0000 <= ord(ch) <= 0xE007F:
+            raise HTTPException(status_code=400, detail=f"{field_name} contains invalid characters.")
+    return text
+
+
+def validate_quiz_request(subject, topic, count) -> Tuple[str, str, int]:
+    """
+    P1-6: server-side contract for /api/quiz/generate. Previously `count`,
+    `subject` and `topic` were completely unbounded and interpolated straight
+    into the model prompt, so a request could ask for count=100000 (cost/
+    time DoS), send megabytes of text, or smuggle instructions. Returns the
+    cleaned (subject, topic, count). An empty topic falls back to the same
+    default the endpoint and the UI already use; an empty subject is invalid.
+    """
+    if isinstance(count, bool) or not isinstance(count, int) or not (QUIZ_MIN_QUESTIONS <= count <= QUIZ_MAX_QUESTIONS):
+        raise HTTPException(
+            status_code=400,
+            detail=f"count must be between {QUIZ_MIN_QUESTIONS} and {QUIZ_MAX_QUESTIONS}."
+        )
+    clean_subject = _normalize_quiz_text(subject, "subject", QUIZ_MAX_SUBJECT_CHARS)
+    if not clean_subject:
+        raise HTTPException(status_code=400, detail="subject is required.")
+    clean_topic = _normalize_quiz_text(topic, "topic", QUIZ_MAX_TOPIC_CHARS) or QUIZ_DEFAULT_TOPIC
+    return clean_subject, clean_topic, count
+
+
 @app.post("/api/quiz/generate")
 async def quiz_generate_endpoint(
     subject: str = Form("Science"),
@@ -1346,6 +1508,12 @@ async def quiz_generate_endpoint(
     # normal form field. See _get_academic_context's docstring for the
     # missing-profile behavior.
     user_id, user_token = user_and_token
+
+    # P1-6: reject out-of-contract input BEFORE any Supabase/Gemini work, and
+    # from here on use only the cleaned values (they are also what gets
+    # stored in the server-side quiz definition below).
+    subject, topic, count = validate_quiz_request(subject, topic, count)
+
     user_class, stream = await _get_academic_context(user_token=user_token, user_id=user_id)
 
     # quiz_attempts.user_class is NOT NULL (see
