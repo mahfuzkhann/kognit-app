@@ -10,6 +10,9 @@ __pycache__/
 # Environment Secrets
 .env
 
+# Node (tests_frontend: npm install creates node_modules/)
+node_modules/
+
 # IDE / System
 .vscode/
 .DS_Store
