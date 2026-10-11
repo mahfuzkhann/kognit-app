@@ -98,7 +98,8 @@ await check("no Home/Scheduled/Plugins nav items exist (Decision 3)", () => {
 
 await check("nav rail uses proper ARIA tablist semantics", () => {
     assert(rawHtml.includes('role="tablist"'));
-    assert((rawHtml.match(/role="tab"/g) || []).length === 3, "exactly 3 tabs");
+    // Pocket Notes added a fourth tab (below Projects), by approved design.
+    assert((rawHtml.match(/role="tab"/g) || []).length === 4, "exactly 4 tabs");
 });
 
 console.log("\nSwitching");
@@ -151,11 +152,47 @@ await check("ArrowRight moves from Chat to Quizzes and activates it", async () =
     assert(doc.getElementById("nav-tab-quizzes").classList.contains("active"));
 });
 
-await check("ArrowLeft wraps from Chat to Projects (roving tabindex wraps)", async () => {
+await check("ArrowLeft wraps from Chat to the LAST tab, Pocket Notes (roving tabindex wraps)", async () => {
     const { doc, window } = await buildDom();
     doc.getElementById("nav-tab-chat").focus();
     doc.querySelector(".nav-rail").dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
-    eq(doc.activeElement.id, "nav-tab-projects");
+    eq(doc.activeElement.id, "nav-tab-notes");
+});
+
+await check("Pocket Notes tab sits below Projects and controls #notes-view", () => {
+    const order = [...rawHtml.matchAll(/id="nav-tab-([a-z]+)"/g)].map((m) => m[1]);
+    eq(order.join(","), "chat,quizzes,projects,notes");
+    assert(rawHtml.includes('aria-controls="notes-view"'), "tab must control #notes-view");
+    assert(/id="notes-view"[^>]*role="tabpanel"[^>]*aria-labelledby="nav-tab-notes"/.test(rawHtml), "panel semantics");
+});
+
+await check("ArrowRight from Projects moves to Pocket Notes, and Notes wraps back to Chat", async () => {
+    const { doc, window } = await buildDom();
+    const rail = doc.querySelector(".nav-rail");
+    doc.getElementById("nav-tab-projects").focus();
+    rail.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    eq(doc.activeElement.id, "nav-tab-notes");
+    rail.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    eq(doc.activeElement.id, "nav-tab-chat");
+});
+
+await check("switching to Pocket Notes shows #notes-view, hides the others and the chat sidebar, and notifies KognitNotes", async () => {
+    const { doc, window } = await buildDom();
+    let shown = 0;
+    window.KognitNotes = { onShow() { shown++; } };
+    doc.getElementById("nav-tab-notes").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    assert(!doc.getElementById("notes-view").classList.contains("hidden"), "notes view visible");
+    assert(doc.getElementById("chat-view").classList.contains("hidden"), "chat view hidden");
+    assert(doc.getElementById("chat-sidebar-section").classList.contains("hidden"), "chat history hidden");
+    eq(doc.getElementById("nav-tab-notes").getAttribute("aria-selected"), "true");
+    eq(shown, 1);
+});
+
+await check("Pocket Notes tab works even if notes.js failed to load (no KognitNotes)", async () => {
+    const { doc, window } = await buildDom();
+    delete window.KognitNotes;
+    doc.getElementById("nav-tab-notes").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    assert(!doc.getElementById("notes-view").classList.contains("hidden"));
 });
 
 await check("only the active tab is in the Tab order (roving tabindex)", async () => {

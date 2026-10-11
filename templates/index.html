@@ -48,6 +48,7 @@
          composer, quick actions, mobile drawer). Loaded after style.css,
          which keeps the content/modal/quiz rules. -->
     <link rel="stylesheet" href="/static/css/shell.css">
+    <link rel="stylesheet" href="/static/css/notes.css">
 
     <!-- Noto Sans Bengali: proper Bengali script shaping (conjuncts, matras).
          The previous font stack (-apple-system/Segoe UI/Roboto) has no
@@ -162,7 +163,12 @@
     <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
 
     <!-- Supabase JS Client -->
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <!-- POCKET NOTES: pinned to an exact version (was the floating "@2"). The offline
+         service worker (static/sw.js) caches this URL, so it must be an exact, stable one.
+         2.117.2 was published 2026-09-25 (>14 days before pinning) and exposes the same
+         dist/umd/supabase.js entry file that "@2" resolved to. If you change this version,
+         change the identical URL in static/sw.js (REQUIRED_CDN) and bump SW_VERSION. -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2"></script>
 </head>
 <body>
 
@@ -228,6 +234,11 @@
                     role="tab" aria-selected="false" aria-controls="projects-view" tabindex="-1">
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path></svg>
                 <span>Projects</span>
+            </button>
+            <button type="button" id="nav-tab-notes" class="nav-rail-btn"
+                    role="tab" aria-selected="false" aria-controls="notes-view" tabindex="-1">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1z"></path></svg>
+                <span>Pocket Notes</span>
             </button>
         </div>
 
@@ -535,6 +546,9 @@
              count are shown, because that is all the existing data model
              actually contains. -->
         <div id="projects-view" class="nav-view hidden" role="tabpanel" aria-labelledby="nav-tab-projects"></div>
+
+        <!-- POCKET NOTES view: content is built by static/js/notes.js -->
+        <div id="notes-view" class="nav-view hidden" role="tabpanel" aria-labelledby="nav-tab-notes"></div>
     </main>
 </div>
 
@@ -818,6 +832,8 @@
      order below) since it depends on the accessor functions app.js
      exposes for this purpose - see the PHASE 9B comment in app.js. -->
 <script src="/static/js/app.js"></script>
+<script src="/static/js/notes-store.js"></script>
+<script src="/static/js/notes.js"></script>
 <script src="/static/js/nav-views.js"></script>
 <script src="/static/js/ui-core.js"></script>
 <!-- PHASE 10: shell behaviour (greeting, quick actions, class pill,

@@ -1,0 +1,549 @@
+/* ============================================================
+   KOGNIT POCKET NOTES
+   ============================================================
+   Uses ONLY the existing design tokens (static/css/tokens.css) and the
+   existing .nav-view-* classes, so it follows the light/dark theme and
+   the established spacing/typography with no parallel visual language.
+   ============================================================ */
+
+.notes-inner {
+    gap: var(--space-lg);
+}
+
+.notes-sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* ---- offline / sync status line -------------------------------- */
+.notes-status:empty {
+    display: none;
+}
+
+.notes-status {
+    font-size: var(--font-size-sm);
+    padding: var(--space-md) var(--space-lg);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--color-border);
+    color: var(--color-text-secondary);
+    background: var(--color-surface-secondary);
+}
+
+.notes-status-warn {
+    border-color: var(--color-warning);
+    color: var(--color-text-primary);
+}
+
+.notes-status-ok {
+    border-color: var(--color-success);
+}
+
+/* ---- list pane -------------------------------------------------- */
+.notes-list-pane,
+.notes-detail-pane {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-lg);
+}
+
+.notes-controls {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+}
+
+.notes-search,
+.notes-tag-input {
+    width: 100%;
+    background: var(--color-surface-input);
+    color: var(--color-text-primary);
+    border: 1px solid var(--color-border-input);
+    border-radius: var(--radius-md);
+    padding: var(--space-lg);
+    font-size: var(--font-size-base);
+    font-family: inherit;
+    min-height: var(--touch-target-min);
+}
+
+.notes-search:focus-visible,
+.notes-tag-input:focus-visible {
+    outline: none;
+    border-color: var(--color-focus);
+    box-shadow: var(--focus-ring);
+}
+
+.notes-chips,
+.notes-subject-picks,
+.notes-suggestions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-md);
+}
+
+.notes-chip {
+    background: var(--color-surface-secondary);
+    color: var(--color-text-secondary);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-pill);
+    padding: var(--space-sm) var(--space-lg);
+    font-size: var(--font-size-sm);
+    font-family: inherit;
+    cursor: pointer;
+    min-height: 32px;
+}
+
+.notes-chip:hover:not(:disabled) {
+    background: var(--color-surface-hover);
+    color: var(--color-text-primary);
+}
+
+.notes-chip.active {
+    background: var(--color-accent);
+    color: var(--color-text-inverse);
+    border-color: var(--color-accent);
+}
+
+.notes-chip:focus-visible,
+.notes-btn:focus-visible,
+.note-card:focus-visible,
+.note-tag-remove:focus-visible,
+.notes-quiz-opt:focus-visible,
+.toolbar-btn-save:focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
+}
+
+.notes-chip:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.notes-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+}
+
+.note-card {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-sm);
+    text-align: left;
+    background: var(--color-surface-secondary);
+    color: var(--color-text-primary);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-xl);
+    font-family: inherit;
+    cursor: pointer;
+    transition: background var(--duration-fast) var(--ease-standard),
+                border-color var(--duration-fast) var(--ease-standard);
+}
+
+.note-card:hover {
+    background: var(--color-surface-hover);
+    border-color: var(--color-border-strong);
+}
+
+.note-card-title {
+    font-size: var(--font-size-base);
+    font-weight: var(--font-weight-semibold);
+    line-height: var(--line-height-tight);
+}
+
+.note-card-snippet {
+    font-size: var(--font-size-sm);
+    color: var(--color-text-muted);
+    line-height: var(--line-height-normal);
+    overflow-wrap: anywhere;
+}
+
+.note-card-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-sm);
+}
+
+.note-card-date {
+    font-size: var(--font-size-xs);
+    color: var(--color-text-faint);
+}
+
+/* ---- tags & badges --------------------------------------------- */
+.note-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-xs);
+    font-size: var(--font-size-xs);
+    padding: 2px var(--space-md);
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--color-border);
+    color: var(--color-text-secondary);
+    background: var(--color-surface);
+}
+
+.note-tag-subject { border-color: var(--color-accent); }
+.note-tag-review  { border-color: var(--color-warning); color: var(--color-warning); }
+
+.note-tag-remove {
+    background: none;
+    border: none;
+    color: inherit;
+    cursor: pointer;
+    font-size: var(--font-size-md);
+    line-height: 1;
+    padding: 0 var(--space-xs);
+    border-radius: var(--radius-sm);
+}
+
+.note-tag-remove:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+.note-badge {
+    font-size: var(--font-size-xs);
+    padding: 2px var(--space-md);
+    border-radius: var(--radius-pill);
+    background: var(--color-surface-elevated);
+    color: var(--color-success);
+    border: 1px solid var(--color-success);
+}
+
+.note-badge-copy {
+    color: var(--color-warning);
+    border-color: var(--color-warning);
+}
+
+/* ---- empty / error --------------------------------------------- */
+.notes-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-md);
+    padding: var(--space-3xl);
+    border: 1px dashed var(--color-border-strong);
+    border-radius: var(--radius-lg);
+    color: var(--color-text-secondary);
+}
+
+.notes-empty-title {
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-primary);
+}
+
+.notes-empty-body {
+    font-size: var(--font-size-sm);
+    color: var(--color-text-muted);
+}
+
+.notes-error {
+    border-color: var(--color-error);
+}
+
+/* ---- buttons ---------------------------------------------------- */
+.notes-btn {
+    background: var(--color-surface-secondary);
+    color: var(--color-text-primary);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: var(--space-md) var(--space-xl);
+    font-size: var(--font-size-sm);
+    font-family: inherit;
+    font-weight: var(--font-weight-medium);
+    cursor: pointer;
+    min-height: 36px;
+}
+
+.notes-btn:hover:not(:disabled) {
+    background: var(--color-surface-hover);
+}
+
+.notes-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.notes-btn-primary {
+    background: var(--color-accent);
+    color: var(--color-text-inverse);
+    border-color: var(--color-accent);
+}
+
+.notes-btn-primary:hover:not(:disabled) {
+    background: var(--color-accent-hover);
+}
+
+.notes-btn-danger {
+    color: var(--color-error);
+    border-color: var(--color-error);
+}
+
+.notes-btn-ghost {
+    background: transparent;
+}
+
+/* ---- detail ----------------------------------------------------- */
+.notes-detail-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-md);
+}
+
+.notes-detail-title {
+    font-size: var(--font-size-xl);
+    font-weight: var(--font-weight-semibold);
+    line-height: var(--line-height-tight);
+    overflow-wrap: anywhere;
+}
+
+.notes-detail-date,
+.notes-hint {
+    font-size: var(--font-size-sm);
+    color: var(--color-text-muted);
+}
+
+.notes-hint-error {
+    color: var(--color-error);
+}
+
+.notes-tags {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+}
+
+.notes-tag-row,
+.notes-tag-form,
+.notes-study-actions,
+.notes-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-md);
+}
+
+.notes-tag-form .notes-tag-input {
+    flex: 1 1 160px;
+    width: auto;
+}
+
+.notes-question {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+    font-size: var(--font-size-sm);
+    color: var(--color-text-secondary);
+    padding: var(--space-lg);
+    border-left: 3px solid var(--color-border-strong);
+    overflow-wrap: anywhere;
+}
+
+.notes-question-label,
+.notes-section-label {
+    font-size: var(--font-size-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.7px;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-muted);
+}
+
+.notes-body {
+    line-height: var(--line-height-relaxed);
+    overflow-wrap: anywhere;
+    max-width: var(--reading-max-width);
+}
+
+/* Wide tables/formulas scroll inside the note, never the whole page. */
+.notes-body table,
+.notes-body mjx-container[display="true"],
+.notes-body pre {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+}
+
+.notes-body-plain {
+    white-space: pre-wrap;
+}
+
+.notes-sources-list {
+    margin: var(--space-sm) 0 0;
+    padding-left: var(--space-3xl);
+    font-size: var(--font-size-sm);
+}
+
+.notes-source-domain {
+    color: var(--color-text-faint);
+}
+
+/* ---- study ------------------------------------------------------ */
+.notes-study {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-lg);
+    padding-top: var(--space-xl);
+    border-top: 1px solid var(--color-border-subtle);
+}
+
+.notes-flash,
+.notes-quiz {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-lg);
+    align-items: flex-start;
+}
+
+.notes-flash-count {
+    font-size: var(--font-size-xs);
+    color: var(--color-text-muted);
+    font-weight: var(--font-weight-semibold);
+}
+
+.notes-flash-card {
+    width: 100%;
+    min-height: 140px;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+    justify-content: center;
+    padding: var(--space-3xl);
+    background: var(--color-surface-secondary);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+}
+
+.notes-flash-side {
+    font-size: var(--font-size-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.7px;
+    color: var(--color-text-muted);
+}
+
+.notes-flash-text {
+    font-size: var(--font-size-lg);
+    line-height: var(--line-height-normal);
+    overflow-wrap: anywhere;
+}
+
+.notes-flash-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-md);
+}
+
+.notes-quiz-q {
+    width: 100%;
+    margin: 0;
+    padding: var(--space-xl);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+}
+
+.notes-quiz-legend {
+    font-weight: var(--font-weight-semibold);
+    padding: 0 var(--space-sm);
+    overflow-wrap: anywhere;
+}
+
+.notes-quiz-options {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+}
+
+.notes-quiz-opt {
+    text-align: left;
+    background: var(--color-surface-secondary);
+    color: var(--color-text-primary);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: var(--space-lg);
+    font-size: var(--font-size-sm);
+    font-family: inherit;
+    cursor: pointer;
+    min-height: var(--touch-target-min);
+    overflow-wrap: anywhere;
+}
+
+.notes-quiz-opt:hover:not(:disabled) {
+    border-color: var(--color-accent);
+}
+
+.notes-quiz-opt.selected {
+    border-color: var(--color-accent);
+    background: var(--color-surface-hover);
+}
+
+.notes-quiz-opt.correct {
+    border-color: var(--color-success);
+}
+
+.notes-quiz-opt.wrong {
+    border-color: var(--color-error);
+}
+
+.notes-quiz-opt:disabled {
+    cursor: default;
+    color: var(--color-text-primary);
+}
+
+.notes-quiz-feedback {
+    font-size: var(--font-size-sm);
+    color: var(--color-text-secondary);
+}
+
+.notes-quiz-feedback.right { color: var(--color-success); }
+.notes-quiz-feedback.wrong { color: var(--color-error); }
+
+.notes-quiz-score {
+    font-size: var(--font-size-lg);
+    font-weight: var(--font-weight-semibold);
+}
+
+/* ---- Save button in the answer toolbar ---------------------------- */
+.toolbar-btn-save[data-state="saved"],
+.toolbar-btn-save[data-state="already"] {
+    color: var(--color-success);
+    border-color: var(--color-success);
+    opacity: 1;
+}
+
+.toolbar-btn-save[data-state="error"] {
+    color: var(--color-error);
+    border-color: var(--color-error);
+}
+
+.toolbar-btn-save[data-state="offline"],
+.toolbar-btn-save[data-state="auth"] {
+    color: var(--color-warning);
+    border-color: var(--color-warning);
+}
+
+.toolbar-btn-save:disabled[data-state="saving"] {
+    opacity: 0.6;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .note-card,
+    .notes-btn {
+        transition: none;
+    }
+}

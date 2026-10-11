@@ -18,7 +18,7 @@
 (function () {
     "use strict";
 
-    var VIEWS = ["chat", "quizzes", "projects"];
+    var VIEWS = ["chat", "quizzes", "projects", "notes"];
     var STORAGE_KEY = "kognit-active-nav-tab";
     var quizzesLoadToken = 0;   // guards against a stale fetch finishing
     var projectsRendered = false;
@@ -63,6 +63,7 @@
 
         if (view === "quizzes") renderQuizzesView();
         if (view === "projects") renderProjectsView();
+        if (view === "notes" && window.KognitNotes) window.KognitNotes.onShow();
 
         if (focusTab) {
             var activeBtn = tabButton(view);

@@ -1305,3 +1305,239 @@ def _build_insights(rows: list, user_id: str) -> list:
         }
         for insight in insights
     ]
+
+# ---------------------------------------------------------------------------
+# POCKET NOTES (supabase/migrations/0007_pocket_notes.sql)
+#
+# Same conventions as every other write/read in this module: the student's
+# OWN Supabase access token is forwarded (never a service-role key), so RLS
+# (`auth.uid() = user_id`) is the real isolation boundary. On top of that,
+# EVERY query below also filters by `user_id=eq.<verified user id>` -
+# defence in depth, so ownership is enforced in application logic as well as
+# in the database, and a missing/misconfigured policy could not by itself
+# expose another student's note.
+#
+# "Not found" and "not yours" are deliberately indistinguishable: a note
+# that RLS/the user_id filter hides simply comes back as no row, which the
+# endpoints turn into the same 404 as a note that never existed.
+#
+# Every function raises DatabaseError on any network/HTTP/shape failure,
+# exactly like the rest of this module; callers map that to a generic 502.
+# note_id / client_id values reaching this layer have ALREADY been validated
+# (UUID / client-id regex) by backend/notes_engine.py, so they are safe to
+# place in a PostgREST filter.
+# ---------------------------------------------------------------------------
+
+POCKET_NOTE_COLUMNS = (
+    "id,client_id,content_md,takeaway,question_md,sources,tags,needs_review,"
+    "source_ref,flashcards,mini_quiz,created_at,updated_at"
+)
+
+
+def _require_supabase_configured() -> None:
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise DatabaseError(
+            "Supabase is not configured on the server (SUPABASE_URL/SUPABASE_ANON_KEY missing)."
+        )
+
+
+async def _pocket_notes_request(
+    method: str,
+    *,
+    user_token: str,
+    user_id: str,
+    params: dict,
+    op: str,
+    json_body=None,
+    prefer: Optional[str] = None,
+    extra_headers: Optional[dict] = None,
+    ok_statuses=(200,),
+):
+    """The single place Pocket Notes talks to PostgREST. Returns the httpx
+    response on an accepted status, otherwise raises DatabaseError. Logs the
+    status and a truncated body server-side only (never returned upward)."""
+    _require_supabase_configured()
+
+    headers = _rest_headers(user_token)
+    if prefer:
+        headers["Prefer"] = prefer
+    if extra_headers:
+        headers.update(extra_headers)
+
+    try:
+        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+            resp = await client.request(
+                method,
+                f"{SUPABASE_URL}/rest/v1/pocket_notes",
+                headers=headers,
+                params=params,
+                json=json_body,
+            )
+    except httpx.RequestError:
+        logger.exception("%s: network error talking to pocket_notes (user_id=%s)", op, user_id)
+        raise DatabaseError(f"network error during {op}")
+
+    if resp.status_code not in ok_statuses:
+        logger.error(
+            "%s: pocket_notes request failed status=%d body=%s (user_id=%s)",
+            op, resp.status_code, resp.text[:500], user_id,
+        )
+        raise DatabaseError(f"{op} failed with status {resp.status_code}")
+    return resp
+
+
+def _rows_from(resp, *, op: str, user_id: str) -> list:
+    try:
+        rows = resp.json()
+    except ValueError:
+        rows = None
+    if not isinstance(rows, list):
+        logger.error("%s: unexpected pocket_notes response shape (user_id=%s)", op, user_id)
+        raise DatabaseError(f"unexpected response shape from {op}")
+    return rows
+
+
+async def create_pocket_note(user_token: str, user_id: str, note: dict) -> Optional[dict]:
+    """
+    Inserts a note. Returns the new row, or None if a note with the same
+    (user_id, client_id) already exists - that is the idempotent-retry case
+    and the caller then reads the existing row with
+    get_pocket_note_by_client_id.
+
+    Uses `resolution=ignore-duplicates` (ON CONFLICT DO NOTHING), NOT
+    merge-duplicates: a retried save must never overwrite a note whose tags
+    the student has since edited.
+
+    `note` is the already-validated dict from notes_engine plus the derived
+    `tags` / `needs_review`. `user_id` is added HERE from the verified
+    identity - never taken from `note`.
+    """
+    payload = {k: v for k, v in note.items() if k != "user_id"}
+    payload["user_id"] = user_id
+
+    resp = await _pocket_notes_request(
+        "POST",
+        user_token=user_token,
+        user_id=user_id,
+        op="create_pocket_note",
+        params={"on_conflict": "user_id,client_id", "select": POCKET_NOTE_COLUMNS},
+        json_body=payload,
+        prefer="resolution=ignore-duplicates,return=representation",
+        ok_statuses=(200, 201),
+    )
+    rows = _rows_from(resp, op="create_pocket_note", user_id=user_id)
+    return rows[0] if rows else None
+
+
+async def get_pocket_note_by_client_id(user_token: str, user_id: str, client_id: str) -> Optional[dict]:
+    resp = await _pocket_notes_request(
+        "GET",
+        user_token=user_token,
+        user_id=user_id,
+        op="get_pocket_note_by_client_id",
+        params={
+            "select": POCKET_NOTE_COLUMNS,
+            "user_id": f"eq.{user_id}",
+            "client_id": f"eq.{client_id}",
+            "limit": "1",
+        },
+    )
+    rows = _rows_from(resp, op="get_pocket_note_by_client_id", user_id=user_id)
+    return rows[0] if rows else None
+
+
+async def count_pocket_notes(user_token: str, user_id: str) -> int:
+    """Number of notes the student owns (used for the per-user cap). Reads
+    PostgREST's exact count from the Content-Range header; fetches at most
+    one row."""
+    resp = await _pocket_notes_request(
+        "GET",
+        user_token=user_token,
+        user_id=user_id,
+        op="count_pocket_notes",
+        params={"select": "id", "user_id": f"eq.{user_id}", "limit": "1"},
+        extra_headers={"Prefer": "count=exact"},
+        ok_statuses=(200, 206),
+    )
+    content_range = resp.headers.get("content-range", "")
+    total = content_range.rsplit("/", 1)[-1] if "/" in content_range else ""
+    if not total.isdigit():
+        logger.error("count_pocket_notes: missing/invalid content-range (user_id=%s)", user_id)
+        raise DatabaseError("unexpected response shape from count_pocket_notes")
+    return int(total)
+
+
+async def list_pocket_notes(user_token: str, user_id: str, limit: int, offset: int) -> tuple:
+    """Returns (rows, has_more), newest first. Fetches limit+1 rows to learn
+    whether another page exists without a second count query. `limit` /
+    `offset` were already clamped by notes_engine.parse_pagination."""
+    resp = await _pocket_notes_request(
+        "GET",
+        user_token=user_token,
+        user_id=user_id,
+        op="list_pocket_notes",
+        params={
+            "select": POCKET_NOTE_COLUMNS,
+            "user_id": f"eq.{user_id}",
+            "order": "created_at.desc,id.desc",
+            "limit": str(limit + 1),
+            "offset": str(offset),
+        },
+    )
+    rows = _rows_from(resp, op="list_pocket_notes", user_id=user_id)
+    return rows[:limit], len(rows) > limit
+
+
+async def get_pocket_note(user_token: str, user_id: str, note_id: str) -> Optional[dict]:
+    resp = await _pocket_notes_request(
+        "GET",
+        user_token=user_token,
+        user_id=user_id,
+        op="get_pocket_note",
+        params={
+            "select": POCKET_NOTE_COLUMNS,
+            "id": f"eq.{note_id}",
+            "user_id": f"eq.{user_id}",
+            "limit": "1",
+        },
+    )
+    rows = _rows_from(resp, op="get_pocket_note", user_id=user_id)
+    return rows[0] if rows else None
+
+
+async def update_pocket_note(user_token: str, user_id: str, note_id: str, fields: dict) -> Optional[dict]:
+    """PATCHes the given fields on an owned note and returns the updated row,
+    or None if no owned note matched. Callers only ever pass the whitelisted
+    editable columns (tags, needs_review, flashcards, mini_quiz); this
+    function refuses anything else so a future caller cannot accidentally
+    make content/ownership editable."""
+    allowed = {"tags", "needs_review", "flashcards", "mini_quiz"}
+    if not fields or not set(fields).issubset(allowed):
+        raise DatabaseError("update_pocket_note called with a non-editable column")
+
+    resp = await _pocket_notes_request(
+        "PATCH",
+        user_token=user_token,
+        user_id=user_id,
+        op="update_pocket_note",
+        params={"id": f"eq.{note_id}", "user_id": f"eq.{user_id}", "select": POCKET_NOTE_COLUMNS},
+        json_body=fields,
+        prefer="return=representation",
+    )
+    rows = _rows_from(resp, op="update_pocket_note", user_id=user_id)
+    return rows[0] if rows else None
+
+
+async def delete_pocket_note(user_token: str, user_id: str, note_id: str) -> bool:
+    """Deletes an owned note. True if a row was deleted, False if no owned
+    note matched (not found OR not yours - indistinguishable on purpose)."""
+    resp = await _pocket_notes_request(
+        "DELETE",
+        user_token=user_token,
+        user_id=user_id,
+        op="delete_pocket_note",
+        params={"id": f"eq.{note_id}", "user_id": f"eq.{user_id}", "select": "id"},
+        prefer="return=representation",
+    )
+    rows = _rows_from(resp, op="delete_pocket_note", user_id=user_id)
+    return len(rows) > 0

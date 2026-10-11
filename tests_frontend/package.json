@@ -2,11 +2,12 @@
   "name": "kognit-frontend-tests",
   "private": true,
   "type": "module",
-  "description": "Phase 8 frontend behaviour tests plus the P1 security/persistence tests. Runs the real template, app.js and vendored DOMPurify in jsdom.",
+  "description": "Phase 8 frontend behaviour tests plus the P1 security/persistence tests and the Pocket Notes tests. Runs the real template, app.js and vendored DOMPurify in jsdom.",
   "scripts": {
-    "test": "node test_ui_core.mjs && node test_stream_render.mjs && node test_theme.mjs && node test_nav_views.mjs && node test_security_hardening.mjs"
+    "test": "node test_ui_core.mjs && node test_stream_render.mjs && node test_theme.mjs && node test_nav_views.mjs && node test_security_hardening.mjs && node test_notes.mjs"
   },
   "devDependencies": {
+    "fake-indexeddb": "^6.2.5",
     "jsdom": "^26.0.0",
     "marked": "18.1.0",
     "mathjax": "3.2.2"

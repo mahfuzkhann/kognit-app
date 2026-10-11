@@ -18,8 +18,8 @@
 --   details        which table.column entries are affected
 --
 -- Re-run this after applying a migration; when it returns zero rows you are in step
--- with the repository. (0002, 0004 and 0006 are safe to run twice. 0001, 0003 and
--- 0005 create policies - run each of those only once.)
+-- with the repository. (0002, 0004 and 0006 are safe to run twice. 0001, 0003, 0005
+-- and 0007 create policies - run each of those only once.)
 --
 -- This file is kept in step with the migrations by test_schema_contract.py.
 
@@ -68,7 +68,21 @@ with expected (table_name, column_name, added_by, relaxed_by) as (
     ('student_profiles', 'stream', '0005_student_profile.sql', '0006_student_profile_stream_optional.sql'),
     ('student_profiles', 'updated_at', '0005_student_profile.sql', null),
     ('student_profiles', 'user_class', '0005_student_profile.sql', null),
-    ('student_profiles', 'user_id', '0005_student_profile.sql', null)
+    ('student_profiles', 'user_id', '0005_student_profile.sql', null),
+    ('pocket_notes', 'client_id', '0007_pocket_notes.sql', null),
+    ('pocket_notes', 'content_md', '0007_pocket_notes.sql', null),
+    ('pocket_notes', 'created_at', '0007_pocket_notes.sql', null),
+    ('pocket_notes', 'flashcards', '0007_pocket_notes.sql', null),
+    ('pocket_notes', 'id', '0007_pocket_notes.sql', null),
+    ('pocket_notes', 'mini_quiz', '0007_pocket_notes.sql', null),
+    ('pocket_notes', 'needs_review', '0007_pocket_notes.sql', null),
+    ('pocket_notes', 'question_md', '0007_pocket_notes.sql', null),
+    ('pocket_notes', 'source_ref', '0007_pocket_notes.sql', null),
+    ('pocket_notes', 'sources', '0007_pocket_notes.sql', null),
+    ('pocket_notes', 'tags', '0007_pocket_notes.sql', null),
+    ('pocket_notes', 'takeaway', '0007_pocket_notes.sql', null),
+    ('pocket_notes', 'updated_at', '0007_pocket_notes.sql', null),
+    ('pocket_notes', 'user_id', '0007_pocket_notes.sql', null)
 ),
 column_problems as (
   select e.table_name,
@@ -94,7 +108,7 @@ rls_problems as (
          'enable row level security - see the migration that creates ' || tablename::text as run_migration
   from pg_tables
   where schemaname = 'public'
-    and tablename in ('conversation_index', 'learning_evidence', 'quiz_answers', 'quiz_attempts', 'student_profiles')
+    and tablename in ('conversation_index', 'learning_evidence', 'pocket_notes', 'quiz_answers', 'quiz_attempts', 'student_profiles')
     and not rowsecurity
 )
 select run_migration,

@@ -10,7 +10,7 @@ import httpx
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Request, Response, Form, File, UploadFile, Header, HTTPException, Depends, BackgroundTasks
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from backend.ai_engine import (
@@ -31,8 +31,16 @@ from backend.database import (
     get_student_profile,
     upsert_student_profile,
     get_user_topic_mistakes,
+    create_pocket_note,
+    get_pocket_note_by_client_id,
+    count_pocket_notes,
+    list_pocket_notes,
+    get_pocket_note,
+    update_pocket_note,
+    delete_pocket_note,
     DatabaseError,
 )
+from backend import notes_engine, notes_ai
 from backend.learning_memory import detect_learning_signals, is_meaningful_signal_set, resolve_academic_context
 from backend.learning_snapshot import build_learning_snapshot
 from backend.next_step_engine import compute_next_steps
@@ -343,6 +351,16 @@ RATE_LIMIT_CONFIG = {
     # with no limit at all). 6/min is far above any real student behaviour
     # (one PDF per chat) and far below a useful abuse rate. Beta value.
     "pdf_upload": (6, 60),
+    # POCKET NOTES: creating/editing/deleting a note is a cheap, RLS-scoped
+    # database write (no AI), so the limit only exists to stop storage
+    # spam - far above real use (a student saves a handful of answers a
+    # minute at most).
+    "notes_write": (30, 60),
+    # POCKET NOTES: topic suggestions, flashcards and mini-quizzes each cost
+    # one provider call. Same order of magnitude as quiz_generation. Applied
+    # ONLY when a call is actually about to be made - returning an already
+    # stored flashcard/quiz set consumes none of this budget.
+    "notes_ai": (6, 60),
 }
 
 # (user_id, category) -> deque[float] of request timestamps within the
@@ -2296,3 +2314,352 @@ async def profile_next_steps_endpoint(
         )
 
     return {"recommendations": compute_next_steps(topics, insights, mistakes)}
+
+# ---------------------------------------------------------------------------
+# POCKET NOTES
+#
+# Save a Kognit answer as a note, list/read/edit-tags/delete it, and - only on
+# an explicit student action - get AI topic suggestions, flashcards or a
+# mini-quiz for it. See backend/notes_engine.py (validation, deterministic
+# tags), backend/notes_ai.py (AI study material) and the Pocket Notes section
+# of backend/database.py.
+#
+# AUTHENTICATION/ISOLATION: every route here depends on
+# get_current_user_and_token. user_id and the Supabase token come ONLY from
+# the verified JWT; a user_id in a request body is never read. RLS
+# (supabase/migrations/0007_pocket_notes.sql) is the isolation boundary and
+# every database call additionally filters by the verified user_id. A note
+# that is not yours is reported exactly like one that does not exist (404).
+#
+# POCKET NOTES ARE NOT LEARNING EVIDENCE: nothing below writes quiz_attempts,
+# mastery or learning evidence. Mini-quiz scoring is client-side only.
+#
+# PRIVACY: note content is never logged (only ids/status), and every response
+# is `Cache-Control: no-store` so neither browsers nor the service worker
+# keep private note data in an HTTP cache.
+# ---------------------------------------------------------------------------
+
+_NOTES_NO_STORE = {"Cache-Control": "no-store"}
+_NOTE_NOT_FOUND = "Note not found."
+
+
+def _notes_json(content: dict, status_code: int = 200) -> JSONResponse:
+    return JSONResponse(content=content, status_code=status_code, headers=_NOTES_NO_STORE)
+
+
+async def _rate_limited_notes_write(
+    user_and_token: Tuple[str, str] = Depends(get_current_user_and_token)
+) -> Tuple[str, str]:
+    """Rate-limit dependency for note create/update/delete. See the
+    RATE_LIMIT_CONFIG comment for why this limit exists."""
+    user_id, _token = user_and_token
+    _check_rate_limit(user_id, "notes_write")
+    return user_and_token
+
+
+async def _read_json_body(request: Request, *, allow_empty: bool = False) -> dict:
+    """Reads a bounded JSON object body. 413 if too large, 400 if it is not a
+    JSON object. Never echoes the body back in an error."""
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > notes_engine.MAX_REQUEST_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="That request is too large.")
+    raw = await request.body()
+    if len(raw) > notes_engine.MAX_REQUEST_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="That request is too large.")
+    if not raw.strip():
+        if allow_empty:
+            return {}
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object.")
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Request body must be valid JSON.")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object.")
+    return body
+
+
+def _require_note_id(note_id: str) -> None:
+    if not notes_engine.is_valid_note_id(note_id):
+        raise HTTPException(status_code=404, detail=_NOTE_NOT_FOUND)
+
+
+def _notes_db_error(op: str, user_id: str) -> HTTPException:
+    logger.exception("%s: database failure (user_id=%s)", op, user_id)
+    return HTTPException(
+        status_code=502,
+        detail="Could not reach your notes right now. Please try again.",
+    )
+
+
+_NOTES_AI_ERRORS = {
+    notes_ai.CODE_RATE_LIMITED: (429, "The AI is busy right now. Please try again in a minute."),
+    notes_ai.CODE_TIMEOUT: (504, "That took too long. Please try again."),
+    notes_ai.CODE_UNAVAILABLE: (503, "The AI is temporarily unavailable. Please try again."),
+    notes_ai.CODE_TOO_SHORT: (422, "This note is too short to create study material from."),
+    notes_ai.CODE_MALFORMED: (502, "Couldn't create valid study material this time. Please try again."),
+    notes_ai.CODE_FAILED: (502, "Couldn't create study material right now. Please try again."),
+}
+
+
+def _notes_ai_http_error(exc: "notes_ai.NotesAIError") -> HTTPException:
+    status_code, detail = _NOTES_AI_ERRORS.get(exc.code, _NOTES_AI_ERRORS[notes_ai.CODE_FAILED])
+    return HTTPException(status_code=status_code, detail=detail)
+
+
+@app.post("/api/notes")
+async def create_note_endpoint(
+    request: Request,
+    user_and_token: Tuple[str, str] = Depends(_rate_limited_notes_write),
+):
+    """
+    Saves an answer as a Pocket Note. IDEMPOTENT on the client-generated
+    `client_id`: a retried or double-clicked save returns the existing note
+    (HTTP 200, created=false) instead of creating a duplicate; a genuinely
+    new note returns HTTP 201, created=true.
+
+    Tags are derived here, deterministically and with no AI call (see
+    notes_engine.derive_tags), from the student's server-side profile and the
+    note text. Saving never depends on any AI operation.
+    """
+    user_id, user_token = user_and_token
+    body = await _read_json_body(request)
+    try:
+        clean = notes_engine.validate_create_payload(body)
+    except notes_engine.NotesValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    try:
+        existing = await get_pocket_note_by_client_id(user_token, user_id, clean["client_id"])
+        if existing is not None:
+            return _notes_json({"note": existing, "created": False})
+
+        if await count_pocket_notes(user_token, user_id) >= notes_engine.MAX_NOTES_PER_USER:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"You have reached the limit of {notes_engine.MAX_NOTES_PER_USER} saved notes. "
+                    "Delete a note to save a new one."
+                ),
+            )
+
+        user_class, stream = await _get_academic_context(user_token, user_id)
+        derived = notes_engine.derive_tags(
+            clean["question_md"], clean["content_md"], user_class, stream
+        )
+        row = await create_pocket_note(
+            user_token, user_id, {**clean, "tags": derived["tags"], "needs_review": derived["needs_review"]}
+        )
+        if row is None:
+            # Lost a race with a concurrent identical save: same logical save,
+            # so return the note that won.
+            existing = await get_pocket_note_by_client_id(user_token, user_id, clean["client_id"])
+            if existing is None:
+                raise DatabaseError("note vanished after duplicate-insert conflict")
+            return _notes_json({"note": existing, "created": False})
+    except DatabaseError:
+        raise _notes_db_error("create_note_endpoint", user_id)
+
+    return _notes_json({"note": row, "created": True}, status_code=201)
+
+
+@app.get("/api/notes")
+async def list_notes_endpoint(
+    limit: Optional[str] = None,
+    offset: Optional[str] = None,
+    user_and_token: Tuple[str, str] = Depends(get_current_user_and_token),
+):
+    """Lists the student's own notes, newest first, with bounded pagination.
+    Out-of-range / garbage limit+offset fall back to safe values (see
+    notes_engine.parse_pagination)."""
+    user_id, user_token = user_and_token
+    page_limit, page_offset = notes_engine.parse_pagination(limit, offset)
+    try:
+        rows, has_more = await list_pocket_notes(user_token, user_id, page_limit, page_offset)
+    except DatabaseError:
+        raise _notes_db_error("list_notes_endpoint", user_id)
+    return _notes_json({"notes": rows, "limit": page_limit, "offset": page_offset, "has_more": has_more})
+
+
+@app.get("/api/notes/{note_id}")
+async def get_note_endpoint(
+    note_id: str,
+    user_and_token: Tuple[str, str] = Depends(get_current_user_and_token),
+):
+    user_id, user_token = user_and_token
+    _require_note_id(note_id)
+    try:
+        note = await get_pocket_note(user_token, user_id, note_id)
+    except DatabaseError:
+        raise _notes_db_error("get_note_endpoint", user_id)
+    if note is None:
+        raise HTTPException(status_code=404, detail=_NOTE_NOT_FOUND)
+    return _notes_json({"note": note})
+
+
+@app.patch("/api/notes/{note_id}")
+async def update_note_tags_endpoint(
+    note_id: str,
+    request: Request,
+    user_and_token: Tuple[str, str] = Depends(_rate_limited_notes_write),
+):
+    """The only user-editable part of a note is its tags. Content is
+    immutable once saved (an edited answer would no longer be Kognit's
+    answer). Provenance is decided server-side - see
+    notes_engine.merge_tag_edits."""
+    user_id, user_token = user_and_token
+    _require_note_id(note_id)
+    body = await _read_json_body(request)
+    try:
+        submitted = notes_engine.validate_tag_edit_payload(body.get("tags"))
+    except notes_engine.NotesValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    try:
+        note = await get_pocket_note(user_token, user_id, note_id)
+        if note is None:
+            raise HTTPException(status_code=404, detail=_NOTE_NOT_FOUND)
+        merged = notes_engine.merge_tag_edits(note.get("tags"), submitted)
+        updated = await update_pocket_note(user_token, user_id, note_id, merged)
+    except DatabaseError:
+        raise _notes_db_error("update_note_tags_endpoint", user_id)
+    if updated is None:
+        raise HTTPException(status_code=404, detail=_NOTE_NOT_FOUND)
+    return _notes_json({"note": updated})
+
+
+@app.delete("/api/notes/{note_id}")
+async def delete_note_endpoint(
+    note_id: str,
+    user_and_token: Tuple[str, str] = Depends(_rate_limited_notes_write),
+):
+    user_id, user_token = user_and_token
+    _require_note_id(note_id)
+    try:
+        deleted = await delete_pocket_note(user_token, user_id, note_id)
+    except DatabaseError:
+        raise _notes_db_error("delete_note_endpoint", user_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=_NOTE_NOT_FOUND)
+    return _notes_json({"deleted": True})
+
+
+async def _load_owned_note_for_ai(user_token: str, user_id: str, note_id: str, op: str) -> dict:
+    _require_note_id(note_id)
+    try:
+        note = await get_pocket_note(user_token, user_id, note_id)
+    except DatabaseError:
+        raise _notes_db_error(op, user_id)
+    if note is None:
+        raise HTTPException(status_code=404, detail=_NOTE_NOT_FOUND)
+    return note
+
+
+@app.post("/api/notes/{note_id}/suggest-tags")
+async def suggest_note_topics_endpoint(
+    note_id: str,
+    user_and_token: Tuple[str, str] = Depends(get_current_user_and_token),
+):
+    """
+    EXPLICIT, on-demand AI topic suggestions (at most 3). Returns suggestions
+    only - nothing is saved until the student accepts one (a PATCH of the
+    tags). Never called automatically on save. Suggestions are the model's
+    reading of this note, NOT official curriculum classifications.
+    """
+    user_id, user_token = user_and_token
+    note = await _load_owned_note_for_ai(user_token, user_id, note_id, "suggest_note_topics_endpoint")
+    _check_rate_limit(user_id, "notes_ai")
+    try:
+        suggestions = await run_in_threadpool(
+            notes_ai.suggest_topics, note["content_md"], note.get("question_md"), note.get("tags")
+        )
+    except notes_ai.NotesAIError as exc:
+        raise _notes_ai_http_error(exc)
+    return _notes_json({"suggestions": suggestions})
+
+
+async def _generate_study_material(
+    *,
+    note_id: str,
+    request: Request,
+    user_and_token: Tuple[str, str],
+    column: str,
+    generator,
+    op: str,
+):
+    user_id, user_token = user_and_token
+    body = await _read_json_body(request, allow_empty=True)
+    regenerate = body.get("regenerate") is True
+
+    note = await _load_owned_note_for_ai(user_token, user_id, note_id, op)
+
+    # PERSISTED: opening a note never regenerates. Stored material is returned
+    # (and costs no rate-limit budget) unless the student explicitly asks to
+    # regenerate.
+    if note.get(column) and not regenerate:
+        return _notes_json({column: note[column], "note": note, "regenerated": False})
+
+    _check_rate_limit(user_id, "notes_ai")
+    try:
+        material = await run_in_threadpool(generator, note["content_md"], note.get("question_md"))
+    except notes_ai.NotesAIError as exc:
+        raise _notes_ai_http_error(exc)
+
+    try:
+        updated = await update_pocket_note(user_token, user_id, note_id, {column: material})
+    except DatabaseError:
+        raise _notes_db_error(op, user_id)
+    if updated is None:
+        raise HTTPException(status_code=404, detail=_NOTE_NOT_FOUND)
+    return _notes_json({column: material, "note": updated, "regenerated": True})
+
+
+@app.post("/api/notes/{note_id}/flashcards")
+async def generate_note_flashcards_endpoint(
+    note_id: str,
+    request: Request,
+    user_and_token: Tuple[str, str] = Depends(get_current_user_and_token),
+):
+    """Flashcards for a note: returns the stored set if one exists, otherwise
+    generates, validates and stores one. Body `{"regenerate": true}` forces a
+    new set (rate limited). AI-generated, not independently verified."""
+    return await _generate_study_material(
+        note_id=note_id, request=request, user_and_token=user_and_token,
+        column="flashcards", generator=notes_ai.generate_flashcards,
+        op="generate_note_flashcards_endpoint",
+    )
+
+
+@app.post("/api/notes/{note_id}/mini-quiz")
+async def generate_note_mini_quiz_endpoint(
+    note_id: str,
+    request: Request,
+    user_and_token: Tuple[str, str] = Depends(get_current_user_and_token),
+):
+    """Mini-quiz for a note (same persist/regenerate rules as flashcards).
+    SELF-GRADED ONLY: scoring happens in the browser and nothing here writes
+    quiz_attempts, mastery or learning evidence."""
+    return await _generate_study_material(
+        note_id=note_id, request=request, user_and_token=user_and_token,
+        column="mini_quiz", generator=notes_ai.generate_mini_quiz,
+        op="generate_note_mini_quiz_endpoint",
+    )
+
+
+@app.get("/sw.js", include_in_schema=False)
+async def service_worker_script():
+    """
+    Serves the offline-reading service worker from the SITE ROOT. A service
+    worker's scope is limited to the path it is served from, so it cannot be
+    served from /static/sw.js and still control "/". `no-cache` makes the
+    browser re-validate it on every navigation so a new version is picked up
+    promptly. See static/sw.js for the (deliberately narrow) cache policy.
+    """
+    sw_path = "static/sw.js"
+    if not os.path.isfile(sw_path):
+        raise HTTPException(status_code=404, detail="Not found.")
+    return FileResponse(
+        sw_path,
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"},
+    )

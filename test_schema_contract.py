@@ -215,10 +215,24 @@ class FakePostgREST:
             elif key not in _RESERVED_PARAMS and key not in cols:
                 return unknown_column(key)
 
+        prefer = request.headers.get("prefer", "")
         if request.method == "GET":
-            return httpx.Response(200, json=self.rows.get(table, []))
+            rows = self.rows.get(table, [])
+            headers = {}
+            if "count=exact" in prefer:
+                headers["content-range"] = f"0-0/{len(rows)}" if rows else "*/0"
+            return httpx.Response(200 if not headers else 206, json=rows, headers=headers)
         if request.method == "DELETE":
+            if "return=representation" in prefer:
+                return httpx.Response(200, json=[{"id": f"{table}-deleted"}])
             return httpx.Response(204)
+        if request.method == "PATCH":
+            # PostgREST answers an update with 200 (not 201) and the updated rows.
+            for key in (body or {}):
+                if key not in cols:
+                    return self._reject(
+                        400, "PGRST204", f"Could not find the '{key}' column of '{table}' in the schema cache")
+            return httpx.Response(200, json=[{"id": f"{table}-patched", **(body or {})}])
 
         # --- writes
         rows = body if isinstance(body, list) else [body]
@@ -446,6 +460,20 @@ def _call_every_database_function():
     run(D.upsert_student_profile(tok, uid, name="Mahfuz", user_class="Class 6-8", stream=None))  # no stream
     save_quiz()
     save_quiz(user_class="Class 6-8", stream=None)
+    # Pocket Notes (0007)
+    note = {"client_id": "n_abcdef123456", "content_md": "answer", "takeaway": None, "question_md": "q",
+            "sources": [], "source_ref": {"projectId": "p", "chatId": "c", "msgIndex": 1},
+            "tags": [{"label": "Physics", "kind": "subject", "origin": "inferred"}], "needs_review": False}
+    nid = "123e4567-e89b-12d3-a456-426614174000"
+    run(D.create_pocket_note(tok, uid, note))
+    run(D.get_pocket_note_by_client_id(tok, uid, "n_abcdef123456"))
+    run(D.count_pocket_notes(tok, uid))
+    run(D.list_pocket_notes(tok, uid, 20, 0))
+    run(D.get_pocket_note(tok, uid, nid))
+    run(D.update_pocket_note(tok, uid, nid, {"tags": [], "needs_review": True}))
+    run(D.update_pocket_note(tok, uid, nid, {"flashcards": [{"front": "a", "back": "b"}]}))
+    run(D.update_pocket_note(tok, uid, nid, {"mini_quiz": []}))
+    run(D.delete_pocket_note(tok, uid, nid))
 
 
 class TestCodeMatchesMigrations:
@@ -459,7 +487,8 @@ class TestCodeMatchesMigrations:
         fake = deploy(monkeypatch)
         _call_every_database_function()
         touched = {t for _, t, _, _ in fake.requests}
-        assert touched == {"quiz_attempts", "quiz_answers", "learning_evidence", "conversation_index", "student_profiles"}
+        assert touched == {"quiz_attempts", "quiz_answers", "learning_evidence", "conversation_index", "student_profiles",
+                           "pocket_notes"}
         assert touched <= set(load_schema())
 
     def test_every_column_written_is_a_migration_column(self, monkeypatch):
@@ -473,7 +502,7 @@ class TestCodeMatchesMigrations:
 
     def test_every_migration_table_with_user_data_has_row_level_security(self):
         assert rls_tables() >= {"quiz_attempts", "quiz_answers", "learning_evidence",
-                                "conversation_index", "student_profiles"}
+                                "conversation_index", "student_profiles", "pocket_notes"}
 
     def test_the_backend_never_uses_a_service_role_key(self):
         source = open(os.path.join(REPO_ROOT, "backend", "database.py"), encoding="utf-8").read()
@@ -591,3 +620,123 @@ class TestVerifySchemaSql:
         sql = _strip_comments(open(VERIFY_SQL_PATH, encoding="utf-8").read()).lower()
         for verb in ("insert ", "update ", "delete ", "drop ", "alter ", "create ", "truncate ", "grant "):
             assert verb not in sql, f"verify_schema.sql must stay read-only (found {verb.strip()!r})"
+
+
+# ===========================================================================
+# 8. Pocket Notes (0007)
+# ===========================================================================
+
+def _migration_sql(number):
+    return _strip_comments(open(os.path.join(MIGRATIONS_DIR, _file_for(number)), encoding="utf-8").read())
+
+
+class TestPocketNotesMigration:
+
+    def test_table_has_exactly_the_columns_the_backend_reads_and_writes(self):
+        cols = load_schema()["pocket_notes"]
+        assert set(cols) == {"id", "user_id", "client_id", "content_md", "takeaway", "question_md", "sources",
+                             "tags", "needs_review", "source_ref", "flashcards", "mini_quiz",
+                             "created_at", "updated_at"}
+        assert set(database.POCKET_NOTE_COLUMNS.split(",")) == set(cols) - {"user_id"}
+
+    def test_required_columns_are_not_null_and_optional_ones_are_nullable(self):
+        cols = load_schema()["pocket_notes"]
+        for name in ("user_id", "client_id", "content_md"):
+            assert cols[name]["nullable"] is False and cols[name]["default"] is False, name
+        for name in ("takeaway", "question_md", "source_ref", "flashcards", "mini_quiz"):
+            assert cols[name]["nullable"] is True, name
+
+    def test_migration_is_purely_additive_and_touches_only_pocket_notes(self):
+        sql = _migration_sql(7).lower()
+        assert set(re.findall(r"alter table (?:public\.)?(\w+)", sql)) == {"pocket_notes"}
+        assert not re.search(r"drop\s+table|truncate|delete\s+from|update\s+public\.|drop\s+column", sql)
+        for other in ("user_projects", "quiz_attempts", "quiz_answers", "learning_evidence",
+                      "conversation_index", "student_profiles"):
+            assert other not in sql, f"0007 must not reference {other}"
+
+    def test_rls_enabled_with_one_owner_only_policy_per_operation(self):
+        sql = _migration_sql(7).lower()
+        assert "alter table public.pocket_notes enable row level security" in sql
+        policies = re.findall(r"create policy \"(\w+)\"\s+on public\.pocket_notes for (\w+)(.*?);", sql, re.S)
+        assert {op for _, op, _ in policies} == {"select", "insert", "update", "delete"}
+        for name, op, body in policies:
+            assert "auth.uid() = user_id" in body, f"{name} must scope to the owner"
+        update_body = next(b for _, op, b in policies if op == "update")
+        assert "with check (auth.uid() = user_id)" in update_body, "an UPDATE must not be able to reassign ownership"
+
+    def test_ownership_cascades_with_the_auth_user_and_ids_are_uuids(self):
+        sql = _migration_sql(7).lower()
+        assert re.search(r"user_id\s+uuid not null references auth\.users\(id\) on delete cascade", sql)
+        assert re.search(r"\bid\s+uuid primary key default gen_random_uuid\(\)", sql)
+
+    def test_unique_constraint_matches_the_backends_on_conflict_target(self):
+        sql = re.sub(r"\s+", " ", _migration_sql(7).lower())
+        assert "unique (user_id, client_id)" in sql
+        source = open(os.path.join(REPO_ROOT, "backend", "database.py"), encoding="utf-8").read()
+        assert '"on_conflict": "user_id,client_id"' in source
+
+    def test_sql_check_limits_equal_the_python_limits(self):
+        from backend import notes_engine as ne
+        sql = re.sub(r"\s+", " ", _migration_sql(7).lower())
+        assert f"char_length(content_md) between 1 and {ne.MAX_NOTE_CONTENT_CHARS}" in sql
+        assert f"char_length(takeaway) <= {ne.MAX_TAKEAWAY_CHARS}" in sql
+        assert f"char_length(question_md) <= {ne.MAX_QUESTION_CHARS}" in sql
+        assert f"jsonb_array_length(tags) <= {ne.MAX_TAGS}" in sql
+        assert f"jsonb_array_length(sources) <= {ne.MAX_SOURCES}" in sql
+        assert f"jsonb_array_length(flashcards) <= {ne.MAX_FLASHCARDS}" in sql
+        assert f"jsonb_array_length(mini_quiz) <= {ne.MAX_QUIZ_QUESTIONS}" in sql
+        assert f"char_length(flashcards::text) <= {ne.MAX_GENERATED_JSON_CHARS}" in sql
+        assert f"char_length(mini_quiz::text) <= {ne.MAX_GENERATED_JSON_CHARS}" in sql
+        assert re.search(r"client_id ~ '\^\[a-za-z0-9_-\]\{8,64\}\$'", sql, re.I), "client_id format check"
+        assert ne.CLIENT_ID_PATTERN.pattern == "^[A-Za-z0-9_-]{8,64}$"
+
+    def test_updated_at_trigger_exists(self):
+        sql = _migration_sql(7).lower()
+        assert "before update on public.pocket_notes" in sql and "set_pocket_notes_updated_at" in sql
+
+    def test_rollback_is_documented_but_not_executable(self):
+        raw = open(os.path.join(MIGRATIONS_DIR, _file_for(7)), encoding="utf-8").read().lower()
+        assert "drop table if exists public.pocket_notes" in raw          # documented in a comment...
+        assert "drop table" not in _migration_sql(7).lower()             # ...never in executable SQL
+
+    def test_every_pocket_notes_query_filters_by_the_verified_user_id(self, monkeypatch):
+        fake = deploy(monkeypatch)
+        _call_every_database_function()
+        for method, table, params, body in fake.requests:
+            if table != "pocket_notes" or method == "POST":
+                continue
+            assert ("user_id", "eq.user-1") in params, (method, params)
+
+    def test_create_always_stamps_user_id_from_the_verified_identity(self, monkeypatch):
+        fake = deploy(monkeypatch)
+        asyncio.run(database.create_pocket_note("t", "user-1", {"client_id": "n_abcdef123456", "content_md": "x", "user_id": "ATTACKER"}))
+        (_, _, _, body), = [r for r in fake.requests if r[1] == "pocket_notes"]
+        assert body["user_id"] == "user-1"
+
+    def test_pocket_notes_never_touch_learning_or_quiz_tables(self, monkeypatch):
+        fake = deploy(monkeypatch)
+        before = len(fake.requests)
+        nid = "123e4567-e89b-12d3-a456-426614174000"
+        asyncio.run(database.update_pocket_note("t", "user-1", nid, {"mini_quiz": []}))
+        asyncio.run(database.delete_pocket_note("t", "user-1", nid))
+        assert {t for _, t, _, _ in fake.requests[before:]} == {"pocket_notes"}
+
+    def test_database_without_0007_fails_safely_with_a_controlled_error(self, monkeypatch):
+        fake = deploy(monkeypatch, apply={1, 2, 3, 4, 5, 6})
+        with pytest.raises(DatabaseError):
+            asyncio.run(database.list_pocket_notes("t", "user-1", 20, 0))
+        assert fake.rejections[0]["code"] == "PGRST205"
+
+    def test_endpoint_without_0007_returns_a_generic_502_not_a_crash(self, monkeypatch):
+        deploy(monkeypatch, apply={1, 2, 3, 4, 5, 6})
+
+        async def fake_auth():
+            return ("user-1", "student-token")
+
+        main_module.app.dependency_overrides[main_module.get_current_user_and_token] = fake_auth
+        try:
+            resp = TestClient(main_module.app).get("/api/notes")
+        finally:
+            main_module.app.dependency_overrides.clear()
+        assert resp.status_code == 502
+        assert "pocket_notes" not in resp.text and "PGRST" not in resp.text

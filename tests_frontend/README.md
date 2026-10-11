@@ -1,6 +1,6 @@
 # Kognit frontend tests (Phase 8 & 9)
 
-Behaviour tests for Kognit's frontend interaction layer. All four suites
+Behaviour tests for Kognit's frontend interaction layer. All six suites
 load the **real** `templates/index.html` and the **real** source files
 into jsdom — there is no rebuilt fixture markup, so if the template or a
 source file drifts from what these expect, they fail.
@@ -9,12 +9,15 @@ source file drifts from what these expect, they fail.
 
 ```bash
 cd tests_frontend
-npm install      # installs jsdom only; no build step, no bundler
-npm test         # runs all four suites
+npm install      # installs jsdom, marked, mathjax and fake-indexeddb (test-only); no build step, no bundler
+npm test         # runs all six suites
 ```
 
-Expected: `38 passed` (ui-core) + `39 passed` (stream-render) +
-`14 passed` (theme) + `29 passed` (nav-views) = **120 passed, 0 failed**.
+Expected (counts at the time Pocket Notes was added): `38 passed` (ui-core) +
+`57 passed` (stream-render) + `14 passed` (theme) + `33 passed` (nav-views) +
+`62 passed` (security-hardening) + `84 passed` (notes) = **288 passed, 0 failed**.
+The older "120" figure that used to be printed here pre-dates the P1 hardening
+suites and is no longer accurate.
 
 ## What each suite covers
 
@@ -46,9 +49,33 @@ don't have it, that the learning-profile trigger and theme toggle stay
 reachable from every tab, mobile-drawer integration, and an explicit XSS
 test proving project titles are escaped before reaching `innerHTML`.
 
+`test_notes.mjs` (Pocket Notes) — unlike the suites above this one boots the
+**real** `app.js`, `notes-store.js`, `notes.js` and `nav-views.js` together,
+with the real vendored DOMPurify and the real `marked`. Only Supabase, `fetch`
+(an in-memory notes API that mirrors `backend/main.py`) and IndexedDB
+(`fake-indexeddb`, a test-only dev dependency) are stubbed. It covers: the Save
+button (completed answers only, duplicate-save prevention, retry reusing the same
+idempotency key, offline/auth/error states), the notes view (search, tag filter,
+safe Markdown + XSS, plain-text fallback, tag editing, delete, error/empty/loading
+states, accessibility semantics), flashcards and the self-graded mini-quiz
+(including that grading sends no request and never touches the quiz endpoints),
+the IndexedDB cache (per-user scoping, server-wins refresh, stale-entry removal,
+sign-out wipe, quota/unavailable storage, partial listings never replacing the
+cache), offline reading and the honesty of the "available offline" claim, template
+wiring (pinned supabase-js, script order, precache list vs real files), and the
+service worker's *logic* run in isolation against a fake Cache Storage (install
+all-or-nothing, cache policy, never intercepting `/api/*`, versioned cleanup).
+Waiting is settle-based (no in-flight request and a quiet DOM) rather than fixed
+sleeps, so the suite does not depend on machine speed.
+
+**What `test_notes.mjs` cannot prove:** real-browser service-worker behaviour
+(registration, scope, cold-start offline, update flow, Supabase session refresh
+while offline). Those need a real browser; see the manual steps in the Pocket
+Notes delivery notes.
+
 ## What is NOT covered
 
-`app.js` itself is stubbed in all four suites (it needs a live Supabase
+`app.js` itself is stubbed in the first four suites (it needs a live Supabase
 session and Gemini key to boot) — each suite provides fakes matching the
 exact function signatures app.js actually exposes, and asserts on the
 *delegation* (e.g. that confirming logout calls `handleLogout` exactly

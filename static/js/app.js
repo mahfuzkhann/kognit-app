@@ -1658,6 +1658,16 @@ function buildBotToolbar(rawText, meta) {
     }
     toolbar.appendChild(regenBtn);
 
+    // POCKET NOTES: "Save to Pocket Notes". Built by static/js/notes.js, which
+    // returns null for an interrupted/partial answer or one with no stable
+    // message reference, so Save only ever appears on a completed answer.
+    // Optional on purpose: if notes.js is missing/failed to load, the rest of
+    // the toolbar is unaffected.
+    if (window.KognitNotes && typeof window.KognitNotes.buildSaveButton === "function") {
+        const saveBtn = window.KognitNotes.buildSaveButton(meta);
+        if (saveBtn) toolbar.appendChild(saveBtn);
+    }
+
     return toolbar;
 }
 
@@ -2449,7 +2459,8 @@ function loadChat(projId, chatId) {
                     msgIndex: index,
                     feedback: msg.feedback || null,
                     research: msg.research || null,
-                    takeaway: msg.takeaway || null
+                    takeaway: msg.takeaway || null,
+                    interrupted: msg.interrupted === true
                 }));
             }
         });
@@ -3718,7 +3729,14 @@ window.sendMessage = async function() {
         // variable this fix already touches, not a separate refactor.
         let newBotMsgIndex = null;
         if (targetChat && !streamFailed) {
-            targetChat.messages.push({ role: "bot", text: replyText, research: data.research || null, takeaway: takeawayText });
+            // POCKET NOTES: an interrupted/partial answer is remembered as such
+            // (only ever added when true) so that after a reload it still
+            // shows the interrupted notice and is NOT offered "Save to Pocket
+            // Notes" as if it were a complete answer. Completed answers are
+            // stored exactly as before - no new field.
+            const botMsgRecord = { role: "bot", text: replyText, research: data.research || null, takeaway: takeawayText };
+            if (isPartialAnswer) botMsgRecord.interrupted = true;
+            targetChat.messages.push(botMsgRecord);
             newBotMsgIndex = targetChat.messages.length - 1;
             saveProjectsToStorage();
 
