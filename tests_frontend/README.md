@@ -1,6 +1,6 @@
 # Kognit frontend tests (Phase 8 & 9)
 
-Behaviour tests for Kognit's frontend interaction layer. All six suites
+Behaviour tests for Kognit's frontend interaction layer. All seven suites
 load the **real** `templates/index.html` and the **real** source files
 into jsdom — there is no rebuilt fixture markup, so if the template or a
 source file drifts from what these expect, they fail.
@@ -9,15 +9,18 @@ source file drifts from what these expect, they fail.
 
 ```bash
 cd tests_frontend
-npm install      # installs jsdom, marked, mathjax and fake-indexeddb (test-only); no build step, no bundler
-npm test         # runs all six suites
+npm install      # installs jsdom, marked, mathjax, fake-indexeddb and puppeteer-core (test-only); no build step, no bundler,
+                 # and NO browser download (puppeteer-core drives a browser you already have)
+npm test         # runs all seven suites (the real-browser one prints SKIPPED if no Chrome/Edge is found)
+npm run test:jsdom    # the six jsdom suites only
+npm run test:browser  # the real-browser Pocket Notes test only
 ```
 
-Expected (counts at the time Pocket Notes was added): `38 passed` (ui-core) +
-`57 passed` (stream-render) + `14 passed` (theme) + `33 passed` (nav-views) +
-`62 passed` (security-hardening) + `84 passed` (notes) = **288 passed, 0 failed**.
-The older "120" figure that used to be printed here pre-dates the P1 hardening
-suites and is no longer accurate.
+Expected: `38 passed` (ui-core) + `57 passed` (stream-render) + `14 passed` (theme) +
+`33 passed` (nav-views) + `62 passed` (security-hardening) + `91 passed` (notes, jsdom) +
+`10 passed` (notes-browser, real Chrome) = **305 passed, 0 failed**. Without a browser the last
+suite prints `SKIPPED` and the total is 295. The older "120" figure that used to be printed here
+pre-dates the P1 hardening suites and is no longer accurate.
 
 ## What each suite covers
 
@@ -68,10 +71,26 @@ all-or-nothing, cache policy, never intercepting `/api/*`, versioned cleanup).
 Waiting is settle-based (no in-flight request and a quiet DOM) rather than fixed
 sleeps, so the suite does not depend on machine speed.
 
-**What `test_notes.mjs` cannot prove:** real-browser service-worker behaviour
+**What neither Pocket Notes suite proves:** real-browser *service-worker* behaviour
 (registration, scope, cold-start offline, update flow, Supabase session refresh
-while offline). Those need a real browser; see the manual steps in the Pocket
-Notes delivery notes.
+while offline). `test_notes_browser.mjs` deliberately bypasses the service worker; see
+the manual steps in the Pocket Notes delivery notes.
+
+`test_notes_browser.mjs` (Pocket Notes, REAL BROWSER) - jsdom has no layout engine, so it cannot
+see a rendering bug like "giant white glyphs". This suite drives a real Chrome/Chromium/Edge
+(puppeteer-core) against the real `index.html`, `app.js`, `notes.js` and the real MathJax `tex-svg`
+and `marked` bundles from `node_modules` (no network needed); only Supabase and the notes API are
+faked. It pins the root cause of the flashcard / mini-quiz bug: MathJax MEASURES the element it
+typesets, so typesetting a detached or `display:none` element yields
+`<svg width="NaNex" height="NaNex">`, which the browser stretches to its container (enormous
+shapes). The suite asserts, with real layout: no NaN sizes, math is text-sized, options stay inside
+their question box, no horizontal overflow at desktop and 390px widths, Bangla + math + very long
+tokens, keyboard selection keeps focus, quiz clicks never rebuild the note body, regenerate/reopen
+never duplicates components or handlers, a re-render while the Notes tab is hidden leaves no NaN
+math, and generated HTML is shown as literal text. Browser discovery: set `CHROME_PATH` to a
+Chrome/Chromium/Edge executable (Windows/macOS/Linux install locations are tried automatically);
+optional `CHROME_ARGS` adds launch flags. No browser found => it prints SKIPPED and exits 0
+(loudly, never as a silent pass).
 
 ## What is NOT covered
 

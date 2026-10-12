@@ -168,7 +168,20 @@ async function boot(opts = {}) {
     w.eval(MARKED_SRC);
     // MathJax itself is exercised by test_security_hardening.mjs; here it is a no-op so app.js's
     // bounded "wait for MathJax" poll does not spam the log.
-    w.MathJax = Object.assign(w.MathJax || {}, { typesetPromise: async () => {}, startup: { promise: Promise.resolve() } });
+    // jsdom has no layout engine. Stub the one layout fact notes.js depends on (an element is "laid out" when it is
+    // attached and has no .hidden ancestor) and RECORD every element MathJax is asked to typeset, so the tests can
+    // assert the root-cause rule: MathJax measures what it typesets, so it must never get a detached/hidden node.
+    const typesetCalls = [];
+    w.Element.prototype.getClientRects = function () {
+        if (!this.isConnected) return [];
+        for (let n = this; n; n = n.parentElement) if (n.classList && n.classList.contains("hidden")) return [];
+        return [{}];
+    };
+    w.MathJax = Object.assign(w.MathJax || {}, {
+        typesetPromise: async (els) => { (els || []).forEach((e) => typesetCalls.push({ connected: e.isConnected, laidOut: e.getClientRects().length > 0, cls: e.className || e.id || e.tagName })); },
+        typesetClear: () => {},
+        startup: { promise: Promise.resolve() },
+    });
     if (opts.beforeScripts) opts.beforeScripts(w);
     const add = (src) => { const s = w.document.createElement("script"); s.textContent = src; w.document.body.appendChild(s); };
     add(SRC.stream); add(SRC.purify); add(SRC.app);
@@ -182,7 +195,7 @@ async function boot(opts = {}) {
     activeDom = tracker;
     w.document.dispatchEvent(new w.Event("DOMContentLoaded"));
     await sleep(40);
-    return { w, doc: w.document, env, server, dom };
+    return { w, doc: w.document, env, server, dom, typesetCalls };
 }
 
 function seedProject(w, messages) {
@@ -719,6 +732,115 @@ await check("leaving a note clears study state (no stale quiz carried to another
     click(h.w, buttonByText(h.doc, "\u2190 All notes"));
     click(h.w, noteCards(h.doc)[1]); await sleep(30);
     assert(!h.doc.querySelector(".notes-flash"), "flashcards must not leak across notes");
+});
+
+/* =============================================================
+   PART C2 - typesetting rules (root cause of the giant-glyph bug)
+   -------------------------------------------------------------
+   MathJax MEASURES the element it typesets. Typeset a detached or
+   display:none element and it emits <svg width="NaNex" ...>, which
+   renders as enormous shapes. These tests pin the rules that prevent
+   it; test_notes_browser.mjs proves the visual result in a real browser.
+   ============================================================= */
+console.log("\nC2. Typesetting rules");
+await check("MathJax is never asked to typeset a detached or hidden element (flashcards, quiz, every interaction)", async () => {
+    const h = await boot(); h.server.add({ content_md: "Body $x$" });
+    await openFirstNote(h);
+    click(h.w, buttonByText(h.doc, "Create flashcards")); await sleep(40);
+    click(h.w, buttonByText(h.doc, "Show answer")); click(h.w, buttonByText(h.doc, "Next")); await sleep(20);
+    click(h.w, buttonByText(h.doc, "Create mini-quiz")); await sleep(40);
+    pick(h, 0, 0); pick(h, 1, 1); click(h.w, buttonByText(h.doc, "Check answers")); await sleep(20);
+    assert(h.typesetCalls.length > 0, "nothing was typeset");
+    const bad = h.typesetCalls.filter((c) => !c.connected || !c.laidOut);
+    eq(bad.length, 0, "typeset requested for detached/hidden element(s): " + JSON.stringify(bad.slice(0, 3)));
+});
+
+await check("a quiz/flashcard click re-renders ONLY the study section: the note body node survives and is not re-typeset", async () => {
+    const h = await boot(); h.server.add({ content_md: "Body $x$" });
+    await openFirstNote(h);
+    click(h.w, buttonByText(h.doc, "Create mini-quiz")); await sleep(40);
+    const body = h.doc.querySelector(".notes-body");
+    const study = h.doc.querySelector(".notes-study");
+    h.typesetCalls.length = 0;
+    pick(h, 0, 2); await sleep(20);
+    assert(h.doc.querySelector(".notes-body") === body, "note body must be the SAME node (not rebuilt)");
+    assert(h.doc.querySelector(".notes-study") !== study, "the study section is what gets replaced");
+    eq(h.typesetCalls.length, 1, "exactly one typeset call per click");
+    assert(/notes-study/.test(h.typesetCalls[0].cls), "and it targets the study section only, not the whole pane");
+    h.typesetCalls.length = 0;
+    click(h.w, buttonByText(h.doc, "Check answers")); await sleep(20);
+    assert(!h.typesetCalls.some((c) => /notes-body|notes-detail-pane/.test(c.cls)), "never re-typeset the note body");
+});
+
+await check("keyboard focus stays on the same control after a click re-renders the study section", async () => {
+    const h = await boot(); h.server.add({ content_md: "Body" });
+    await openFirstNote(h);
+    click(h.w, buttonByText(h.doc, "Create mini-quiz")); await sleep(40);
+    const opt = h.doc.querySelector('[data-fk="q1o2"]'); opt.focus();
+    click(h.w, opt); await sleep(20);
+    eq(h.doc.activeElement.dataset.fk, "q1o2", "focus must not drop to <body> after choosing an answer");
+    eq(h.doc.activeElement.getAttribute("aria-checked"), "true");
+
+    click(h.w, buttonByText(h.doc, "Create flashcards")); await sleep(40);
+    const reveal = h.doc.querySelector('[data-fk="reveal"]'); reveal.focus();
+    click(h.w, reveal); await sleep(20);
+    eq(h.doc.activeElement.dataset.fk, "reveal");
+    // Next on the last card disables itself; focus must fall back to an enabled control, not vanish.
+    h.doc.querySelector('[data-fk="next"]').focus(); click(h.w, h.doc.querySelector('[data-fk="next"]')); await sleep(10);
+    h.doc.querySelector('[data-fk="next"]').focus(); click(h.w, h.doc.querySelector('[data-fk="next"]')); await sleep(10);
+    assert(h.doc.querySelector('[data-fk="next"]').disabled, "last card reached");
+    assert(h.doc.activeElement && h.doc.activeElement.tagName === "BUTTON", "focus fell back to a button");
+});
+
+await check("one click = one step: no duplicate handlers after regenerate or after reopening the note", async () => {
+    const h = await boot(); h.server.add({ content_md: "Body" });
+    await openFirstNote(h);
+    click(h.w, buttonByText(h.doc, "Create flashcards")); await sleep(40);
+    click(h.w, buttonByText(h.doc, "Regenerate flashcards")); await sleep(40);
+    eq(h.doc.querySelectorAll(".notes-flash").length, 1, "one flashcard component");
+    click(h.w, buttonByText(h.doc, "Next")); await sleep(10);
+    eq(h.doc.querySelector(".notes-flash-count").textContent, "Card 2 of 3");
+    click(h.w, buttonByText(h.doc, "\u2190 All notes")); click(h.w, noteCards(h.doc)[0]); await sleep(30);
+    click(h.w, buttonByText(h.doc, "Open flashcards")); await sleep(20);
+    eq(h.doc.querySelectorAll(".notes-flash").length, 1);
+    click(h.w, buttonByText(h.doc, "Next")); await sleep(10);
+    eq(h.doc.querySelector(".notes-flash-count").textContent, "Card 2 of 3", "reopened note: Next advances exactly one card");
+    eq(h.doc.querySelectorAll(".notes-quiz").length, 0);
+});
+
+await check("a render while the Notes view is HIDDEN typesets nothing; showing the tab typesets the visible pane once", async () => {
+    const h = await boot(); h.server.add({ content_md: "Body $x$" });
+    await openFirstNote(h);
+    click(h.w, h.doc.getElementById("nav-tab-chat")); await sleep(20);          // Notes view is now .hidden
+    h.typesetCalls.length = 0;
+    h.w.dispatchEvent(new h.w.Event("online")); await sleep(60);                // background reload re-renders the pane
+    eq(h.typesetCalls.length, 0, "must not typeset while hidden (MathJax would measure NaN)");
+    click(h.w, h.doc.getElementById("nav-tab-notes")); await sleep(80);
+    assert(h.typesetCalls.length >= 1, "typeset after the view became visible");
+    assert(h.typesetCalls.every((c) => c.connected && c.laidOut), "and only on a visible, attached element");
+});
+
+await check("the render helpers return UNATTACHED elements and never typeset them themselves (source-level guard)", () => {
+    const src = read("static/js/notes.js");
+    const calls = [...src.matchAll(/\btypeset\(([^)]*)\)/g)].map((m) => m[1]);
+    assert(!/function renderFlashcards[\s\S]*?typeset\(wrap\)[\s\S]*?\n    function renderQuiz/.test(src), "renderFlashcards must not typeset its own detached wrapper");
+    assert(!/function renderQuiz[\s\S]*?typeset\(wrap\)[\s\S]*?\n    \/\/ -{10,}/.test(src), "renderQuiz must not typeset its own detached wrapper");
+    assert(calls.filter((c) => c === "wrap").length === 0, "no typeset(wrap) anywhere");
+});
+
+await check("generated Bangla + math + long content is inserted as TEXT (no HTML), long options carry wrapping CSS", async () => {
+    const h = await boot();
+    const note = h.server.add({ content_md: "Body" });
+    h.server.flash = [{ front: "<img src=x onerror=\"window.__pwned=1\"> \u09AC\u09BE\u0982\u09B2\u09BE $x^2$", back: "b".repeat(500) }, { front: "f2", back: "b2" }, { front: "f3", back: "b3" }];
+    await openFirstNote(h);
+    click(h.w, buttonByText(h.doc, "Create flashcards")); await sleep(40);
+    assert(!h.doc.querySelector(".notes-flash img"), "no element created from generated text");
+    assert(h.doc.querySelector(".notes-flash-text").textContent.includes("<img src=x"), "shown literally");
+    assert(!h.w.__pwned);
+    const css = read("static/css/notes.css");
+    for (const needle of [/\.notes-quiz-q \{[^}]*min-width: 0/, /\.notes-quiz-opt \{[^}]*white-space: normal/, /\.notes-study mjx-container \{[^}]*max-width: 100%/]) {
+        assert(needle.test(css), "missing containment rule " + needle);
+    }
 });
 
 /* =============================================================

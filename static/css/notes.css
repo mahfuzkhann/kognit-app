@@ -457,10 +457,21 @@
     gap: var(--space-md);
 }
 
+/* A <legend> sits ON the fieldset border and does not wrap like normal text
+   (a long, multi-line question would be struck through by the border). Float
+   it to full width so it behaves as an ordinary block INSIDE the box, while
+   keeping the fieldset/legend semantics for assistive technology. */
 .notes-quiz-legend {
+    float: left;
+    width: 100%;
+    padding: 0;
+    margin: 0 0 var(--space-md);
     font-weight: var(--font-weight-semibold);
-    padding: 0 var(--space-sm);
     overflow-wrap: anywhere;
+}
+
+.notes-quiz-legend + .notes-quiz-options {
+    clear: both;
 }
 
 .notes-quiz-options {
@@ -508,6 +519,44 @@
 .notes-quiz-feedback {
     font-size: var(--font-size-sm);
     color: var(--color-text-secondary);
+    overflow-wrap: anywhere;
+}
+
+/* ---- long content / formulas stay inside their component ---------
+   A <fieldset> defaults to min-inline-size: min-content, so one long
+   unbreakable token would otherwise widen the whole quiz question past
+   its container. Buttons default to nowrap-ish text handling too. */
+.notes-quiz-q {
+    min-width: 0;
+}
+
+.notes-quiz-opt {
+    width: 100%;
+    min-width: 0;
+    white-space: normal;
+    word-break: normal;
+}
+
+.notes-flash-text,
+.notes-flash-card,
+.notes-quiz-legend,
+.notes-quiz-opt,
+.notes-quiz-feedback {
+    min-width: 0;
+    max-width: 100%;
+}
+
+/* A formula wider than its card/option scrolls INSIDE it instead of
+   stretching the page (display math is block-level; inline math is an
+   inline-block that may not wrap). */
+.notes-study mjx-container {
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+}
+
+.notes-study mjx-container[display="true"] {
+    margin: var(--space-md) 0;
 }
 
 .notes-quiz-feedback.right { color: var(--color-success); }

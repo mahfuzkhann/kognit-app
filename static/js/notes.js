@@ -676,8 +676,38 @@
         return true;
     }
 
+    // True only when the element is attached to the document AND actually
+    // laid out (no display:none ancestor).
+    function isLaidOut(node) {
+        return !!node && node.isConnected && node.getClientRects().length > 0;
+    }
+
+    // MathJax MEASURES the element it typesets (the ex/em size and the width
+    // of the container). A DETACHED or display:none element has no layout, so
+    // the measurement is NaN and MathJax emits <svg width="NaNex" height="NaNex"
+    // viewBox="0 -764.8 NaN NaN">. An SVG with an invalid size falls back to
+    // filling its container and scales its 1000-unit glyph paths to match -
+    // the giant white shapes seen in the flashcards and mini-quiz (verified in
+    // real Chromium: the same math typeset detached gives NaNex and a
+    // 1280x150 SVG, typeset after attaching gives a normal 50x24 one).
+    //
+    // So: typeset ONLY elements that are attached and visible, and only AFTER
+    // the surrounding DOM has been built (never inside a render helper that
+    // returns a not-yet-attached element). If the element is not laid out
+    // (e.g. the Notes tab is hidden), skip: onShow() re-renders from scratch
+    // when the tab becomes visible, and that render typesets then.
     function typeset(node) {
-        if (typeof typesetMathJax === "function") { try { typesetMathJax([node]); } catch (e) { /* math stays as text */ } }
+        if (typeof typesetMathJax !== "function") return;
+        if (!isLaidOut(node)) return;
+        try { typesetMathJax([node]); } catch (e) { /* math stays as text */ }
+    }
+
+    // Drop MathJax's bookkeeping for an element we are about to replace, so
+    // repeated re-renders do not accumulate stale math items.
+    function clearTypeset(node) {
+        try {
+            if (window.MathJax && typeof window.MathJax.typesetClear === "function") window.MathJax.typesetClear([node]);
+        } catch (e) { /* nothing to clear */ }
     }
 
     function actionButton(label, onClick, options) {
@@ -733,7 +763,6 @@
             pane.appendChild(take);
         }
         pane.appendChild(renderSources(note));
-        typeset(pane);
 
         // ---- study tools ----
         pane.appendChild(renderStudySection(note));
@@ -749,6 +778,9 @@
         }
         actions.appendChild(actionButton("Delete note", function () { deleteNote(note); }, { danger: true, needsNetwork: true }));
         pane.appendChild(actions);
+
+        // The whole pane is built and attached: typeset it ONCE, here.
+        typeset(pane);
     }
 
     function sourceChatExists(ref) {
@@ -974,7 +1006,30 @@
         study.error = null;
         if (kind === "flashcards") { study.cards = note.flashcards; study.index = 0; study.revealed = false; study.mode = "flashcards"; }
         else { study.questions = note.mini_quiz; study.answers = new Array(note.mini_quiz.length).fill(null); study.submitted = false; study.mode = "quiz"; }
-        render();
+        refreshStudy();
+    }
+
+    // Re-render ONLY the study section (flashcard flip/next, quiz selection...).
+    // Rebuilding the whole pane for every click would re-create and re-typeset
+    // the note body each time (flicker + wasted work) and drop keyboard focus.
+    function refreshStudy() {
+        var note = state.selectedId ? findNote(state.selectedId) : null;
+        var old = shell && shell.detailPane.querySelector(".notes-study");
+        if (!note || !old) { render(); return; }
+
+        var active = document.activeElement;
+        var focusKey = active && active.dataset ? active.dataset.fk : null;
+
+        var fresh = renderStudySection(note);
+        clearTypeset(old);
+        old.replaceWith(fresh);
+        typeset(fresh);               // fresh is attached now
+
+        if (focusKey) {
+            var target = fresh.querySelector('[data-fk="' + focusKey + '"]');
+            if (!target || target.disabled) target = fresh.querySelector(".notes-flash-controls .notes-btn-primary, .notes-quiz > .notes-btn-primary");
+            if (target) target.focus();
+        }
     }
 
     function renderStudySection(note) {
@@ -986,12 +1041,16 @@
         var hasCards = Array.isArray(note.flashcards) && note.flashcards.length > 0;
         var hasQuiz = Array.isArray(note.mini_quiz) && note.mini_quiz.length > 0;
 
-        row.appendChild(actionButton(hasCards ? "Open flashcards" : "Create flashcards",
+        var flashBtn = actionButton(hasCards ? "Open flashcards" : "Create flashcards",
             function () { hasCards ? openStored(note, "flashcards") : generate(note, "flashcards", false); },
-            { needsNetwork: !hasCards }));
-        row.appendChild(actionButton(hasQuiz ? "Open mini-quiz" : "Create mini-quiz",
+            { needsNetwork: !hasCards });
+        flashBtn.dataset.fk = "flash-entry";
+        var quizBtn = actionButton(hasQuiz ? "Open mini-quiz" : "Create mini-quiz",
             function () { hasQuiz ? openStored(note, "quiz") : generate(note, "quiz", false); },
-            { needsNetwork: !hasQuiz }));
+            { needsNetwork: !hasQuiz });
+        quizBtn.dataset.fk = "quiz-entry";
+        row.appendChild(flashBtn);
+        row.appendChild(quizBtn);
         section.appendChild(row);
 
         section.appendChild(el("p", "notes-hint", "Study material is AI-generated from this note. It isn't independently verified, and quiz results are not added to your progress."));
@@ -1026,19 +1085,21 @@
         var prev = el("button", "notes-btn", "Previous");
         prev.type = "button";
         prev.disabled = study.index === 0;
-        prev.addEventListener("click", function () { study.index--; study.revealed = false; render(); });
+        prev.dataset.fk = "prev";
+        prev.addEventListener("click", function () { study.index--; study.revealed = false; refreshStudy(); });
         var reveal = el("button", "notes-btn notes-btn-primary", study.revealed ? "Hide answer" : "Show answer");
         reveal.type = "button";
-        reveal.addEventListener("click", function () { study.revealed = !study.revealed; render(); });
+        reveal.dataset.fk = "reveal";
+        reveal.addEventListener("click", function () { study.revealed = !study.revealed; refreshStudy(); });
         var next = el("button", "notes-btn", "Next");
         next.type = "button";
         next.disabled = study.index === cards.length - 1;
-        next.addEventListener("click", function () { study.index++; study.revealed = false; render(); });
+        next.dataset.fk = "next";
+        next.addEventListener("click", function () { study.index++; study.revealed = false; refreshStudy(); });
         controls.appendChild(prev); controls.appendChild(reveal); controls.appendChild(next);
         wrap.appendChild(controls);
 
         wrap.appendChild(actionButton("Regenerate flashcards", function () { generate(note, "flashcards", true); }, { needsNetwork: true }));
-        typeset(wrap);
         return wrap;
     }
 
@@ -1064,7 +1125,8 @@
                     if (oi === q.correct_index) btn.classList.add("correct");
                     else if (chosen) btn.classList.add("wrong");
                 }
-                btn.addEventListener("click", function () { study.answers[qi] = oi; render(); });
+                btn.dataset.fk = "q" + qi + "o" + oi;
+                btn.addEventListener("click", function () { study.answers[qi] = oi; refreshStudy(); });
                 group.appendChild(btn);
             });
             item.appendChild(group);
@@ -1083,7 +1145,8 @@
             submit.type = "button";
             submit.disabled = !answered;
             if (!answered) submit.title = "Answer every question first";
-            submit.addEventListener("click", function () { study.submitted = true; render(); });
+            submit.dataset.fk = "check";
+            submit.addEventListener("click", function () { study.submitted = true; refreshStudy(); });
             wrap.appendChild(submit);
         } else {
             var score = 0;
@@ -1097,7 +1160,7 @@
                 var practice = el("button", "notes-btn notes-btn-primary", "Practise the " + missed.length + " you missed");
                 practice.type = "button";
                 practice.addEventListener("click", function () {
-                    study.questions = missed; study.answers = new Array(missed.length).fill(null); study.submitted = false; study.practice = true; render();
+                    study.questions = missed; study.answers = new Array(missed.length).fill(null); study.submitted = false; study.practice = true; refreshStudy();
                 });
                 row.appendChild(practice);
             }
@@ -1108,7 +1171,6 @@
             row.appendChild(actionButton("Regenerate mini-quiz", function () { generate(note, "quiz", true); }, { needsNetwork: true }));
             wrap.appendChild(row);
         }
-        typeset(wrap);
         return wrap;
     }
 
