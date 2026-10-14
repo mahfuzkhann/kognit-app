@@ -490,8 +490,22 @@
                     <svg class="send-btn-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
                     <span class="send-btn-label visually-hidden">Send</span>
                 </button>
+
+                <!-- STOP GENERATING: occupies the SAME grid slot as #send-btn and
+                     is shown INSTEAD of it, only while the open chat has a running
+                     response (toggled by syncComposerGenerationUI() in app.js).
+                     type="button" and no <form>: activating it can never submit
+                     the text in the input. -->
+                <button id="stop-btn" type="button" class="stop-btn hidden" onclick="stopGeneration()"
+                        aria-label="Stop generating" title="Stop generating">
+                    <svg class="send-btn-icon" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2.5"></rect></svg>
+                </button>
             </div>
         </div>
+
+        <!-- AI-mistakes reminder: a quiet line directly under the composer. Plain
+             text, no icon/background; styled as .composer-disclaimer in shell.css. -->
+        <p class="composer-disclaimer">Kognit can make mistakes. Check important information.</p>
 
         <!-- PHASE 8D: empty-state spacer.
              Display:none normally. Only when .main-content carries

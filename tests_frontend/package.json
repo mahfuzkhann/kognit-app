@@ -2,11 +2,11 @@
   "name": "kognit-frontend-tests",
   "private": true,
   "type": "module",
-  "description": "Phase 8 frontend behaviour tests plus the P1 security/persistence tests and the Pocket Notes tests. Runs the real template, app.js and vendored DOMPurify in jsdom; test_notes_browser.mjs additionally drives a real Chrome/Chromium/Edge (puppeteer-core, no browser download) when one is installed.",
+  "description": "Phase 8 frontend behaviour tests plus the P1 security/persistence tests, the Pocket Notes tests and the Stop-generating / composer-disclaimer tests. Runs the real template, app.js and vendored DOMPurify in jsdom; test_notes_browser.mjs additionally drives a real Chrome/Chromium/Edge (puppeteer-core, no browser download) when one is installed.",
   "scripts": {
-    "test": "node test_ui_core.mjs && node test_stream_render.mjs && node test_theme.mjs && node test_nav_views.mjs && node test_security_hardening.mjs && node test_notes.mjs && node test_notes_browser.mjs",
-    "test:jsdom": "node test_ui_core.mjs && node test_stream_render.mjs && node test_theme.mjs && node test_nav_views.mjs && node test_security_hardening.mjs && node test_notes.mjs",
-    "test:browser": "node test_notes_browser.mjs"
+    "test": "node test_ui_core.mjs && node test_stream_render.mjs && node test_theme.mjs && node test_nav_views.mjs && node test_security_hardening.mjs && node test_notes.mjs && node test_stop_generating.mjs && node test_notes_browser.mjs && node test_stop_generating_browser.mjs",
+    "test:jsdom": "node test_ui_core.mjs && node test_stream_render.mjs && node test_theme.mjs && node test_nav_views.mjs && node test_security_hardening.mjs && node test_notes.mjs && node test_stop_generating.mjs",
+    "test:browser": "node test_notes_browser.mjs && node test_stop_generating_browser.mjs"
   },
   "devDependencies": {
     "fake-indexeddb": "^6.2.5",

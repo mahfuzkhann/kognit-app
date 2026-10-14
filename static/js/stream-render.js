@@ -315,6 +315,48 @@
     }
 
     /* --------------------------------------------------------
+       stripIncompleteTakeaway — STOP GENERATING
+       --------------------------------------------------------
+       When the student presses Stop, the text received so far is
+       kept as the answer. Generation can be cut at ANY point, so
+       the text may end inside the Key Takeaway marker (see
+       extractTakeaway above): an opened-but-never-closed
+       "<!--KOGNIT_TAKEAWAY ..." block, or just the first few
+       characters of the opener such as "<!--KOGN". extractTakeaway
+       only matches a COMPLETE marker pair, so without this the raw
+       fragment would stay in the saved answer and show up when the
+       student copies it.
+
+       Pure and deterministic. Text with no incomplete marker is
+       returned byte-for-byte unchanged; a COMPLETE marker pair is
+       never touched (extractTakeaway still handles it).
+       -------------------------------------------------------- */
+    var TAKEAWAY_OPEN = "<!--KOGNIT_TAKEAWAY";
+    var TAKEAWAY_CLOSE = "KOGNIT_TAKEAWAY-->";
+
+    function stripIncompleteTakeaway(text) {
+        if (typeof text !== "string" || !text) return "";
+
+        var open = text.lastIndexOf(TAKEAWAY_OPEN);
+        if (open !== -1) {
+            if (text.indexOf(TAKEAWAY_CLOSE, open + TAKEAWAY_OPEN.length) === -1) {
+                return text.slice(0, open).replace(/\s+$/, "");
+            }
+            return text;
+        }
+
+        // No full opener. The text may still END with a prefix of it
+        // (at least "<!" so a lone "<" is never mistaken for one).
+        var maxLen = Math.min(TAKEAWAY_OPEN.length - 1, text.length);
+        for (var len = maxLen; len >= 2; len--) {
+            if (text.slice(text.length - len) === TAKEAWAY_OPEN.slice(0, len)) {
+                return text.slice(0, text.length - len).replace(/\s+$/, "");
+            }
+        }
+        return text;
+    }
+
+    /* --------------------------------------------------------
        isCompletedAnswer — BUG 3 FIX (frontend completion-integrity)
        --------------------------------------------------------
        The confirmed frontend bug: the old check was
@@ -429,6 +471,7 @@
         hasCompleteMath: hasCompleteMath,
         createNdjsonParser: createNdjsonParser,
         extractTakeaway: extractTakeaway,
+        stripIncompleteTakeaway: stripIncompleteTakeaway,
         isCompletedAnswer: isCompletedAnswer,
         createStreamState: createStreamState,
         applyStreamEvent: applyStreamEvent

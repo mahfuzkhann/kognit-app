@@ -203,6 +203,17 @@ let selectedImageBase64 = null;
 let selectedImageFile = null;
 let isPDFLoaded = false;
 
+// STOP GENERATING: one entry per chat that currently has a running
+// /api/chat/stream request, keyed by chat id -> { controller, stopRequested }.
+// Per CHAT, not global, because Kognit deliberately lets the student switch to
+// another chat while an answer is still arriving (CHAT-05) and even start a
+// question there. A single global slot would let the second request overwrite
+// the first one's AbortController, so the first could no longer be stopped and
+// its cleanup could wipe the second one's state. The entry object itself is the
+// identity token: cleanup only removes the entry it created (see sendMessage's
+// finally block).
+const activeGenerations = new Map();
+
 // Quiz State
 let quizQuestions = [];
 let currentQuizIdx = 0;
@@ -1553,7 +1564,12 @@ function createBotMessageElement(rawText, meta = {}) {
     if (meta.interrupted) {
         const notice = document.createElement("div");
         notice.className = "answer-interrupted-notice";
-        notice.textContent = "This answer was interrupted before it finished generating.";
+        // STOP GENERATING: an answer the student stopped on purpose is not a
+        // fault, so it must not read like one. Same element and styling,
+        // honest wording.
+        notice.textContent = meta.stopped
+            ? "Generation stopped. This answer is incomplete."
+            : "This answer was interrupted before it finished generating.";
         wrapper.appendChild(notice);
     }
 
@@ -2428,6 +2444,11 @@ function loadChat(projId, chatId) {
     activeProjectId = projId;
     activeChatId = chatId;
 
+    // STOP GENERATING: the composer shows Stop only for a chat that has a
+    // running response, so it must be re-evaluated whenever the open chat
+    // changes (including early-return paths below).
+    syncComposerGenerationUI();
+
     renderHistoryList();
     const chatBox = document.getElementById("chat-box");
     chatBox.innerHTML = "";
@@ -2460,7 +2481,8 @@ function loadChat(projId, chatId) {
                     feedback: msg.feedback || null,
                     research: msg.research || null,
                     takeaway: msg.takeaway || null,
-                    interrupted: msg.interrupted === true
+                    interrupted: msg.interrupted === true,
+                    stopped: msg.stopped === true
                 }));
             }
         });
@@ -3301,6 +3323,50 @@ async function maybeGenerateAiTitle(proj, chat) {
     }
 }
 
+// ==================== STOP GENERATING ====================
+// Shows exactly one of Send / Stop in the composer's trailing slot, based on
+// whether the chat currently open has a running response. Called when a
+// generation starts, when it ends, and from loadChat() on every chat change.
+function syncComposerGenerationUI() {
+    const sendBtn = document.getElementById("send-btn");
+    const stopBtn = document.getElementById("stop-btn");
+    if (!sendBtn || !stopBtn) return;
+
+    const generation = activeGenerations.get(activeChatId);
+    const generating = !!generation;
+    const focused = document.activeElement;
+
+    sendBtn.classList.toggle("hidden", generating);
+    stopBtn.classList.toggle("hidden", !generating);
+    // NOTE: Stop is deliberately never given the `disabled` attribute. After a
+    // press the request is torn down within milliseconds and stopGeneration()
+    // ignores repeat calls by itself; disabling the focused button would make
+    // the browser drop keyboard focus onto <body> before the hand-off below
+    // could run (observed in real Chrome).
+
+    // The control that had keyboard focus has just been hidden: hand focus to
+    // the input rather than dropping it on <body>, so keyboard and screen
+    // reader users keep their place.
+    if ((generating && focused === sendBtn) || (!generating && focused === stopBtn)) {
+        const input = document.getElementById("user-input");
+        if (input) input.focus({ preventScroll: true });
+    }
+}
+
+// Stops the response of the chat currently open. Aborting the fetch's
+// AbortSignal closes the HTTP connection, which is what actually ends the
+// request (and lets the server stop reading from the provider) - merely
+// hiding a spinner would not. The rest of the unwinding (keeping the text
+// already received, restoring the composer) happens in sendMessage(), the one
+// place that owns the request's lifecycle.
+window.stopGeneration = function() {
+    const generation = activeGenerations.get(activeChatId);
+    if (!generation || generation.stopRequested) return;
+    generation.stopRequested = true;
+    generation.controller.abort();
+    syncComposerGenerationUI();
+};
+
 window.sendMessage = async function() {
     const inputField = document.getElementById("user-input");
     const chatBox = document.getElementById("chat-box");
@@ -3332,6 +3398,13 @@ window.sendMessage = async function() {
     // by ID below, after the await.
     const requestProjectId = activeProjectId;
     const requestChatId = activeChatId;
+
+    // STOP GENERATING: while this chat already has a running response the
+    // composer shows Stop instead of Send, so Enter must not start a second
+    // request into the same chat either (two interleaved streamed answers).
+    // Returns BEFORE any state is touched, so the text the student has typed
+    // for their next message stays in the input.
+    if (activeGenerations.has(requestChatId)) return;
 
     if (currentChat.messages.filter(m => m.role === "user").length === 0 && currentChat.title === "New Chat") {
         // Instant placeholder title (FEATURE 2, part 1): shown immediately
@@ -3421,18 +3494,40 @@ window.sendMessage = async function() {
         : "Thinking\u2026");
     chatBox.appendChild(loadingDiv);
 
+    // STOP GENERATING: registered BEFORE the first await below, so Stop is
+    // available from the very moment the question is sent (including while the
+    // auth session is still being read) and a second send is refused.
+    const generation = { controller: new AbortController(), stopRequested: false };
+    activeGenerations.set(requestChatId, generation);
+    syncComposerGenerationUI();
+
+    // Live check (unlike isStillViewingThisChat below, which is evaluated once
+    // when the response headers arrive): is the chat this request belongs to
+    // the one on screen RIGHT NOW? Needed because the student may switch chats
+    // while the answer is still streaming.
+    const viewingThisChatNow = () => activeProjectId === requestProjectId && activeChatId === requestChatId;
+
     const headers = {};
-    const { data: { session } } = await supabaseClient.auth.getSession();
-    if (session) {
-        headers["Authorization"] = `Bearer ${session.access_token}`;
-    }
 
     try {
+        // Moved inside the try (it used to sit just above it): a failure
+        // reading the session now ends in the normal error path and the
+        // generation cleanup below, instead of an unhandled rejection that
+        // would have left the composer stuck in its Stop state.
+        const { data: { session } } = await supabaseClient.auth.getSession();
+        if (session) {
+            headers["Authorization"] = `Bearer ${session.access_token}`;
+        }
+
         // PHASE 8E: streaming endpoint. /api/chat is still live and is the
         // fallback below - if the stream cannot be established for any
         // reason, the original non-streaming request runs instead and the
         // student sees exactly the pre-Phase-8E behaviour.
-        const response = await fetch("/api/chat/stream", { method: "POST", headers: headers, body: formData });
+        // STOP GENERATING: `signal` ties this request (headers AND the body
+        // stream that follows) to generation.controller.
+        const response = await fetch("/api/chat/stream", {
+            method: "POST", headers: headers, body: formData, signal: generation.controller.signal
+        });
 
         // Re-resolve the target project/chat by the ID captured before the
         // request started, rather than trusting the `proj`/`currentChat`
@@ -3521,19 +3616,33 @@ window.sendMessage = async function() {
         let lastRenderedLength = -1;
 
         const ensureStreamBubble = () => {
-            if (streamWrapper || !isStillViewingThisChat) return;
-            streamWrapper = document.createElement("div");
-            streamWrapper.className = "bot-message";
-            streamWrapper.setAttribute("aria-live", "polite");
-            streamContent = document.createElement("div");
-            streamContent.className = "bot-message-content";
-            streamWrapper.appendChild(streamContent);
-            chatBox.appendChild(streamWrapper);
+            // Live check: the answer must only ever be drawn into the chat it
+            // belongs to. (This used to test isStillViewingThisChat, which is
+            // fixed when the headers arrive - so switching chats mid-answer
+            // made the rest of it paint into the OTHER chat's view.)
+            if (!viewingThisChatNow()) return;
+            if (!streamWrapper) {
+                streamWrapper = document.createElement("div");
+                streamWrapper.className = "bot-message";
+                streamWrapper.setAttribute("aria-live", "polite");
+                streamContent = document.createElement("div");
+                streamContent.className = "bot-message-content";
+                streamWrapper.appendChild(streamContent);
+            }
+            // Coming back to this chat while it is still generating: loadChat()
+            // rebuilt the chat box and dropped the live bubble - put it back.
+            if (!chatBox.contains(streamWrapper)) {
+                chatBox.appendChild(streamWrapper);
+                lastRenderedLength = -1;
+            }
         };
 
         const paint = () => {
             pendingFrame = null;
             if (!streamContent) return;
+            // Another chat is on screen (bubble not in the chat box): nothing
+            // to draw into. The text keeps accumulating in streamState.
+            if (!chatBox.contains(streamWrapper)) return;
             if (streamState.replyText.length === lastRenderedLength) return;
             lastRenderedLength = streamState.replyText.length;
 
@@ -3575,6 +3684,10 @@ window.sendMessage = async function() {
             (event) => {
                 if (!event || typeof event.type !== "string") return;
 
+                // STOP GENERATING: a chunk that was already in flight when Stop
+                // was pressed must not change the answer the student kept.
+                if (generation.stopRequested) return;
+
                 if (event.type === "start") {
                     if (isStillViewingThisChat && chatBox.contains(loadingDiv)) {
                         loadingDiv.textContent =
@@ -3603,7 +3716,7 @@ window.sendMessage = async function() {
                     streamWrapper = null;
                     streamContent = null;
                     lastRenderedLength = -1;
-                    if (isStillViewingThisChat && !chatBox.contains(loadingDiv)) {
+                    if (viewingThisChatNow() && !chatBox.contains(loadingDiv)) {
                         chatBox.appendChild(loadingDiv);
                     }
                     loadingDiv.textContent = window.KognitStream.loadingCopyFor("retrying");
@@ -3620,8 +3733,11 @@ window.sendMessage = async function() {
                         // original attempt, or - after a "retry" - the
                         // recovery generation): retire the status line.
                         if (chatBox.contains(loadingDiv)) chatBox.removeChild(loadingDiv);
-                        ensureStreamBubble();
                     }
+                    // On EVERY delta (idempotent): creates the bubble on the
+                    // first one, and re-attaches it if the student left this
+                    // chat and came back while it was still generating.
+                    if (streamState.replyText) ensureStreamBubble();
                     schedulePaint();
                 }
             },
@@ -3641,19 +3757,39 @@ window.sendMessage = async function() {
             // non-streaming endpoint rather than failing. Routed through the
             // SAME reducer as a synthetic "done" event so this path can
             // never diverge from the real streaming completion semantics.
-            const fallback = await fetch("/api/chat", { method: "POST", headers: headers, body: formData });
+            const fallback = await fetch("/api/chat", {
+                method: "POST", headers: headers, body: formData, signal: generation.controller.signal
+            });
             const fbData = await fallback.json();
             streamState = window.KognitStream.applyStreamEvent(streamState, {
                 type: "done", reply: fbData.reply || "No response received.", research: fbData.research || null
             });
         } else {
             const decoder = new TextDecoder();
-            while (true) {
-                const { value, done } = await reader.read();
-                if (done) break;
-                parser.push(decoder.decode(value, { stream: true }));
+            try {
+                while (true) {
+                    const { value, done } = await reader.read();
+                    // STOP GENERATING: stop consuming the moment Stop is
+                    // pressed, even if this read still returned a chunk.
+                    if (generation.stopRequested) break;
+                    if (done) break;
+                    parser.push(decoder.decode(value, { stream: true }));
+                }
+                if (!generation.stopRequested) parser.flush();
+            } catch (readError) {
+                // The abort makes the pending read() reject (AbortError in
+                // current browsers). That is the student's own action, not a
+                // failure - judged by whether Stop was requested rather than
+                // by the error's name, so it holds across browsers. Anything
+                // else is a genuine stream failure and is rethrown to the
+                // existing error handling.
+                if (!generation.stopRequested) throw readError;
             }
-            parser.flush();
+            if (generation.stopRequested) {
+                // Release the connection/reader promptly; already errored by
+                // the abort in practice, so any rejection here is irrelevant.
+                reader.cancel().catch(() => {});
+            }
         }
 
         if (pendingFrame !== null) {
@@ -3676,7 +3812,29 @@ window.sendMessage = async function() {
         // the reducer exists.
         let { replyText, researchPayload } = streamState;
         let isPartialAnswer = false;
-        if (!window.KognitStream.isCompletedAnswer(streamState.sawTerminal, streamState.terminalType)) {
+        let isStoppedAnswer = false;
+        let stoppedWithoutText = false;
+        const answerCompleted = window.KognitStream.isCompletedAnswer(streamState.sawTerminal, streamState.terminalType);
+        if (generation.stopRequested && !streamState.sawTerminal) {
+            // STOP GENERATING: the student ended this generation on purpose,
+            // before any terminal event arrived. This is NOT a failure
+            // (streamFailed stays false), but it is also not a completed
+            // answer: whatever text had arrived is kept, flagged as
+            // interrupted (so Pocket Notes does not offer to save it as a
+            // finished answer) and as stopped (so the notice reads honestly).
+            // A cut can land inside the Key Takeaway marker, so a dangling
+            // fragment of it is removed. If a recovery "retry" had just reset
+            // the text, or nothing had arrived yet, there is no answer to keep.
+            replyText = window.KognitStream.stripIncompleteTakeaway(replyText);
+            researchPayload = null;
+            if (replyText.trim()) {
+                isPartialAnswer = true;
+                isStoppedAnswer = true;
+            } else {
+                replyText = "";
+                stoppedWithoutText = true;
+            }
+        } else if (!answerCompleted) {
             streamFailed = true;
             if (!replyText) {
                 // Nothing was ever generated - a plain, self-explanatory
@@ -3728,7 +3886,7 @@ window.sendMessage = async function() {
         // them instead - a pre-existing, adjacent issue on exactly the
         // variable this fix already touches, not a separate refactor.
         let newBotMsgIndex = null;
-        if (targetChat && !streamFailed) {
+        if (targetChat && !streamFailed && !stoppedWithoutText) {
             // POCKET NOTES: an interrupted/partial answer is remembered as such
             // (only ever added when true) so that after a reload it still
             // shows the interrupted notice and is NOT offered "Save to Pocket
@@ -3736,6 +3894,7 @@ window.sendMessage = async function() {
             // stored exactly as before - no new field.
             const botMsgRecord = { role: "bot", text: replyText, research: data.research || null, takeaway: takeawayText };
             if (isPartialAnswer) botMsgRecord.interrupted = true;
+            if (isStoppedAnswer) botMsgRecord.stopped = true;
             targetChat.messages.push(botMsgRecord);
             newBotMsgIndex = targetChat.messages.length - 1;
             saveProjectsToStorage();
@@ -3746,7 +3905,7 @@ window.sendMessage = async function() {
             maybeGenerateAiTitle(targetProj, targetChat);
         }
 
-        if (isStillViewingThisChat) {
+        if (viewingThisChatNow() && !stoppedWithoutText) {
             const botDiv = createBotMessageElement(replyText, {
                 projId: requestProjectId,
                 chatId: requestChatId,
@@ -3756,7 +3915,8 @@ window.sendMessage = async function() {
                 // BUG 3 FIX: renders the "this answer was interrupted"
                 // notice (see createBotMessageElement) instead of letting a
                 // truncated answer look identical to a complete one.
-                interrupted: isPartialAnswer
+                interrupted: isPartialAnswer,
+                stopped: isStoppedAnswer
             });
             chatBox.appendChild(botDiv);
 
@@ -3768,13 +3928,28 @@ window.sendMessage = async function() {
         // chat happens to be on screen right now.
     } catch (error) {
         const isStillViewingThisChat = activeProjectId === requestProjectId && activeChatId === requestChatId;
-        if (isStillViewingThisChat) {
+        if (generation.stopRequested) {
+            // STOP GENERATING: the student cancelled before any stream state
+            // existed (while the session was being read, before the response
+            // headers arrived, or during the non-streaming fallback). Nothing
+            // was generated and nothing went wrong: just retire the status
+            // line. No error message.
+            if (chatBox.contains(loadingDiv)) chatBox.removeChild(loadingDiv);
+        } else if (isStillViewingThisChat) {
             if (chatBox.contains(loadingDiv)) chatBox.removeChild(loadingDiv);
             const errorDiv = document.createElement("div");
             errorDiv.className = "bot-message";
             errorDiv.textContent = "Error connecting to Kognit Engine.";
             chatBox.appendChild(errorDiv);
         }
+    } finally {
+        // STOP GENERATING: runs on EVERY exit - success, error, 401/429 early
+        // return, Stop. Removes only the entry THIS call created: if a newer
+        // request for the same chat has registered since, it is left alone.
+        if (activeGenerations.get(requestChatId) === generation) {
+            activeGenerations.delete(requestChatId);
+        }
+        syncComposerGenerationUI();
     }
 
     if (activeProjectId === requestProjectId && activeChatId === requestChatId) {

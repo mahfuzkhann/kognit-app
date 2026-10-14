@@ -1,6 +1,6 @@
 # Kognit frontend tests (Phase 8 & 9)
 
-Behaviour tests for Kognit's frontend interaction layer. All seven suites
+Behaviour tests for Kognit's frontend interaction layer. All nine suites
 load the **real** `templates/index.html` and the **real** source files
 into jsdom — there is no rebuilt fixture markup, so if the template or a
 source file drifts from what these expect, they fail.
@@ -11,15 +11,16 @@ source file drifts from what these expect, they fail.
 cd tests_frontend
 npm install      # installs jsdom, marked, mathjax, fake-indexeddb and puppeteer-core (test-only); no build step, no bundler,
                  # and NO browser download (puppeteer-core drives a browser you already have)
-npm test         # runs all seven suites (the real-browser one prints SKIPPED if no Chrome/Edge is found)
-npm run test:jsdom    # the six jsdom suites only
-npm run test:browser  # the real-browser Pocket Notes test only
+npm test         # runs all nine suites (the two real-browser ones print SKIPPED if no Chrome/Edge is found)
+npm run test:jsdom    # the seven jsdom suites only
+npm run test:browser  # the two real-browser suites only (Pocket Notes; Stop generating + disclaimer)
 ```
 
 Expected: `38 passed` (ui-core) + `57 passed` (stream-render) + `14 passed` (theme) +
 `33 passed` (nav-views) + `62 passed` (security-hardening) + `91 passed` (notes, jsdom) +
-`10 passed` (notes-browser, real Chrome) = **305 passed, 0 failed**. Without a browser the last
-suite prints `SKIPPED` and the total is 295. The older "120" figure that used to be printed here
+`45 passed` (stop-generating, jsdom) + `10 passed` (notes-browser, real Chrome) +
+`18 passed` (stop-generating-browser, real Chrome) = **368 passed, 0 failed**. Without a browser the
+two real-browser suites print `SKIPPED` and the total is 340. The older "120" figure that used to be printed here
 pre-dates the P1 hardening suites and is no longer accurate.
 
 ## What each suite covers
@@ -91,6 +92,30 @@ math, and generated HTML is shown as literal text. Browser discovery: set `CHROM
 Chrome/Chromium/Edge executable (Windows/macOS/Linux install locations are tried automatically);
 optional `CHROME_ARGS` adds launch flags. No browser found => it prints SKIPPED and exits 0
 (loudly, never as a silent pass).
+
+`test_stop_generating.mjs` (Stop generating + composer disclaimer, jsdom) - boots the real `app.js`
+against a fake streaming `fetch` that honours `AbortSignal` the way a browser does (a pending
+`reader.read()` rejects with `AbortError`). Covers: the Send/Stop swap and its accessible name; abort
+of the request (before headers, before any text, mid-stream); the partial answer being kept, saved with
+`stopped`+`interrupted`, restored after reopening the chat and never offered to Pocket Notes; repeated
+Stop clicks; late chunks/`done` after Stop being ignored; Stop never submitting typed text; Enter ignored
+while generating; a new question working after Stop; genuine failures (network, mid-stream error,
+dropped connection, 401/429) keeping their existing behaviour and never being mislabelled as "stopped";
+per-chat generations when switching chats; focus hand-off; the cut-inside-takeaway-marker helper; and the
+disclaimer's exact text, placement and CSS contract.
+
+`test_stop_generating_browser.mjs` (REAL BROWSER) - jsdom has no network stack and no layout engine.
+This suite drives a real Chrome/Chromium/Edge against a real `http.Server` that holds a slow NDJSON
+stream open, and asserts the SERVER observes the client's connection close mid-stream when Stop is
+pressed (genuine cancellation), that keyboard focus lands back in the input, that Stop occupies exactly
+Send's slot, and - with real CSS - that the disclaimer sits under the composer, centred, overlapping
+nothing, with WCAG AA contrast (measured from computed colours) in both themes, without horizontal
+overflow at 390px and 320px. Same browser discovery rules as the Pocket Notes browser test.
+
+**What neither Stop-generating suite proves:** the real FastAPI backend's behaviour on disconnect.
+That was probed separately (real uvicorn + `chat_stream_endpoint`, provider replaced): the provider
+generator is closed shortly after the client drops, but uvicorn logs an `ERROR: Exception in ASGI
+application ... ClientDisconnected` traceback each time.
 
 ## What is NOT covered
 

@@ -1007,7 +1007,8 @@
     font-weight: var(--font-weight-medium);
 }
 
-#send-btn {
+#send-btn,
+#stop-btn {
     grid-area: send;
     display: inline-flex;
     align-items: center;
@@ -1026,18 +1027,43 @@
                 opacity var(--duration-fast) var(--ease-standard);
 }
 
-#send-btn:hover {
+#send-btn:hover,
+#stop-btn:hover {
     background: var(--color-text-secondary);
 }
 
-#send-btn:active {
+#send-btn:active,
+#stop-btn:active {
     transform: scale(0.94);
 }
 
-#send-btn:disabled {
+#send-btn:disabled,
+#stop-btn:disabled {
     opacity: 0.4;
     cursor: not-allowed;
     transform: none;
+}
+
+/* STOP GENERATING: style.css lists #send-btn in its shared focus-ring rule;
+   the Stop control gets the identical ring here. It is the same circle and
+   sits in the same grid slot as Send - app.js shows exactly one of the two. */
+#stop-btn:focus-visible {
+    box-shadow: var(--focus-ring);
+}
+
+/* AI-mistakes reminder, directly under the composer. Deliberately quiet:
+   small, muted token colour (readable in both themes), no box/icon/animation.
+   Same width as the composer so it centres under it. */
+.composer-disclaimer {
+    flex: 0 0 auto;
+    width: min(100% - 48px, var(--composer-max-width));
+    margin: -4px auto 0;
+    padding: 0;
+    text-align: center;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--color-text-muted);
+    text-wrap: balance;
 }
 
 /* Attachment status bars sit directly above the composer */
@@ -1454,13 +1480,19 @@
     }
 
     .composer-plus-btn,
-    #send-btn {
+    #send-btn,
+    #stop-btn {
         width: 44px;
         height: 44px;
     }
 
     .image-preview-bar {
         width: calc(100% - 24px);
+    }
+
+    .composer-disclaimer {
+        width: calc(100% - 24px);
+        margin: 0 auto;
     }
 
     .composer-menu {
@@ -1505,7 +1537,8 @@
 @media (prefers-reduced-motion: reduce) {
     .quick-card:hover,
     .quick-card:active,
-    #send-btn:active {
+    #send-btn:active,
+    #stop-btn:active {
         transform: none;
     }
 
