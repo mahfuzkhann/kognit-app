@@ -1,6 +1,6 @@
 # Kognit frontend tests (Phase 8 & 9)
 
-Behaviour tests for Kognit's frontend interaction layer. All nine suites
+Behaviour tests for Kognit's frontend interaction layer. All ten suites
 load the **real** `templates/index.html` and the **real** source files
 into jsdom — there is no rebuilt fixture markup, so if the template or a
 source file drifts from what these expect, they fail.
@@ -11,16 +11,16 @@ source file drifts from what these expect, they fail.
 cd tests_frontend
 npm install      # installs jsdom, marked, mathjax, fake-indexeddb and puppeteer-core (test-only); no build step, no bundler,
                  # and NO browser download (puppeteer-core drives a browser you already have)
-npm test         # runs all nine suites (the two real-browser ones print SKIPPED if no Chrome/Edge is found)
+npm test         # runs all ten suites (the three real-browser ones print SKIPPED if no Chrome/Edge is found)
 npm run test:jsdom    # the seven jsdom suites only
-npm run test:browser  # the two real-browser suites only (Pocket Notes; Stop generating + disclaimer)
+npm run test:browser  # the three real-browser suites only (Pocket Notes; Stop generating + disclaimer; UI refinement)
 ```
 
 Expected: `38 passed` (ui-core) + `57 passed` (stream-render) + `14 passed` (theme) +
 `33 passed` (nav-views) + `62 passed` (security-hardening) + `91 passed` (notes, jsdom) +
 `45 passed` (stop-generating, jsdom) + `10 passed` (notes-browser, real Chrome) +
-`18 passed` (stop-generating-browser, real Chrome) = **368 passed, 0 failed**. Without a browser the
-two real-browser suites print `SKIPPED` and the total is 340. The older "120" figure that used to be printed here
+`18 passed` (stop-generating-browser, real Chrome) + `38 passed` (ui-refinement-browser, real Chrome) =
+**406 passed, 0 failed**. Without a browser the three real-browser suites print `SKIPPED` and the total is 340. The older "120" figure that used to be printed here
 pre-dates the P1 hardening suites and is no longer accurate.
 
 ## What each suite covers
@@ -116,6 +116,16 @@ overflow at 390px and 320px. Same browser discovery rules as the Pocket Notes br
 That was probed separately (real uvicorn + `chat_stream_endpoint`, provider replaced): the provider
 generator is closed shortly after the client drops, but uvicorn logs an `ERROR: Exception in ASGI
 application ... ClientDisconnected` traceback each time.
+
+`test_ui_refinement_browser.mjs` (sidebar / scrollbars / focus, REAL BROWSER) - layout facts that
+jsdom cannot see. Runs at 1280x585 @1.5x (a 1080p laptop at 150% scaling, where the defects were
+reproduced), in dark and light: Recent Chats shows >= 4 complete rows; scrollbars are slim with no
+arrow buttons and a >= 3:1 thumb (Chromium ignores `::-webkit-scrollbar` if `scrollbar-width` is set,
+so that is asserted too); rows align with the nav; the 4px keyboard focus ring is not clipped by the
+list scroller on any tab stop; row action buttons are >= 24x24. Guards what must not change: tall-window
+spacing, phone drawer sizes, independent wheel/keyboard scrolling (list vs conversation vs page vs
+composer), navigation / search / new chat / select / rename / delete / composer / theme toggle, and
+`prefers-reduced-motion`. Headless Chrome hides scrollbars by default; the test removes that flag.
 
 ## What is NOT covered
 

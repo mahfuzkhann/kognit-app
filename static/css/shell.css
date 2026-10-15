@@ -213,19 +213,92 @@
 }
 
 /* ---- History list ---- */
+/* The list scrolls on its own (the sidebar itself never moves). overflow clips
+   anything that paints outside the scroller - including the 4px keyboard focus
+   ring of rows that sit flush with its edge - so the scroller is inset by the
+   ring's width and pulled back out by an equal negative margin: rows keep their
+   exact position, but their focus ring now has room to be drawn. On the right the
+   scroller extends 8px into the sidebar's empty padding so the scrollbar sits in
+   that gutter instead of narrowing the rows - they stay aligned with the
+   navigation above. Scrollbar styling: see the SCROLLBARS block below. */
 .history-section {
     flex: 1 1 auto;
     min-height: 0;
+    margin: -4px -8px 0 -4px;
+    padding: 4px 0 0 4px;
     overflow-y: auto;
     overscroll-behavior: contain;
-    scrollbar-width: thin;
-    scrollbar-color: var(--color-border) transparent;
     gap: 0;
 }
 
 .history-list {
     gap: 2px;
     padding-bottom: 8px;
+}
+
+/* ---- SCROLLBARS (sidebar chat list + conversation) ----------------------
+   Native "thin" scrollbars on Windows/Chromium draw up/down ARROW BUTTONS and
+   an almost invisible thumb (--color-border is close to the surface colour),
+   which looked like leftover legacy chrome pressed against the active row. This
+   is a slim, button-less bar whose thumb is visible enough to show that more
+   content exists, never auto-hidden (scrollable content stays discoverable),
+   fully native for wheel / touch / keyboard scrolling.
+   IMPORTANT: Chromium ignores ::-webkit-scrollbar as soon as scrollbar-width or
+   scrollbar-color is set on the same element, so the standard properties are
+   given ONLY to browsers without ::-webkit-scrollbar (Firefox). */
+.history-section::-webkit-scrollbar,
+.chat-box::-webkit-scrollbar {
+    width: 8px;
+}
+
+.history-section::-webkit-scrollbar-button,
+.chat-box::-webkit-scrollbar-button {
+    display: none;
+    width: 0;
+    height: 0;
+}
+
+.history-section::-webkit-scrollbar-track,
+.chat-box::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.history-section::-webkit-scrollbar-thumb,
+.chat-box::-webkit-scrollbar-thumb {
+    min-height: 36px;
+    /* --color-text-faint: >= 3:1 against the surface in BOTH themes (3.4 dark,
+       4.4 light) - the old --color-border thumb was ~1.2:1, i.e. invisible. */
+    background-color: var(--color-text-faint);
+    background-clip: padding-box;
+    border: 2px solid transparent;
+    border-radius: var(--radius-pill);
+}
+
+.history-section::-webkit-scrollbar-thumb:hover,
+.chat-box::-webkit-scrollbar-thumb:hover {
+    background-color: var(--color-text-muted);
+    background-clip: padding-box;
+}
+
+@supports not selector(::-webkit-scrollbar) {
+    .history-section,
+    .chat-box {
+        scrollbar-width: thin;
+        scrollbar-color: var(--color-text-faint) transparent;
+    }
+}
+
+/* Row / project-header action buttons (pin, rename, delete, add chat). The
+   shared 3px/4px padding left them 20x18px - under the 24x24 minimum of WCAG
+   2.2 (2.5.8) and fiddly with a mouse. Mobile already enlarges them to 40px in
+   its own block, so this is desktop/tablet only. */
+@media (min-width: 769px) {
+    .chat-item .action-btn,
+    .project-header .action-btn {
+        min-width: 26px;
+        min-height: 26px;
+        border-radius: var(--radius-md);
+    }
 }
 
 .recent-chats-list {
@@ -679,8 +752,6 @@
     background: transparent;
     border: 0;
     border-radius: 0;
-    scrollbar-width: thin;
-    scrollbar-color: var(--color-border) transparent;
 }
 
 /* ---- Messages: open reading surface, not a card per answer ---- */
@@ -1175,6 +1246,59 @@
 
     .quick-card-desc {
         display: none;
+    }
+}
+
+/* Short desktop/tablet windows (e.g. a 1080p laptop at 125-150% display scaling
+   is only ~585-700 CSS px tall). The sidebar's spacing is tuned for tall
+   windows: its fixed parts (logo, 4 nav rows, divider, heading, profile row)
+   left Recent Chats only ~2.5 rows. Same breakpoint the empty state above already
+   uses. Width, logo, icons, order and every control are unchanged - only
+   vertical padding/margins and row heights shrink, and still comfortably exceed
+   the 24px minimum target size. */
+@media (min-width: 769px) and (max-height: 760px) {
+    .sidebar {
+        padding-top: 18px;
+        padding-bottom: 12px;
+    }
+
+    .sidebar-brand {
+        margin-bottom: 16px;
+    }
+
+    .nav-rail {
+        gap: 2px;
+    }
+
+    .nav-rail-btn {
+        min-height: 40px;
+    }
+
+    .sidebar-divider {
+        margin: 12px 12px 14px;
+    }
+
+    .sidebar-section-head {
+        padding-bottom: 4px;
+    }
+
+    .chat-item,
+    .chat-title-text {
+        min-height: 40px;
+    }
+
+    .sidebar-footer {
+        padding-top: 10px;
+    }
+
+    .profile-trigger-btn,
+    .btn-auth-login {
+        min-height: 48px;
+    }
+
+    .profile-trigger-icon {
+        width: 36px;
+        height: 36px;
     }
 }
 
