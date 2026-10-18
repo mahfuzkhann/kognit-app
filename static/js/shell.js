@@ -24,7 +24,7 @@
     "use strict";
 
     var DESKTOP_PLACEHOLDER = "Ask a question, upload a file, or get help...";
-    var MOBILE_PLACEHOLDER = "Ask Kognit";
+    var MOBILE_PLACEHOLDER = "Ask Kloriz";
     var MOBILE_QUERY = "(max-width: 768px)";
     var TEXTAREA_MAX_PX = 200;
 

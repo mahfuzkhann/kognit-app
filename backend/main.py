@@ -49,7 +49,7 @@ from typing import Optional, Tuple
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("kognit.main")
 
-app = FastAPI(title="Kognit Academic Assistant")
+app = FastAPI(title="Kloriz Academic Assistant")
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
@@ -623,7 +623,7 @@ async def upload_pdf(
     if not _pdf_extraction_slots.acquire(blocking=False):
         raise HTTPException(
             status_code=503,
-            detail="Kognit is busy reading other PDFs right now. Please try again in a moment."
+            detail="Kloriz is busy reading other PDFs right now. Please try again in a moment."
         )
 
     try:

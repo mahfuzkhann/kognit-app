@@ -299,7 +299,7 @@ for (const theme of ["dark", "light"]) {
         const controls = await page.evaluate(() => [...document.querySelectorAll(".input-container button, .input-container textarea, .composer-menu")].map((el) => { const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, right: r.right, bottom: r.bottom, w: r.width, h: r.height, id: el.id || el.className }; }).filter((r) => r.w > 0 && r.h > 0));
         for (const c of controls) assert(!overlaps(d, c), `overlaps composer control ${c.id}`);
         const text = await page.evaluate(() => document.querySelector(".composer-disclaimer").textContent);
-        eq(text, "Kognit can make mistakes. Check important information.");
+        eq(text, "Kloriz can make mistakes. Check important information.");
     });
 
     await check(`[${theme}] muted, small, readable: WCAG AA contrast >= 4.5 and font-size <= 13px, no background/border`, async () => {

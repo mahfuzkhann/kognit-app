@@ -172,7 +172,7 @@
 
     function friendlyError(err, fallback) {
         if (err && err.kind === "auth") return "Please sign in to use Pocket Notes.";
-        if (err && err.kind === "network") return "You're offline or Kognit can't be reached.";
+        if (err && err.kind === "network") return "You're offline or Kloriz can't be reached.";
         if (err && err.detail) return err.detail;
         return fallback || "Something went wrong. Please try again.";
     }
@@ -341,7 +341,7 @@
             return { tone: "warn", text: "You're offline, so these are your saved offline copies." + when + " Saving, editing and AI study tools are paused." };
         }
         if (!state.storageOk) return { tone: "warn", text: "This browser couldn't store your notes on this device, so they won't be readable offline." };
-        if (!state.swSupported) return { tone: "info", text: "This browser can't keep Kognit open offline, so notes need a connection." };
+        if (!state.swSupported) return { tone: "info", text: "This browser can't keep Kloriz open offline, so notes need a connection." };
         if (shellReady()) {
             var count = Object.keys(state.cachedIds).length;
             if (count > 0) return { tone: "ok", text: count + (count === 1 ? " note is" : " notes are") + " available to read offline." };
@@ -471,7 +471,7 @@
 
         var header = el("div", "nav-view-header");
         header.appendChild(el("h2", "nav-view-title", "Pocket Notes"));
-        header.appendChild(el("p", "nav-view-subtitle", "Answers you saved from Kognit \u2014 find them again, revise from them, and read them offline."));
+        header.appendChild(el("p", "nav-view-subtitle", "Answers you saved from Kloriz \u2014 find them again, revise from them, and read them offline."));
         inner.appendChild(header);
 
         var status = el("div", "notes-status");
@@ -615,7 +615,7 @@
         if (state.error) { out.appendChild(retryBox(state.error.message, function () { loadNotes(); })); return; }
         if (state.notes.length === 0) {
             out.appendChild(emptyState("No notes yet",
-                "Open a Kognit answer in Chat and choose Save under it. Saved answers show up here."));
+                "Open a Kloriz answer in Chat and choose Save under it. Saved answers show up here."));
             return;
         }
         var shown = filteredNotes();
@@ -851,7 +851,7 @@
         if (state.fromCache || isOffline()) return section;
 
         if (note.needs_review) {
-            section.appendChild(el("p", "notes-hint", "Kognit couldn't tell the subject for sure. Pick it to fix this note's tags:"));
+            section.appendChild(el("p", "notes-hint", "Kloriz couldn't tell the subject for sure. Pick it to fix this note's tags:"));
             var picks = el("div", "notes-subject-picks");
             SUBJECTS.forEach(function (subject) {
                 var b = el("button", "notes-chip", subject);

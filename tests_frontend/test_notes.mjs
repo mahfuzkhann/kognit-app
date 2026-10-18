@@ -1089,7 +1089,7 @@ await check("'Available offline' badge appears ONLY when the service worker repo
 await check("no service worker support: honest message, no offline badge", async () => {
     const h = await bootWithSyncedNotes();
     assert(!h.doc.querySelector(".note-badge:not(.note-badge-copy)"));
-    assert(/can't keep Kognit open offline|still being set up/.test(h.doc.querySelector(".notes-status").textContent));
+    assert(/can't keep Kloriz open offline|still being set up/.test(h.doc.querySelector(".notes-status").textContent));
 });
 
 await check("first-time visitor (worker registered but not yet controlling): not told offline reading is available", async () => {

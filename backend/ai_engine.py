@@ -175,7 +175,7 @@ CHAT_SYSTEM_INSTRUCTION_RULES = (
 # User-facing fallback messages. Never expose str(exception) to the client -
 # that can leak internal details (stack traces, provider error text, etc).
 GENERIC_CHAT_ERROR = (
-    "Sorry, Kognit couldn't process that request right now. "
+    "Sorry, Kloriz couldn't process that request right now. "
     "Please try again in a moment."
 )
 
@@ -185,7 +185,7 @@ GENERIC_CHAT_ERROR = (
 # provider-internal details (quota metric names, limits, status codes)
 # that must not reach the client. See GENERIC_CHAT_ERROR comment above.
 QUOTA_EXHAUSTED_ERROR = (
-    "⚠️ Kognit-এর AI ব্যবহারের সীমা এই মুহূর্তে পূর্ণ হয়ে গেছে।\n"
+    "⚠️ Kloriz-এর AI ব্যবহারের সীমা এই মুহূর্তে পূর্ণ হয়ে গেছে।\n"
     "এই মুহূর্তে আপনার প্রশ্নের উত্তর তৈরি করা যাচ্ছে না। কিছুক্ষণ পরে আবার চেষ্টা করুন।"
 )
 
@@ -197,7 +197,7 @@ QUOTA_EXHAUSTED_ERROR = (
 # non-retried message so it's diagnosable from a student's report without
 # needing server log access.
 BLOCKED_RESPONSE_ERROR = (
-    "Kognit couldn't generate a response for this specific question - it may "
+    "Kloriz couldn't generate a response for this specific question - it may "
     "have been blocked by a content safety filter. Please try rephrasing your question."
 )
 
@@ -208,7 +208,7 @@ BLOCKED_RESPONSE_ERROR = (
 # without needing server log access - "the photo didn't load" vs "the AI
 # didn't respond" are different problems with different fixes.
 IMAGE_DECODE_ERROR = (
-    "Kognit couldn't read the image you attached - it may be corrupted or in an "
+    "Kloriz couldn't read the image you attached - it may be corrupted or in an "
     "unsupported format. Please try uploading it again or use a different photo."
 )
 
@@ -250,7 +250,7 @@ ALLOWED_IMAGE_FORMATS = ("JPEG", "PNG", "WEBP", "GIF", "BMP")
 MAX_IMAGE_PIXELS = 40_000_000
 
 IMAGE_TOO_LARGE_ERROR = (
-    "Kognit couldn't use the image you attached because its resolution is too "
+    "Kloriz couldn't use the image you attached because its resolution is too "
     "large. Please use a smaller photo or lower your camera's resolution."
 )
 
@@ -278,8 +278,8 @@ ERROR_INTERNAL = "INTERNAL_ERROR"                          # anything unexpected
 # student knows this is temporary and worth retrying shortly; never contains
 # provider text.
 PROVIDER_UNAVAILABLE_ERROR = (
-    "Kognit's AI service is very busy right now. Please try again in a minute.\n"
-    "Kognit-এর AI সার্ভিসে এই মুহূর্তে অনেক চাপ আছে। এক মিনিট পর আবার চেষ্টা করুন।"
+    "Kloriz's AI service is very busy right now. Please try again in a minute.\n"
+    "Kloriz-এর AI সার্ভিসে এই মুহূর্তে অনেক চাপ আছে। এক মিনিট পর আবার চেষ্টা করুন।"
 )
 
 
@@ -841,7 +841,7 @@ def _build_chat_request(
         academic_clause = "at the secondary/higher-secondary level"
 
     system_instruction = (
-        f"You are Kognit, an expert academic AI tutor for students in {board}, {academic_clause}.\n"
+        f"You are Kloriz, an expert academic AI tutor for students in {board}, {academic_clause}.\n"
         + CHAT_SYSTEM_INSTRUCTION_RULES
     )
 

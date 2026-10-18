@@ -36,7 +36,7 @@
     <!-- PHASE 8G: maximum-scale/user-scalable are deliberately NOT set -
          pinch-zoom must stay available. Students reading dense formulas
          on a small phone rely on it. -->
-    <title>Kognit - AI Academic Assistant</title>
+    <title>Kloriz - AI Academic Assistant</title>
 
     <!-- CSS -->
     <!-- PHASE 8B: design tokens must load BEFORE style.css, which now
@@ -193,10 +193,10 @@
          placement changed. -->
     <div id="sidebar-overlay" class="sidebar-overlay" hidden></div>
 
-    <aside class="sidebar" id="app-sidebar" aria-label="Kognit navigation">
+    <aside class="sidebar" id="app-sidebar" aria-label="Kloriz navigation">
         <div class="sidebar-brand">
-            <span class="brand-mark" role="img" aria-label="Kognit logo"></span>
-            <span class="brand-wordmark">Kognit</span>
+            <span class="brand-mark" role="img" aria-label="Kloriz logo"></span>
+            <span class="brand-wordmark">Kloriz</span>
 
             <!-- Drawer-only controls (hidden on desktop by CSS). The theme
                  button here is the SAME theme system as the desktop one in
@@ -219,7 +219,7 @@
              click wiring live in static/js/nav-views.js. PHASE 10: the
              list is now vertical (aria-orientation) to match the design;
              Up/Down and Left/Right both already move between tabs. -->
-        <div class="nav-rail" role="tablist" aria-orientation="vertical" aria-label="Kognit sections">
+        <div class="nav-rail" role="tablist" aria-orientation="vertical" aria-label="Kloriz sections">
             <button type="button" id="nav-tab-chat" class="nav-rail-btn active"
                     role="tab" aria-selected="true" aria-controls="chat-view" tabindex="0">
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5a8.5 8.5 0 0 1-12.4 7.5L3 20.5l1.6-5.2A8.5 8.5 0 1 1 21 11.5z"></path></svg>
@@ -429,7 +429,7 @@
              item (see triggerComposerPDFUpload / triggerComposerImageUpload
              in app.js). No new upload pipeline was created. -->
         <div class="input-container">
-            <textarea id="user-input" rows="1" placeholder="Ask a question, upload a file, or get help..." onkeydown="handleKeyDown(event)" aria-label="Ask Kognit a question"></textarea>
+            <textarea id="user-input" rows="1" placeholder="Ask a question, upload a file, or get help..." onkeydown="handleKeyDown(event)" aria-label="Ask Kloriz a question"></textarea>
 
             <div class="composer-row">
                 <div class="composer-attach-wrapper">
@@ -505,7 +505,7 @@
 
         <!-- AI-mistakes reminder: a quiet line directly under the composer. Plain
              text, no icon/background; styled as .composer-disclaimer in shell.css. -->
-        <p class="composer-disclaimer">Kognit can make mistakes. Check important information.</p>
+        <p class="composer-disclaimer">Kloriz can make mistakes. Check important information.</p>
 
         <!-- PHASE 8D: empty-state spacer.
              Display:none normally. Only when .main-content carries
@@ -570,7 +570,7 @@
 <div id="auth-modal" class="modal-overlay hidden">
     <div class="modal-card auth-card">
         <div class="modal-header">
-            <h2 id="auth-modal-title"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path></svg><span id="auth-modal-title-text">Sign In to Kognit</span></h2>
+            <h2 id="auth-modal-title"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path></svg><span id="auth-modal-title-text">Sign In to Kloriz</span></h2>
             <button class="close-modal-btn" onclick="closeAuthModal()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
         </div>
 
@@ -814,7 +814,7 @@
 <div id="logout-confirm-modal" class="modal-overlay hidden">
     <div class="modal-card confirm-card" role="alertdialog" aria-modal="true"
          aria-labelledby="logout-confirm-title" aria-describedby="logout-confirm-desc">
-        <h2 id="logout-confirm-title" class="confirm-title">Log out of Kognit?</h2>
+        <h2 id="logout-confirm-title" class="confirm-title">Log out of Kloriz?</h2>
         <p id="logout-confirm-desc" class="confirm-desc">You can sign back in anytime. Your chats and learning progress stay saved to your account.</p>
         <div class="confirm-actions">
             <button type="button" class="btn-confirm-cancel" data-autofocus onclick="closeLogoutConfirm()">Cancel</button>

@@ -527,13 +527,13 @@ window.toggleAuthMode = function() {
     const toggleLink = document.getElementById("auth-toggle-link");
 
     if (isSignUpMode) {
-        titleText.textContent = "Create a Kognit Account";
+        titleText.textContent = "Create a Kloriz Account";
         submitBtn.textContent = "Sign Up";
         toggleDesc.textContent = "Already have an account?";
         toggleLink.textContent = "Sign In";
         submitBtn.onclick = () => handleEmailAuth('signup');
     } else {
-        titleText.textContent = "Sign In to Kognit";
+        titleText.textContent = "Sign In to Kloriz";
         submitBtn.textContent = "Sign In";
         toggleDesc.textContent = "Don't have an account?";
         toggleLink.textContent = "Sign Up";
@@ -941,7 +941,7 @@ function promptLoginRequired() {
     openAuthModal();
     const errorMsg = document.getElementById("auth-error-msg");
     if (errorMsg) {
-        errorMsg.textContent = "Please log in or create an account to continue using Kognit.";
+        errorMsg.textContent = "Please log in or create an account to continue using Kloriz.";
         errorMsg.classList.remove("hidden");
     }
 }
@@ -2119,7 +2119,7 @@ async function submitUserMessageAndAppendReplyInner(meta, msg, finalText, chat, 
     if (chatBox) {
         loadingDiv = document.createElement("div");
         loadingDiv.className = "bot-message";
-        loadingDiv.textContent = "Kognit is searching through your book & notes...";
+        loadingDiv.textContent = "Kloriz is searching through your book & notes...";
         chatBox.appendChild(loadingDiv);
         chatBox.scrollTop = chatBox.scrollHeight;
     }
@@ -2157,7 +2157,7 @@ async function submitUserMessageAndAppendReplyInner(meta, msg, finalText, chat, 
         }
     } catch (e) {
         if (isStillViewingThisChat() && loadingDiv && document.getElementById("chat-box").contains(loadingDiv)) {
-            loadingDiv.textContent = "Error connecting to Kognit Engine.";
+            loadingDiv.textContent = "Error connecting to Kloriz Engine.";
         }
     }
 }
@@ -2335,7 +2335,7 @@ function renderEmptyChatGreeting(chatBox) {
     const greetingDiv = document.createElement("div");
     greetingDiv.className = "empty-chat-greeting";
     greetingDiv.innerHTML = `
-        <span class="empty-chat-logo" role="img" aria-label="Kognit"></span>
+        <span class="empty-chat-logo" role="img" aria-label="Kloriz"></span>
         <h1 class="empty-chat-title"><span class="empty-chat-title-lead"></span> <span class="empty-chat-title-name"></span></h1>
         <p class="empty-chat-subtitle">Your personal AI academic assistant</p>
         <p class="empty-chat-mobile-title">How can I help you today?</p>
@@ -3839,7 +3839,7 @@ window.sendMessage = async function() {
             if (!replyText) {
                 // Nothing was ever generated - a plain, self-explanatory
                 // message is enough, no separate notice needed.
-                replyText = "The connection was interrupted before Kognit could answer. Please try again.";
+                replyText = "The connection was interrupted before Kloriz could answer. Please try again.";
             } else if (streamState.terminalType !== "error") {
                 // Genuine partial content the student already watched
                 // stream in (interrupted terminal, or a drop with no
@@ -3939,7 +3939,7 @@ window.sendMessage = async function() {
             if (chatBox.contains(loadingDiv)) chatBox.removeChild(loadingDiv);
             const errorDiv = document.createElement("div");
             errorDiv.className = "bot-message";
-            errorDiv.textContent = "Error connecting to Kognit Engine.";
+            errorDiv.textContent = "Error connecting to Kloriz Engine.";
             chatBox.appendChild(errorDiv);
         }
     } finally {
@@ -4532,7 +4532,7 @@ function renderStrengthsSection(snapshotResult) {
 
     const strengths = snapshotResult.value.strengths || [];
     if (strengths.length === 0) {
-        container.innerHTML = `<div class="sp-empty-state">Kognit needs a bit more learning evidence before it can show your strengths here.</div>`;
+        container.innerHTML = `<div class="sp-empty-state">Kloriz needs a bit more learning evidence before it can show your strengths here.</div>`;
         return;
     }
 
@@ -4672,7 +4672,7 @@ function renderNextStepsSection(nextStepsResult) {
 
     const recommendations = nextStepsResult.value.recommendations || [];
     if (recommendations.length === 0) {
-        container.innerHTML = `<div class="sp-empty-state">No recommendations yet - Kognit needs a little more learning evidence first.</div>`;
+        container.innerHTML = `<div class="sp-empty-state">No recommendations yet - Kloriz needs a little more learning evidence first.</div>`;
         return;
     }
 

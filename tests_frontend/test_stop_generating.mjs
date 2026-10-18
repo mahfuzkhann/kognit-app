@@ -239,7 +239,7 @@ console.log("\nB. Markup / accessibility / disclaimer");
 {
     const h = await boot();
     const doc = h.doc;
-    const DISCLAIMER = "Kognit can make mistakes. Check important information.";
+    const DISCLAIMER = "Kloriz can make mistakes. Check important information.";
 
     await check("idle state: Send visible and enabled, Stop hidden", () => {
         eq(JSON.stringify(h.state()), JSON.stringify({ send: true, stop: false }));
@@ -553,7 +553,7 @@ await check("network failure before any response still shows the existing error 
     const h = await boot(); h.seed();
     h.w.fetch = () => Promise.reject(new h.w.TypeError("Failed to fetch"));
     await h.send("Hello");
-    assert(/Error connecting to Kognit Engine\./.test(h.chatBox.textContent));
+    assert(/Error connecting to Kloriz Engine\./.test(h.chatBox.textContent));
     eq(JSON.stringify(h.state()), JSON.stringify({ send: true, stop: false }));
 });
 
@@ -563,7 +563,7 @@ await check("a stream that errors mid-read (no Stop pressed) still shows the exi
     await h.stream(h.session(), "partial");
     h.session().fail(new h.w.TypeError("network error"));
     await sleep(60);
-    assert(/Error connecting to Kognit Engine\./.test(h.chatBox.textContent), "genuine errors are still surfaced");
+    assert(/Error connecting to Kloriz Engine\./.test(h.chatBox.textContent), "genuine errors are still surfaced");
     eq(JSON.stringify(h.state()), JSON.stringify({ send: true, stop: false }));
     eq(h.session().aborted, false);
 });
