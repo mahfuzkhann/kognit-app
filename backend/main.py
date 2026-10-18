@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -16,7 +17,7 @@ from fastapi.templating import Jinja2Templates
 from backend.ai_engine import (
     stream_ai_response, GENERIC_CHAT_ERROR, generate_ai_response, generate_quiz_questions,
     generate_chat_title, MODEL_NAME, new_request_id, ERROR_INTERNAL, ERROR_STREAM_INTERRUPTED,
-    MAX_PDF_CONTEXT_CHARS, QUIZ_MIN_QUESTIONS, QUIZ_MAX_QUESTIONS,
+    MAX_PDF_CONTEXT_CHARS, QUIZ_MIN_QUESTIONS, QUIZ_MAX_QUESTIONS, sanitize_student_name,
 )
 from backend.research_decision import decide_research
 from backend.research_models import normalize_grounding_metadata, research_result_to_dict
@@ -893,6 +894,42 @@ async def _get_academic_context(user_token: str, user_id: str) -> Tuple[Optional
     return profile.get("user_class"), profile.get("stream")
 
 
+async def _get_student_display_name(user_token: str, user_id: str) -> Optional[str]:
+    """
+    Returns the authenticated student's sanitized profile name, or None.
+
+    Used ONLY by /api/chat and /api/chat/stream so the main chat model can
+    answer "What is my name?". Deliberately separate from
+    _get_academic_context (whose (user_class, stream) return shape is relied
+    on by many callers/tests) at the cost of one extra RLS-scoped read.
+
+    SECURITY: the name comes exclusively from get_student_profile, called with
+    THIS request's verified user_id/token (RLS restricts the row to that
+    student). It is never accepted from the client, never cached, and never
+    logged - only user_id and the exception type are. Any failure (database
+    error, missing/empty/unusable name) yields None, i.e. exactly the
+    behaviour before this feature: chat must never fail because of it.
+    """
+    try:
+        profile = await get_student_profile(user_token=user_token, user_id=user_id)
+    except DatabaseError:
+        logger.warning(
+            "_get_student_display_name: profile fetch failed, proceeding without "
+            "a student name (user_id=%s)", user_id,
+        )
+        return None
+    except Exception as exc:
+        logger.warning(
+            "_get_student_display_name: unexpected %s, proceeding without a "
+            "student name (user_id=%s)", type(exc).__name__, user_id,
+        )
+        return None
+
+    if not isinstance(profile, dict):
+        return None
+    return sanitize_student_name(profile.get("name"))
+
+
 
 # ---------------------------------------------------------------------------
 # PHASE 8E: shared learning-memory extraction
@@ -1003,7 +1040,13 @@ async def chat_endpoint(
         # own Profile (see _get_academic_context above) - never a
         # client-supplied form field. `board` is a single hardcoded
         # constant (DEFAULT_BOARD above) for the same reason.
-        user_class, stream = await _get_academic_context(user_token=user_token, user_id=user_id)
+        # The student's name is fetched concurrently by a separate helper (see
+        # _get_student_display_name), which never raises. _get_academic_context
+        # is unchanged and keeps its own existing error behaviour.
+        (user_class, stream), student_name = await asyncio.gather(
+            _get_academic_context(user_token=user_token, user_id=user_id),
+            _get_student_display_name(user_token=user_token, user_id=user_id),
+        )
 
         # generate_ai_response is a synchronous, blocking call (it calls the
         # Gemini SDK directly). Running it in FastAPI's threadpool keeps it
@@ -1037,6 +1080,7 @@ async def chat_endpoint(
                 return_metadata=True,
                 enable_research=True,
                 request_id=request_id,
+                student_name=student_name,
             )
             research_latency = time.perf_counter() - t_research_start
             response = ai_result.text
@@ -1067,6 +1111,7 @@ async def chat_endpoint(
                 pdf_context=pdf_context,
                 history=conversation_history,
                 request_id=request_id,
+                student_name=student_name,
             )
         t_after_ai = time.perf_counter()
         logger.info(
@@ -1217,7 +1262,10 @@ async def chat_stream_endpoint(
 
     # Identical academic-context resolution to /api/chat: profile-derived,
     # server-side, never client-supplied.
-    user_class, stream_value = await _get_academic_context(user_token=user_token, user_id=user_id)
+    (user_class, stream_value), student_name = await asyncio.gather(
+        _get_academic_context(user_token=user_token, user_id=user_id),
+        _get_student_display_name(user_token=user_token, user_id=user_id),
+    )
 
     research_decision = decide_research(prompt)
     enable_research = research_decision.research_requested
@@ -1270,6 +1318,7 @@ async def chat_stream_endpoint(
                 history=conversation_history,
                 enable_research=enable_research,
                 request_id=request_id,
+                student_name=student_name,
             )
 
             async for chunk in iterate_in_threadpool(gen):
