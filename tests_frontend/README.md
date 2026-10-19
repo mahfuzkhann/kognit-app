@@ -1,6 +1,6 @@
 # Kognit frontend tests (Phase 8 & 9)
 
-Behaviour tests for Kognit's frontend interaction layer. All ten suites
+Behaviour tests for Kognit's frontend interaction layer. All eleven suites
 load the **real** `templates/index.html` and the **real** source files
 into jsdom — there is no rebuilt fixture markup, so if the template or a
 source file drifts from what these expect, they fail.
@@ -11,16 +11,16 @@ source file drifts from what these expect, they fail.
 cd tests_frontend
 npm install      # installs jsdom, marked, mathjax, fake-indexeddb and puppeteer-core (test-only); no build step, no bundler,
                  # and NO browser download (puppeteer-core drives a browser you already have)
-npm test         # runs all ten suites (the three real-browser ones print SKIPPED if no Chrome/Edge is found)
-npm run test:jsdom    # the seven jsdom suites only
+npm test         # runs all eleven suites (the three real-browser ones print SKIPPED if no Chrome/Edge is found)
+npm run test:jsdom    # the eight jsdom suites only
 npm run test:browser  # the three real-browser suites only (Pocket Notes; Stop generating + disclaimer; UI refinement)
 ```
 
 Expected: `38 passed` (ui-core) + `57 passed` (stream-render) + `14 passed` (theme) +
 `33 passed` (nav-views) + `62 passed` (security-hardening) + `91 passed` (notes, jsdom) +
-`45 passed` (stop-generating, jsdom) + `10 passed` (notes-browser, real Chrome) +
+`45 passed` (stop-generating, jsdom) + `80 passed` (profile-form, jsdom) + `10 passed` (notes-browser, real Chrome) +
 `18 passed` (stop-generating-browser, real Chrome) + `38 passed` (ui-refinement-browser, real Chrome) =
-**406 passed, 0 failed**. Without a browser the three real-browser suites print `SKIPPED` and the total is 340. The older "120" figure that used to be printed here
+**486 passed, 0 failed**. Without a browser the three real-browser suites print `SKIPPED` and the total is 420. The older "120" figure that used to be printed here
 pre-dates the P1 hardening suites and is no longer accurate.
 
 ## What each suite covers
@@ -126,6 +126,16 @@ list scroller on any tab stop; row action buttons are >= 24x24. Guards what must
 spacing, phone drawer sizes, independent wheel/keyboard scrolling (list vs conversation vs page vs
 composer), navigation / search / new chat / select / rename / delete / composer / theme toggle, and
 `prefers-reduced-motion`. Headless Chrome hides scrollbars by default; the test removes that flag.
+
+`test_profile_form.mjs` (Student Profile form, jsdom) - the REAL template and REAL `app.js` against a
+fake `/api/profile`. Seven individual classes (Class 6-12) as single-choice radio cards; the stream
+choice shown only for Classes 9-12 and cleared when leaving them; the exact class/stream in the PUT
+body (never a grouped band); name/class/stream validation; failed and duplicate saves; success
+announced only after the server confirms; legacy grouped profiles open with no class pre-selected and
+are never mapped; first-run onboarding; radiogroup/label/live-region semantics; a scope guard that no
+Email / Preferred Language / Learning Goals field exists; and a CSS contract (teal accent defined locally,
+no blue/indigo, responsive grid, no layout shift). It cannot prove real layout or colour - that needs a
+browser.
 
 ## What is NOT covered
 

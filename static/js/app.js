@@ -745,56 +745,106 @@ function renderProfileTrigger() {
     }
 }
 
-// BUG 2: Class 6-8 has no Science/Commerce/Arts streaming in the NCTB
-// curriculum - that only starts at Class 9. Must match
-// NO_STREAM_CLASSES in backend/main.py exactly (frontend hiding is UX
-// only; the backend validation is the actual boundary - see that
-// module's comment).
-const PROFILE_NO_STREAM_CLASSES = new Set(["Class 6-8"]);
+// ==================== PROFILE FORM (individual classes) ====================
+// The profile form saves the student's EXACT class (Class 6 ... Class 12).
+// Streams (Science/Commerce/Arts) only exist from Class 9 in the NCTB
+// curriculum, so the stream choice is shown - and required - only for
+// Classes 9-12. Must match NO_STREAM_CLASSES in backend/main.py (frontend
+// hiding is UX only; the backend validation is the actual boundary).
+const PROFILE_EXACT_CLASSES = new Set([
+    "Class 6", "Class 7", "Class 8", "Class 9", "Class 10", "Class 11", "Class 12",
+]);
+const PROFILE_STREAM_CLASSES = new Set(["Class 9", "Class 10", "Class 11", "Class 12"]);
 
-function _selectPill(groupId, value) {
-    const group = document.getElementById(groupId);
-    if (!group) return;
-    group.querySelectorAll(".pill-btn").forEach((btn) => {
-        const isMatch = btn.dataset.value === value;
-        btn.classList.toggle("selected", isMatch);
-        btn.setAttribute("aria-pressed", isMatch ? "true" : "false");
-    });
+// Profiles saved before individual classes existed hold a grouped band
+// ("Class 6-8", "Class 9-10 (SSC)", "Class 11-12 (HSC)"). Which exact class
+// such a student is in is unknown, so it is NEVER guessed or mapped: the form
+// opens with no class selected and asks them to choose. Their saved stream
+// is kept and shown again as soon as they pick a Class 9-12.
+const PROFILE_CLASS_HINT_DEFAULT = "Select your current class";
+const PROFILE_CLASS_HINT_LEGACY = "Please choose your exact class";
+const PROFILE_SAVED_CONFIRM_MS = 700;
+
+function _profileRadios(groupId) {
+    return Array.from(document.querySelectorAll(`#${groupId} input[type="radio"]`));
 }
 
-function _getSelectedPillValue(groupId) {
-    const selected = document.querySelector(`#${groupId} .pill-btn.selected`);
-    return selected ? selected.dataset.value : null;
+function _getSelectedProfileValue(groupId) {
+    const checked = document.querySelector(`#${groupId} input[type="radio"]:checked`);
+    return checked ? checked.value : null;
 }
 
-function updateProfileStreamVisibility(selectedClass) {
-    const streamGroup = document.getElementById("profile-stream-group");
-    const hideStream = PROFILE_NO_STREAM_CLASSES.has(selectedClass);
-    streamGroup.classList.toggle("hidden", hideStream);
-    if (hideStream) {
-        // A previously-chosen stream no longer applies once Class 6-8 is
-        // selected - clear it rather than silently submitting a stale
-        // value the student can no longer see.
-        document.querySelectorAll("#profile-stream-pills .pill-btn").forEach((b) => {
-            b.classList.remove("selected");
-            b.setAttribute("aria-pressed", "false");
-        });
+// value === null (or any value with no matching option) leaves nothing selected.
+function _setProfileRadio(groupId, value) {
+    _profileRadios(groupId).forEach((radio) => { radio.checked = (radio.value === value); });
+}
+
+function _hideProfileError() {
+    const nameInput = document.getElementById("profile-name-input");
+    document.getElementById("profile-error-msg").classList.add("hidden");
+    if (nameInput) nameInput.removeAttribute("aria-invalid");
+}
+
+function _setProfileStatus(message) {
+    document.getElementById("profile-status-msg").textContent = message || "";
+}
+
+function _showProfileError(message, focusEl) {
+    const errorMsg = document.getElementById("profile-error-msg");
+    _setProfileStatus("");
+    errorMsg.textContent = message;
+    errorMsg.classList.remove("hidden");
+    if (focusEl) {
+        if (focusEl.id === "profile-name-input") focusEl.setAttribute("aria-invalid", "true");
+        focusEl.focus();
     }
 }
 
-window.selectProfileClass = function(btn) {
-    _selectPill("profile-class-group", btn.dataset.value);
-    updateProfileStreamVisibility(btn.dataset.value);
+// null = no class chosen yet (new profile, or a legacy grouped value): the
+// stream choice stays hidden but any remembered stream is NOT cleared. An
+// exact class outside 9-12 clears it, so a stale stream the student can no
+// longer see is never submitted.
+function updateProfileStreamVisibility(selectedClass) {
+    const streamGroup = document.getElementById("profile-stream-group");
+    const showStream = PROFILE_STREAM_CLASSES.has(selectedClass);
+    streamGroup.classList.toggle("hidden", !showStream);
+    if (!showStream && selectedClass) {
+        _setProfileRadio("profile-stream-pills", null);
+    }
+}
+
+// Reflects a profile-shaped object in the form. Used to open the form and,
+// after a successful save, to show exactly what the server stored.
+function _applyProfileSelection(userClass, stream) {
+    const exact = PROFILE_EXACT_CLASSES.has(userClass);
+    _setProfileRadio("profile-class-group", exact ? userClass : null);
+    _setProfileRadio("profile-stream-pills", stream || null);
+    updateProfileStreamVisibility(exact ? userClass : null);
+    document.getElementById("profile-class-hint").textContent =
+        (userClass && !exact) ? PROFILE_CLASS_HINT_LEGACY : PROFILE_CLASS_HINT_DEFAULT;
+}
+
+window.selectProfileClass = function(radio) {
+    updateProfileStreamVisibility(radio.value);
+    _hideProfileError();
 };
 
-window.selectProfileStream = function(btn) {
-    _selectPill("profile-stream-pills", btn.dataset.value);
+window.selectProfileStream = function() {
+    _hideProfileError();
 };
 
 let _profileModalIsOnboarding = false;
+let _profileSaveInFlight = false;
+let _profileCloseTimer = null;
+
+function _profileIdleSaveLabel() {
+    return _profileModalIsOnboarding ? "Get Started" : "Save Changes";
+}
 
 window.openProfileModal = function(opts = {}) {
     _profileModalIsOnboarding = !!opts.onboarding;
+    clearTimeout(_profileCloseTimer);
+    _profileCloseTimer = null;
 
     // PHASE 8G: first-run onboarding is the one case where this modal
     // must not be dismissible - a student who escapes out of it ends up
@@ -807,81 +857,85 @@ window.openProfileModal = function(opts = {}) {
         .setAttribute("data-required", _profileModalIsOnboarding ? "true" : "false");
 
     document.getElementById("profile-modal").classList.remove("hidden");
-    document.getElementById("profile-error-msg").classList.add("hidden");
+    _hideProfileError();
+    _setProfileStatus("");
     document.getElementById("profile-modal-title-text").textContent =
         _profileModalIsOnboarding ? "Set up your learning space" : "Your Profile";
-    document.getElementById("profile-save-btn").textContent =
-        _profileModalIsOnboarding ? "Get Started" : "Save";
+    document.getElementById("profile-modal-subtitle").textContent = _profileModalIsOnboarding
+        ? "Choose your class so Kloriz matches your syllabus"
+        : "Manage your academic information and preferences";
+
+    const saveBtn = document.getElementById("profile-save-btn");
+    saveBtn.disabled = false;
+    saveBtn.textContent = _profileIdleSaveLabel();
 
     const nameInput = document.getElementById("profile-name-input");
+    // Enter in the name field saves; selecting a class/stream never submits.
+    nameInput.onkeydown = (e) => {
+        if (e.key === "Enter") { e.preventDefault(); window.saveProfile(); }
+    };
 
-    let initialClass, initialStream;
     if (currentProfile) {
         nameInput.value = currentProfile.name;
-        initialClass = currentProfile.user_class;
-        initialStream = currentProfile.stream || null;
+        _applyProfileSelection(currentProfile.user_class, currentProfile.stream);
     } else {
         // GOOGLE SIGN-IN NAME PREFILL: Supabase's Google OAuth provider
         // populates user_metadata.full_name (and usually .name) - prefill
         // from whichever is present so the student doesn't have to retype
-        // a name Google already gave Kognit. The field stays fully
+        // a name Google already gave Kloriz. The field stays fully
         // editable (Phase 6A requirement): this is a display convenience
         // only, never trusted for authorization.
         const meta = (currentUser && currentUser.user_metadata) || {};
         nameInput.value = meta.full_name || meta.name || "";
-        initialClass = "Class 9-10 (SSC)";
-        initialStream = "Science (বিজ্ঞান)";
-    }
-
-    _selectPill("profile-class-group", initialClass);
-    updateProfileStreamVisibility(initialClass);
-    if (initialStream) {
-        _selectPill("profile-stream-pills", initialStream);
+        // With seven exact classes there is no sensible default to
+        // pre-select, so a new student chooses one deliberately.
+        _applyProfileSelection(null, null);
     }
 
     setTimeout(() => nameInput.focus(), 50);
 };
 
 window.closeProfileModal = function() {
+    clearTimeout(_profileCloseTimer);
+    _profileCloseTimer = null;
     document.getElementById("profile-modal").classList.add("hidden");
 };
 
 window.saveProfile = async function() {
     const nameInput = document.getElementById("profile-name-input");
-    const errorMsg = document.getElementById("profile-error-msg");
     const saveBtn = document.getElementById("profile-save-btn");
 
-    errorMsg.classList.add("hidden");
+    // Duplicate-submission guard: a save is already running, or has just
+    // succeeded and the confirmation is still showing.
+    if (_profileSaveInFlight || saveBtn.disabled) return;
+
+    _hideProfileError();
+    _setProfileStatus("");
 
     const name = nameInput.value.trim();
     if (!name) {
-        errorMsg.textContent = "Please enter your name.";
-        errorMsg.classList.remove("hidden");
+        _showProfileError("Please enter your name.", nameInput);
         return;
     }
 
-    const selectedClass = _getSelectedPillValue("profile-class-group");
+    const selectedClass = _getSelectedProfileValue("profile-class-group");
     if (!selectedClass) {
-        errorMsg.textContent = "Please select your class.";
-        errorMsg.classList.remove("hidden");
+        _showProfileError("Please select your class.", _profileRadios("profile-class-group")[0]);
         return;
     }
 
-    // BUG 2: Class 6-8 has no stream - send an empty value rather than
-    // requiring a selection the curriculum doesn't have. Every other
-    // class still requires one.
-    const noStream = PROFILE_NO_STREAM_CLASSES.has(selectedClass);
-    const selectedStream = noStream ? "" : _getSelectedPillValue("profile-stream-pills");
-    if (!noStream && !selectedStream) {
-        errorMsg.textContent = "Please select your stream.";
-        errorMsg.classList.remove("hidden");
+    // Only Classes 9-12 have a stream; for 6-8 send an empty value rather
+    // than a stream the curriculum doesn't have. Every Class 9-12 requires one.
+    const needsStream = PROFILE_STREAM_CLASSES.has(selectedClass);
+    const selectedStream = needsStream ? _getSelectedProfileValue("profile-stream-pills") : "";
+    if (needsStream && !selectedStream) {
+        _showProfileError("Please select your stream.", _profileRadios("profile-stream-pills")[0]);
         return;
     }
 
     const { data: { session } } = await supabaseClient.auth.getSession();
     if (!session) {
-        errorMsg.textContent = "Please log in again.";
-        errorMsg.classList.remove("hidden");
+        _showProfileError("Please log in again.");
         return;
     }
 
@@ -890,10 +944,10 @@ window.saveProfile = async function() {
     formData.append("user_class", selectedClass);
     formData.append("stream", selectedStream);
 
-    const savingLabel = "Saving...";
-    const idleLabel = _profileModalIsOnboarding ? "Get Started" : "Save";
+    _profileSaveInFlight = true;
     saveBtn.disabled = true;
-    saveBtn.textContent = savingLabel;
+    saveBtn.textContent = "Saving...";
+    let confirmationShowing = false;
 
     try {
         const resp = await fetch("/api/profile", {
@@ -904,21 +958,37 @@ window.saveProfile = async function() {
 
         if (!resp.ok) {
             const data = await resp.json().catch(() => ({}));
-            errorMsg.textContent = data.detail || "Could not save your profile. Please try again.";
-            errorMsg.classList.remove("hidden");
+            _showProfileError(data.detail || "Could not save your profile. Please try again.");
             return;
         }
 
         const data = await resp.json();
+        if (!data || !data.profile) {
+            _showProfileError("Could not save your profile. Please try again.");
+            return;
+        }
+
+        // Success is reported only now, after the backend confirmed it, and
+        // the form shows what the server actually stored (not what was typed).
         currentProfile = data.profile;
         renderProfileTrigger();
-        closeProfileModal();
+
+        if (!document.getElementById("profile-modal").classList.contains("hidden")) {
+            _applyProfileSelection(data.profile.user_class, data.profile.stream);
+            nameInput.value = data.profile.name;
+            _setProfileStatus("Profile saved.");
+            confirmationShowing = true;
+            // Brief confirmation, then close. The button stays disabled until
+            // then (re-enabled by the next openProfileModal), so a second
+            // click cannot send a duplicate save.
+            _profileCloseTimer = setTimeout(closeProfileModal, PROFILE_SAVED_CONFIRM_MS);
+        }
     } catch (e) {
-        errorMsg.textContent = "Could not save your profile. Please try again.";
-        errorMsg.classList.remove("hidden");
+        _showProfileError("Could not save your profile. Please try again.");
     } finally {
-        saveBtn.disabled = false;
-        saveBtn.textContent = idleLabel;
+        _profileSaveInFlight = false;
+        saveBtn.textContent = _profileIdleSaveLabel();
+        if (!confirmationShowing) saveBtn.disabled = false;
     }
 };
 
@@ -4371,7 +4441,7 @@ function renderStudentProfileHeader() {
 
     if (currentProfile) {
         nameEl.textContent = currentProfile.name;
-        // Class 6-8 has no stream (see PROFILE_NO_STREAM_CLASSES above) -
+        // Class 6-8 has no stream (see PROFILE_STREAM_CLASSES above) -
         // show the class alone rather than "Class 6-8 · null".
         metaEl.textContent = currentProfile.stream
             ? `${currentProfile.user_class} · ${currentProfile.stream}`

@@ -1768,20 +1768,53 @@ async def quiz_submit_endpoint(
 # it deliberately does not itself encode which classes are exempt, for
 # the same reason VALID_PROFILE_CLASSES/VALID_PROFILE_STREAMS are not a
 # DB-level CHECK constraint (see that migration's comment).
+#
+# INDIVIDUAL CLASSES (profile redesign): the profile form now lets a student
+# pick their exact class, "Class 6" ... "Class 12", instead of one of three
+# grouped bands. `user_class` stays the same text column and the same
+# `user_class` form field - the value is simply more precise - so no schema
+# change or migration is needed, and every downstream consumer (chat prompt
+# academic clause, logs, quiz-attempt rows, the sidebar/pill labels) already
+# treats it as an opaque display string and needs no change.
+#
+# The three grouped values are kept as LEGACY_PROFILE_CLASSES, not removed:
+#   * rows already saved with a grouped value must keep loading and keep
+#     working (nothing is rewritten or guessed - "Class 9-10 (SSC)" is NOT
+#     silently converted to Class 9 or Class 10, because which of the two the
+#     student is in is unknown; the profile form asks them to choose);
+#   * a browser still running the previous cached frontend can keep saving.
+# New saves from the current form always use an exact class. Once no stale
+# clients/rows remain, LEGACY_PROFILE_CLASSES can be deleted in one place.
 # ---------------------------------------------------------------------------
 MAX_PROFILE_NAME_LENGTH = 100
 
-VALID_PROFILE_CLASSES = {
+EXACT_PROFILE_CLASSES = {
+    "Class 6",
+    "Class 7",
+    "Class 8",
+    "Class 9",
+    "Class 10",
+    "Class 11",
+    "Class 12",
+}
+LEGACY_PROFILE_CLASSES = {
     "Class 6-8",
     "Class 9-10 (SSC)",
     "Class 11-12 (HSC)",
 }
+VALID_PROFILE_CLASSES = EXACT_PROFILE_CLASSES | LEGACY_PROFILE_CLASSES
 VALID_PROFILE_STREAMS = {
     "Science (বিজ্ঞান)",
     "Commerce (ব্যবসায় শিক্ষা)",
     "Arts (মানবিক)",
 }
+# Streams (Science/Commerce/Arts) start at Class 9 in the NCTB curriculum, so
+# Classes 6, 7, 8 (and the legacy "Class 6-8" band) have none; Classes 9-12
+# (and the legacy 9-10 / 11-12 bands) require one.
 NO_STREAM_CLASSES = {
+    "Class 6",
+    "Class 7",
+    "Class 8",
     "Class 6-8",
 }
 

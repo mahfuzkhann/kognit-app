@@ -983,8 +983,242 @@ body {
     display: block;
 }
 
+/* ---- PROFILE MODAL (redesigned) ---------------------------------
+   Same modal shell (.modal-overlay/.modal-card) as every other dialog;
+   only the card width and its content are profile-specific. Everything
+   reads the existing semantic tokens (surface-input, border-input,
+   text-*, focus, success/error) so dark/light theme switching keeps
+   working with no profile-specific theme code.
+
+   The ONE addition is the selection accent. The mockup calls for a teal
+   selected state, but tokens.css has no teal (its accents are blue and
+   indigo), and the global theme must not change for one screen - so two
+   LOCAL custom properties are scoped to .profile-card only:
+     dark : #2dd4bf  (teal-400) on the near-black card
+     light: #0f766e  (teal-700) on the light card
+   Both clear WCAG non-text contrast (>= 3:1) against their surfaces; the
+   selected card also shows a checkmark, so colour is never the only cue. */
 .profile-card {
-    max-width: 380px !important;
+    max-width: 560px;
+    max-height: 92dvh;
+    overflow-y: auto;
+    gap: 20px;
+    --profile-accent: #2dd4bf;
+    --profile-accent-tint: rgba(45, 212, 191, 0.10);
+}
+
+:root[data-theme="light"] .profile-card {
+    --profile-accent: #0f766e;
+    --profile-accent-tint: rgba(15, 118, 110, 0.08);
+}
+
+@media (prefers-color-scheme: light) {
+    :root:not([data-theme]) .profile-card {
+        --profile-accent: #0f766e;
+        --profile-accent-tint: rgba(15, 118, 110, 0.08);
+    }
+}
+
+.profile-header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--color-border);
+}
+
+.profile-avatar {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    background: var(--color-surface-input);
+    border: 1px solid var(--color-border-input);
+    color: var(--color-text-secondary);
+}
+
+.profile-heading {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.profile-heading h2 {
+    font-size: 20px;
+    line-height: 1.25;
+    color: var(--color-text-primary);
+}
+
+.profile-subtitle {
+    margin-top: 2px;
+    font-size: 13px;
+    line-height: 1.4;
+    color: var(--color-text-muted);
+}
+
+.profile-header .close-modal-btn {
+    align-self: flex-start;
+}
+
+.profile-card .form-group label {
+    font-size: 13px;
+    color: var(--color-text-primary);
+}
+
+.profile-card .form-group input {
+    padding: 12px;
+    border-radius: 10px;
+}
+
+.profile-card .form-group input:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 1px;
+}
+
+.profile-card .form-group input[aria-invalid="true"] {
+    border-color: var(--color-error);
+}
+
+.profile-section {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.profile-section-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+}
+
+.profile-section-hint {
+    font-size: 12px;
+    color: var(--color-text-muted);
+}
+
+/* Selectable cards: one native radio per option, visually hidden but
+   stretched over its label so the whole card is the click/tap target and
+   the radio keeps real focus, arrow-key and screen-reader behaviour. */
+.profile-choice-grid {
+    display: grid;
+    gap: 10px;
+    margin-top: 8px;
+}
+
+.profile-class-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.profile-stream-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.profile-choice {
+    position: relative;
+    display: block;
+}
+
+.profile-choice-input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: pointer;
+    z-index: 1;
+}
+
+.profile-choice-box {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+    padding: 8px 26px;
+    background: var(--color-surface-input);
+    border: 1px solid var(--color-border-input);
+    border-radius: 10px;
+    font-size: 13px;
+    line-height: 1.3;
+    text-align: center;
+    color: var(--color-text-secondary);
+    transition: background-color 0.15s, border-color 0.15s, box-shadow 0.15s, color 0.15s;
+}
+
+/* Reserved symmetric side padding + an absolutely-positioned check means
+   selecting a card never changes its size or moves its label. */
+.profile-choice-check {
+    position: absolute;
+    right: 9px;
+    top: 50%;
+    transform: translateY(-50%);
+    opacity: 0;
+    color: var(--profile-accent);
+}
+
+.profile-choice:hover .profile-choice-box {
+    border-color: var(--color-border-strong);
+    background-color: var(--color-surface-hover);
+}
+
+.profile-choice-input:focus-visible + .profile-choice-box {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+}
+
+.profile-choice-input:checked + .profile-choice-box {
+    border-color: var(--profile-accent);
+    background-image: linear-gradient(var(--profile-accent-tint), var(--profile-accent-tint));
+    box-shadow: 0 0 0 1px var(--profile-accent);
+    color: var(--color-text-primary);
+}
+
+.profile-choice-input:checked + .profile-choice-box .profile-choice-check {
+    opacity: 1;
+}
+
+.profile-feedback {
+    margin-bottom: 0;
+}
+
+.profile-status {
+    font-size: 13px;
+    color: var(--color-success);
+}
+
+.profile-status:empty {
+    display: none;
+}
+
+.profile-save-btn {
+    padding: 14px;
+    font-size: 14px;
+    border-radius: 10px;
+}
+
+.profile-save-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+/* Narrower cards: fewer columns so labels + the reserved check space
+   never get cramped. Phones keep the global full-width .modal-card rule. */
+@media (max-width: 559px) {
+    .profile-class-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+    .profile-stream-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+@media (max-width: 399px) {
+    .profile-class-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
 }
 
 /* PHASE 6A CORRECTION: pill-button choice groups for Class/Stream in the

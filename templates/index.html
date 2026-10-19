@@ -604,52 +604,98 @@
     </div>
 </div>
 
-<!-- PROFILE MODAL (Phase 6A) -->
+<!-- PROFILE MODAL (Phase 6A, redesigned) -->
 <!-- Single compact interaction used for BOTH first-time onboarding
      (auto-opened by checkAndLoadProfile() in app.js when GET /api/profile
-     returns 404) and later edits (opened via the sidebar
-     profile-trigger-btn above). Deliberately just Name, Class, and
-     (when applicable) Stream - no wizard, no extra questions, no
-     explanatory copy beyond the title. Class/Stream use tappable pill
-     buttons rather than <select> dropdowns so choosing feels immediate
-     rather than form-like; #profile-stream-group is hidden entirely by
-     app.js's updateProfileStreamVisibility() when Class 6-8 is selected,
-     since Class 6-8 has no Science/Commerce/Arts stream in the NCTB
-     curriculum (that starts at Class 9) - see NO_STREAM_CLASSES in
-     backend/main.py for the actual enforcement boundary. -->
+     returns 404) and later edits (opened via the sidebar profile-trigger-btn
+     / the Student Profile panel's "Edit profile" button). Fields are
+     unchanged: Name, Class and (when applicable) Stream - nothing was added
+     to the profile data model.
+
+     Class is one native radio per class (Class 6 ... Class 12), styled as
+     selectable cards: the saved value is the exact class, never a grouped
+     band. Stream is a second radio group, hidden entirely (and cleared) by
+     app.js's updateProfileStreamVisibility() unless the selected class is
+     9-12; the backend's NO_STREAM_CLASSES / _validate_profile_stream in
+     backend/main.py is the real enforcement boundary. Native radios give
+     arrow-key navigation, a single-choice group and screen-reader semantics
+     for free; the visible card is the label next to the visually-hidden
+     input. -->
 <div id="profile-modal" class="modal-overlay hidden">
-    <div class="modal-card profile-card" role="dialog" aria-modal="true" aria-labelledby="profile-modal-title-text">
-        <div class="modal-header">
-            <h2><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"></circle><path d="M4 20c0-4 4-6 8-6s8 2 8 6"></path></svg><span id="profile-modal-title-text">Your Profile</span></h2>
+    <div class="modal-card profile-card" role="dialog" aria-modal="true" aria-labelledby="profile-modal-title-text" aria-describedby="profile-modal-subtitle">
+        <div class="profile-header">
+            <span class="profile-avatar" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"></circle><path d="M4 20c0-4 4-6 8-6s8 2 8 6"></path></svg></span>
+            <div class="profile-heading">
+                <h2 id="profile-modal-title-text">Your Profile</h2>
+                <p id="profile-modal-subtitle" class="profile-subtitle">Manage your academic information and preferences</p>
+            </div>
             <button class="close-modal-btn" onclick="closeProfileModal()" aria-label="Close"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
         </div>
 
-        <div id="profile-error-msg" class="auth-error-msg hidden"></div>
+        <div id="profile-error-msg" class="auth-error-msg profile-feedback hidden" role="alert"></div>
 
         <div class="form-group">
-            <label for="profile-name-input">Name</label>
-            <input type="text" id="profile-name-input" placeholder="Your name" maxlength="100">
+            <label for="profile-name-input">Full Name</label>
+            <input type="text" id="profile-name-input" placeholder="Your full name" maxlength="100" autocomplete="name" aria-describedby="profile-error-msg">
         </div>
 
-        <div class="form-group">
-            <label id="profile-class-label">Class</label>
-            <div class="pill-group" id="profile-class-group" role="group" aria-labelledby="profile-class-label">
-                <button type="button" class="pill-btn" data-value="Class 6-8" aria-pressed="false" onclick="selectProfileClass(this)">Class 6-8</button>
-                <button type="button" class="pill-btn" data-value="Class 9-10 (SSC)" aria-pressed="false" onclick="selectProfileClass(this)">Class 9-10 (SSC)</button>
-                <button type="button" class="pill-btn" data-value="Class 11-12 (HSC)" aria-pressed="false" onclick="selectProfileClass(this)">Class 11-12 (HSC)</button>
+        <div class="profile-section">
+            <span id="profile-class-label" class="profile-section-label">Class</span>
+            <span id="profile-class-hint" class="profile-section-hint">Select your current class</span>
+            <div class="profile-choice-grid profile-class-grid" id="profile-class-group" role="radiogroup" aria-labelledby="profile-class-label" aria-describedby="profile-class-hint">
+                <label class="profile-choice">
+                    <input type="radio" class="profile-choice-input" name="profile-class" value="Class 6" onchange="selectProfileClass(this)">
+                    <span class="profile-choice-box"><span class="profile-choice-text">Class 6</span><svg class="profile-choice-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
+                </label>
+                <label class="profile-choice">
+                    <input type="radio" class="profile-choice-input" name="profile-class" value="Class 7" onchange="selectProfileClass(this)">
+                    <span class="profile-choice-box"><span class="profile-choice-text">Class 7</span><svg class="profile-choice-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
+                </label>
+                <label class="profile-choice">
+                    <input type="radio" class="profile-choice-input" name="profile-class" value="Class 8" onchange="selectProfileClass(this)">
+                    <span class="profile-choice-box"><span class="profile-choice-text">Class 8</span><svg class="profile-choice-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
+                </label>
+                <label class="profile-choice">
+                    <input type="radio" class="profile-choice-input" name="profile-class" value="Class 9" onchange="selectProfileClass(this)">
+                    <span class="profile-choice-box"><span class="profile-choice-text">Class 9</span><svg class="profile-choice-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
+                </label>
+                <label class="profile-choice">
+                    <input type="radio" class="profile-choice-input" name="profile-class" value="Class 10" onchange="selectProfileClass(this)">
+                    <span class="profile-choice-box"><span class="profile-choice-text">Class 10</span><svg class="profile-choice-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
+                </label>
+                <label class="profile-choice">
+                    <input type="radio" class="profile-choice-input" name="profile-class" value="Class 11" onchange="selectProfileClass(this)">
+                    <span class="profile-choice-box"><span class="profile-choice-text">Class 11</span><svg class="profile-choice-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
+                </label>
+                <label class="profile-choice">
+                    <input type="radio" class="profile-choice-input" name="profile-class" value="Class 12" onchange="selectProfileClass(this)">
+                    <span class="profile-choice-box"><span class="profile-choice-text">Class 12</span><svg class="profile-choice-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
+                </label>
             </div>
         </div>
 
-        <div class="form-group" id="profile-stream-group">
-            <label id="profile-stream-label">Stream</label>
-            <div class="pill-group" id="profile-stream-pills" role="group" aria-labelledby="profile-stream-label">
-                <button type="button" class="pill-btn" data-value="Science (বিজ্ঞান)" aria-pressed="false" onclick="selectProfileStream(this)">Science (বিজ্ঞান)</button>
-                <button type="button" class="pill-btn" data-value="Commerce (ব্যবসায় শিক্ষা)" aria-pressed="false" onclick="selectProfileStream(this)">Commerce (ব্যবসায় শিক্ষা)</button>
-                <button type="button" class="pill-btn" data-value="Arts (মানবিক)" aria-pressed="false" onclick="selectProfileStream(this)">Arts (মানবিক)</button>
+        <div class="profile-section" id="profile-stream-group">
+            <span id="profile-stream-label" class="profile-section-label">Stream</span>
+            <span id="profile-stream-hint" class="profile-section-hint">Select your stream (only for Class 9&ndash;12)</span>
+            <div class="profile-choice-grid profile-stream-grid" id="profile-stream-pills" role="radiogroup" aria-labelledby="profile-stream-label" aria-describedby="profile-stream-hint">
+                <label class="profile-choice">
+                    <input type="radio" class="profile-choice-input" name="profile-stream" value="Science (বিজ্ঞান)" onchange="selectProfileStream(this)">
+                    <span class="profile-choice-box"><span class="profile-choice-text">Science (বিজ্ঞান)</span><svg class="profile-choice-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
+                </label>
+                <label class="profile-choice">
+                    <input type="radio" class="profile-choice-input" name="profile-stream" value="Commerce (ব্যবসায় শিক্ষা)" onchange="selectProfileStream(this)">
+                    <span class="profile-choice-box"><span class="profile-choice-text">Commerce (ব্যবসায় শিক্ষা)</span><svg class="profile-choice-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
+                </label>
+                <label class="profile-choice">
+                    <input type="radio" class="profile-choice-input" name="profile-stream" value="Arts (মানবিক)" onchange="selectProfileStream(this)">
+                    <span class="profile-choice-box"><span class="profile-choice-text">Arts (মানবিক)</span><svg class="profile-choice-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
+                </label>
             </div>
         </div>
 
-        <button id="profile-save-btn" class="start-quiz-btn" onclick="saveProfile()">Save</button>
+        <div id="profile-status-msg" class="profile-status" role="status" aria-live="polite"></div>
+
+        <button type="button" id="profile-save-btn" class="btn-primary profile-save-btn" onclick="saveProfile()">Save Changes</button>
     </div>
 </div>
 
