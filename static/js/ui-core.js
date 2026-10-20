@@ -112,6 +112,9 @@
         "auth-modal": "closeAuthModal",
         "profile-modal": "closeProfileModal",
         "student-profile-modal": "closeStudentProfilePanel",
+        // ACCOUNT MENU: Settings / Get Help / Update Plan / Learn More
+        // dialog (static/js/profile-menu.js).
+        "account-modal": "closeAccountModal",
         "quiz-modal": "closeQuizModal",
         "logout-confirm-modal": "closeLogoutConfirm"
     };
@@ -314,6 +317,12 @@
             closeDrawer();
         });
 
+        // ACCOUNT MENU: .profile-trigger-btn is intentionally NOT in the list
+        // below any more. It used to open a modal straight away (so closing
+        // the drawer was right); it now opens the account menu INSIDE the
+        // drawer, which must stay open. profile-menu.js closes the drawer
+        // itself when a menu action opens a dialog.
+        //
         // Close on navigation. Uses a capturing listener on the sidebar
         // so it runs regardless of the inline onclick handlers app.js
         // attaches to dynamically-created history items - we never have
@@ -324,7 +333,7 @@
                 if (!isDrawerMode() || !drawerIsOpen()) return;
                 var navTarget = event.target.closest(
                     ".chat-title-text, .project-title-wrapper, .btn-primary, " +
-                    ".btn-secondary, .btn-quiz, .profile-trigger-btn, .nav-rail-btn, " +
+                    ".btn-secondary, .btn-quiz, .nav-rail-btn, " +
                     ".sidebar-nav-action"
                 );
                 if (!navTarget) return;

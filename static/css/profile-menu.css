@@ -1,0 +1,770 @@
+/* ============================================================
+   KLORIZ ACCOUNT MENU — dropdown + Settings / Help / Plan / Learn more
+   ============================================================
+   Loaded AFTER tokens.css, style.css and shell.css. It adds NEW
+   selectors only (.profile-menu, .pm-*, .account-*, .acct-*) plus three
+   narrowly-scoped rules that extend the existing sidebar profile row;
+   no existing rule is overridden, and no global token is changed.
+
+   Colors come from the existing semantic tokens. The one accent used
+   (teal) is the SAME accent the profile editor already defines in
+   style.css (.profile-card --profile-accent #2dd4bf, light #0f766e), so
+   the menu matches the rest of the profile surfaces and works in both
+   themes. The app's blue --color-accent is deliberately not used here:
+   it would make a quiet menu loud.
+   ============================================================ */
+
+/* ---- Extend the existing sidebar profile row ------------------- */
+
+/* The menu is positioned against the profile row, so the row's wrapper
+   (#auth-logged-view, class .user-profile-bar) becomes its anchor. */
+.sidebar-footer .user-profile-bar {
+    position: relative;
+}
+
+.profile-trigger-btn[aria-expanded="true"] {
+    background: var(--color-surface-hover);
+}
+
+/* The trigger's chevron now points UP (the menu opens upward from the
+   bottom of the sidebar) and flips while open. */
+.profile-trigger-btn .profile-trigger-chevron svg {
+    transition: transform var(--duration-fast) var(--ease-standard);
+}
+
+.profile-trigger-btn[aria-expanded="true"] .profile-trigger-chevron svg {
+    transform: rotate(180deg);
+}
+
+/* ---- The dropdown ---------------------------------------------- */
+
+.profile-menu {
+    --pm-accent: #2dd4bf;
+    --pm-accent-tint: rgba(45, 212, 191, 0.10);
+    --pm-danger-tint: rgba(248, 113, 113, 0.10);
+
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: calc(100% + 8px);
+    z-index: 120;
+    padding: 6px 0;
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-2xl);
+    box-shadow: var(--shadow-elevated);
+    /* Never taller than the space above the profile row; scrolls inside
+       itself on very short screens (landscape phones) instead of being
+       clipped by the viewport. */
+    max-height: min(78vh, calc(100dvh - 96px));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    animation: pm-pop var(--duration-normal) var(--ease-standard);
+}
+
+:root[data-theme="light"] .profile-menu {
+    --pm-accent: #0f766e;
+    --pm-accent-tint: rgba(15, 118, 110, 0.08);
+    --pm-danger-tint: rgba(220, 38, 38, 0.07);
+}
+
+@media (prefers-color-scheme: light) {
+    :root:not([data-theme]) .profile-menu {
+        --pm-accent: #0f766e;
+        --pm-accent-tint: rgba(15, 118, 110, 0.08);
+        --pm-danger-tint: rgba(220, 38, 38, 0.07);
+    }
+}
+
+@keyframes pm-pop {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+.pm-pane.hidden {
+    display: none;
+}
+
+.pm-divider {
+    height: 1px;
+    margin: 6px 14px;
+    background: var(--color-border-subtle);
+}
+
+/* ---- Identity header (also the entry to the learning profile) --- */
+
+.pm-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    width: calc(100% - 12px);
+    margin: 0 6px;
+    padding: 12px 10px;
+    background: transparent;
+    border: 0;
+    border-radius: var(--radius-xl);
+    color: var(--color-text-primary);
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background var(--duration-fast) var(--ease-standard);
+}
+
+.pm-avatar {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 46px;
+    height: 46px;
+    border-radius: 50%;
+    background: var(--pm-accent-tint);
+    border: 1px solid var(--pm-accent);
+    color: var(--pm-accent);
+}
+
+.pm-identity {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.pm-name,
+.pm-email {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pm-name {
+    font-size: 16px;
+    font-weight: var(--font-weight-medium);
+    line-height: 1.3;
+    color: var(--color-text-primary);
+}
+
+.pm-email {
+    font-size: 13px;
+    line-height: 1.3;
+    color: var(--color-text-muted);
+}
+
+.pm-email:empty {
+    display: none;
+}
+
+/* ---- Menu rows -------------------------------------------------- */
+
+.pm-item,
+.pm-subheader {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    width: calc(100% - 12px);
+    min-height: 46px;
+    margin: 0 6px;
+    padding: 10px 10px;
+    background: transparent;
+    border: 0;
+    border-radius: var(--radius-xl);
+    color: var(--color-text-secondary);
+    font-family: inherit;
+    font-size: 15px;
+    font-weight: var(--font-weight-normal);
+    line-height: 1.3;
+    text-align: left;
+    cursor: pointer;
+    transition: background var(--duration-fast) var(--ease-standard),
+                color var(--duration-fast) var(--ease-standard);
+}
+
+.pm-item > svg,
+.pm-subheader > svg {
+    flex: 0 0 auto;
+}
+
+.pm-item-icon {
+    display: flex;
+    flex: 0 0 auto;
+    width: 22px;
+    justify-content: center;
+    color: var(--color-text-tertiary);
+}
+
+.pm-item-label {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pm-item-value {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 14px;
+    color: var(--color-text-muted);
+}
+
+.pm-item-chevron {
+    display: flex;
+    flex: 0 0 auto;
+    color: var(--color-text-muted);
+}
+
+.pm-header:hover,
+.pm-item:hover,
+.pm-subheader:hover {
+    background: var(--pm-accent-tint);
+    color: var(--color-text-primary);
+}
+
+.pm-item:hover .pm-item-icon,
+.pm-item:focus-visible .pm-item-icon {
+    color: var(--pm-accent);
+}
+
+.pm-header:focus-visible,
+.pm-item:focus-visible,
+.pm-subheader:focus-visible {
+    box-shadow: none;
+    outline: 2px solid var(--pm-accent);
+    outline-offset: -2px;
+    background: var(--pm-accent-tint);
+    color: var(--color-text-primary);
+}
+
+/* Logout: distinct from navigation rows, but a quiet red - not a
+   shouting button. */
+.pm-item-danger,
+.pm-item-danger .pm-item-icon {
+    color: var(--color-error);
+}
+
+.pm-item-danger:hover,
+.pm-item-danger:focus-visible {
+    box-shadow: none;
+    background: var(--pm-danger-tint);
+    color: var(--color-error);
+}
+
+.pm-item-danger:hover .pm-item-icon,
+.pm-item-danger:focus-visible .pm-item-icon {
+    color: var(--color-error);
+}
+
+.pm-item-danger:focus-visible {
+    box-shadow: none;
+    outline-color: var(--color-error);
+}
+
+/* ---- Language pane --------------------------------------------- */
+
+.pm-subheader {
+    color: var(--color-text-primary);
+    font-weight: var(--font-weight-medium);
+}
+
+.pm-lang-option {
+    justify-content: flex-start;
+}
+
+.pm-lang-name {
+    flex: 0 1 auto;
+}
+
+.pm-lang-secondary {
+    flex: 1 1 auto;
+    font-size: 13px;
+    color: var(--color-text-muted);
+}
+
+.pm-lang-option .pm-lang-name:only-of-type {
+    flex: 1 1 auto;
+}
+
+.pm-lang-check {
+    flex: 0 0 auto;
+    margin-left: auto;
+    color: var(--pm-accent);
+    visibility: hidden;
+}
+
+.pm-lang-option[aria-checked="true"] .pm-lang-check {
+    visibility: visible;
+}
+
+.pm-lang-option[aria-checked="true"] {
+    color: var(--color-text-primary);
+}
+
+/* ---- Account dialog (Settings / Help / Plan / Learn more) ------- */
+
+.account-card {
+    --acct-accent: #2dd4bf;
+    --acct-accent-tint: rgba(45, 212, 191, 0.10);
+
+    max-width: 560px;
+    max-height: min(92dvh, 720px);
+    padding: 0;
+    gap: 0;
+    overflow: hidden;
+}
+
+:root[data-theme="light"] .account-card {
+    --acct-accent: #0f766e;
+    --acct-accent-tint: rgba(15, 118, 110, 0.08);
+}
+
+@media (prefers-color-scheme: light) {
+    :root:not([data-theme]) .account-card {
+        --acct-accent: #0f766e;
+        --acct-accent-tint: rgba(15, 118, 110, 0.08);
+    }
+}
+
+.account-header {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 16px 16px 14px 20px;
+    border-bottom: 1px solid var(--color-border);
+}
+
+.account-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 18px;
+    font-weight: var(--font-weight-semibold);
+    line-height: 1.3;
+    color: var(--color-text-primary);
+}
+
+.account-title:focus {
+    outline: none;
+}
+
+.account-back-btn,
+.account-header .close-modal-btn {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    border-radius: var(--radius-lg);
+    color: var(--color-text-muted);
+    cursor: pointer;
+}
+
+.account-back-btn:hover,
+.account-header .close-modal-btn:hover {
+    background: var(--color-surface-hover);
+    color: var(--color-text-primary);
+}
+
+.account-back-btn:focus-visible,
+.account-header .close-modal-btn:focus-visible {
+    box-shadow: none;
+    outline: 2px solid var(--acct-accent);
+    outline-offset: 1px;
+}
+
+.account-back-btn.hidden {
+    display: none;
+}
+
+.account-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    padding: 20px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+}
+
+.acct-lead {
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--color-text-muted);
+}
+
+.acct-group {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.acct-group-title {
+    font-size: 13px;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-muted);
+}
+
+.acct-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.acct-row-label {
+    font-size: 15px;
+    color: var(--color-text-primary);
+}
+
+.acct-hint {
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--color-text-muted);
+}
+
+/* Segmented control built on NATIVE radios: arrow-key navigation,
+   single-choice semantics and screen-reader support come for free. */
+.acct-seg {
+    display: inline-flex;
+    padding: 3px;
+    gap: 2px;
+    background: var(--color-surface-input);
+    border: 1px solid var(--color-border-input);
+    border-radius: var(--radius-pill);
+}
+
+.acct-seg-opt {
+    position: relative;
+    display: inline-flex;
+    cursor: pointer;
+}
+
+.acct-seg-opt input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: pointer;
+}
+
+.acct-seg-opt span {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 36px;
+    padding: 0 16px;
+    border-radius: var(--radius-pill);
+    font-size: 14px;
+    color: var(--color-text-tertiary);
+    transition: background var(--duration-fast) var(--ease-standard),
+                color var(--duration-fast) var(--ease-standard);
+}
+
+.acct-seg-opt input:checked + span {
+    background: var(--acct-accent-tint);
+    color: var(--color-text-primary);
+    box-shadow: inset 0 0 0 1px var(--acct-accent);
+}
+
+.acct-seg-opt input:focus-visible + span {
+    box-shadow: none;
+    outline: 2px solid var(--acct-accent);
+    outline-offset: 2px;
+}
+
+.acct-note {
+    padding-top: 14px;
+    border-top: 1px solid var(--color-border-subtle);
+    font-size: 13px;
+    color: var(--color-text-muted);
+}
+
+/* Help: native <details> disclosure */
+.acct-faq-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.acct-faq {
+    background: var(--color-surface-input);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-xl);
+}
+
+.acct-faq summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 48px;
+    padding: 10px 14px;
+    font-size: 15px;
+    font-weight: var(--font-weight-medium);
+    color: var(--color-text-primary);
+    cursor: pointer;
+    list-style: none;
+    border-radius: var(--radius-xl);
+}
+
+.acct-faq summary::-webkit-details-marker {
+    display: none;
+}
+
+.acct-faq summary:focus-visible {
+    box-shadow: none;
+    outline: 2px solid var(--acct-accent);
+    outline-offset: 1px;
+}
+
+.acct-faq summary svg {
+    flex: 0 0 auto;
+    color: var(--color-text-muted);
+    transition: transform var(--duration-fast) var(--ease-standard);
+}
+
+.acct-faq[open] summary svg {
+    transform: rotate(180deg);
+}
+
+.acct-faq-answer {
+    padding: 0 14px 14px;
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--color-text-tertiary);
+}
+
+/* Plan cards */
+.acct-plan-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+}
+
+@media (min-width: 560px) {
+    .acct-plan-grid {
+        grid-template-columns: 1fr 1fr;
+    }
+}
+
+.acct-plan-card {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 16px;
+    background: var(--color-surface-input);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-2xl);
+}
+
+.acct-plan-card.is-current {
+    border-color: var(--acct-accent);
+    background: var(--acct-accent-tint);
+}
+
+.acct-plan-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.acct-plan-name {
+    font-size: 17px;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-primary);
+}
+
+.acct-badge {
+    padding: 3px 10px;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--color-border-strong);
+    font-size: 12px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+}
+
+.acct-plan-card.is-current .acct-badge {
+    border-color: var(--acct-accent);
+    color: var(--color-text-primary);
+}
+
+.acct-feature-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.acct-feature-list li {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    font-size: 14px;
+    line-height: 1.45;
+    color: var(--color-text-secondary);
+}
+
+.acct-feature-list svg {
+    flex: 0 0 auto;
+    margin-top: 2px;
+    color: var(--acct-accent);
+}
+
+.acct-plan-body {
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--color-text-muted);
+}
+
+.acct-btn {
+    min-height: 44px;
+    padding: 0 16px;
+    border-radius: var(--radius-xl);
+    border: 1px solid var(--color-border-strong);
+    background: transparent;
+    color: var(--color-text-tertiary);
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: var(--font-weight-medium);
+}
+
+.acct-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.7;
+}
+
+/* Learn more rows */
+.acct-link-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.acct-link-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    width: 100%;
+    min-height: 60px;
+    padding: 12px 14px;
+    background: var(--color-surface-input);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-xl);
+    color: var(--color-text-primary);
+    font-family: inherit;
+    text-align: left;
+    text-decoration: none;
+    cursor: pointer;
+    transition: background var(--duration-fast) var(--ease-standard),
+                border-color var(--duration-fast) var(--ease-standard);
+}
+
+.acct-link-row:hover {
+    background: var(--color-surface-hover);
+    border-color: var(--color-border-strong);
+}
+
+.acct-link-row:focus-visible {
+    box-shadow: none;
+    outline: 2px solid var(--acct-accent);
+    outline-offset: 2px;
+}
+
+.acct-link-icon {
+    display: flex;
+    flex: 0 0 auto;
+    color: var(--acct-accent);
+}
+
+.acct-link-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.acct-link-title {
+    font-size: 15px;
+    font-weight: var(--font-weight-medium);
+}
+
+.acct-link-desc {
+    font-size: 13px;
+    color: var(--color-text-muted);
+}
+
+.acct-link-trail {
+    display: flex;
+    flex: 0 0 auto;
+    color: var(--color-text-muted);
+}
+
+/* About / policy prose */
+.acct-prose {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.acct-prose p {
+    font-size: 15px;
+    line-height: 1.65;
+    color: var(--color-text-secondary);
+}
+
+.acct-prose p.is-muted {
+    color: var(--color-text-muted);
+}
+
+/* ---- Touch devices / small screens ------------------------------ */
+@media (max-width: 768px) {
+    .pm-header {
+        padding: 14px 10px;
+    }
+
+    .pm-item,
+    .pm-subheader {
+        min-height: 52px;
+        font-size: 16px;
+    }
+
+    .pm-name {
+        font-size: 17px;
+    }
+
+    .account-card {
+        width: calc(100% - 24px);
+        max-height: 94dvh;
+    }
+
+    .account-body {
+        padding: 16px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .profile-menu {
+        animation: none;
+    }
+
+    .profile-trigger-btn .profile-trigger-chevron svg,
+    .acct-faq summary svg {
+        transition: none;
+    }
+}

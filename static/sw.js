@@ -47,7 +47,7 @@
    ============================================================ */
 "use strict";
 
-const SW_VERSION = "2026-10-10.1";
+const SW_VERSION = "2026-10-19.1";
 const SHELL_CACHE = "kognit-shell-" + SW_VERSION;
 const CDN_CACHE = "kognit-cdn-" + SW_VERSION;
 const CACHE_PREFIX = "kognit-";
@@ -61,6 +61,7 @@ const CORE_URLS = [
     "/static/css/style.css",
     "/static/css/shell.css",
     "/static/css/notes.css",
+    "/static/css/profile-menu.css",
     "/static/img/kognit-logo.svg",
     "/static/js/theme.js",
     "/static/js/stream-render.js",
@@ -71,6 +72,8 @@ const CORE_URLS = [
     "/static/js/nav-views.js",
     "/static/js/ui-core.js",
     "/static/js/shell.js",
+    "/static/js/i18n.js",
+    "/static/js/profile-menu.js",
 ];
 
 // Must match the <script>/<link> URLs in templates/index.html exactly.

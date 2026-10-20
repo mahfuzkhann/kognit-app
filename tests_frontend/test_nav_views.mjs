@@ -368,15 +368,33 @@ await check("the profile trigger and theme toggle are OUTSIDE the Chat-scoped se
         "theme toggle must NOT be inside the Chat-scoped section");
 });
 
-await check("opening the Student Profile panel works identically regardless of active nav tab", async () => {
+await check("the Student Profile panel stays reachable from every tab: trigger opens the account menu, its header opens the panel", async () => {
+    // ACCOUNT MENU change: the sidebar profile row used to open the Student
+    // Profile panel directly. It now opens the account menu, whose name/email
+    // header opens the SAME panel (window.openStudentProfilePanel), so the
+    // learning profile is still reachable from every tab.
     const { doc, window } = await buildDom();
-    window.openStudentProfilePanel = () => {
-        doc.getElementById("student-profile-modal").classList.remove("hidden");
-    };
+    let opened = 0;
+    window.openStudentProfilePanel = () => { opened++; };
+    window.getCurrentProfile = () => ({ name: "Test Student" });
+    for (const f of ["i18n.js", "profile-menu.js"]) {
+        const script = doc.createElement("script");
+        script.textContent = fs.readFileSync(path.join(ROOT, "static", "js", f), "utf8");
+        doc.body.appendChild(script);
+    }
+    doc.getElementById("auth-logged-view").classList.remove("hidden");
+
     doc.getElementById("nav-tab-projects").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-    doc.getElementById("profile-trigger-btn").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-    assert(!doc.getElementById("student-profile-modal").classList.contains("hidden"),
-        "profile panel must open the same way from any tab, not just Chat");
+    const trigger = doc.getElementById("profile-trigger-btn");
+    trigger.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    assert(!doc.getElementById("profile-menu").classList.contains("hidden"),
+        "the profile row must open the account menu from the Projects tab");
+    eq(opened, 0, "opening the menu must not itself open the panel");
+
+    doc.querySelector('[data-pm-action="learning-profile"]')
+        .dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    eq(opened, 1, "the menu header must open the Student Profile panel");
+    assert(doc.getElementById("profile-menu").classList.contains("hidden"), "menu closes after the action");
 });
 
 console.log("\nMobile drawer integration (Phase 8C)");
