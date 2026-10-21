@@ -17,10 +17,10 @@ npm run test:browser  # the three real-browser suites only (Pocket Notes; Stop g
 ```
 
 Expected: `38 passed` (ui-core) + `57 passed` (stream-render) + `14 passed` (theme) +
-`33 passed` (nav-views) + `62 passed` (security-hardening) + `91 passed` (notes, jsdom) +
+`43 passed` (nav-views) + `62 passed` (security-hardening) + `91 passed` (notes, jsdom) +
 `45 passed` (stop-generating, jsdom) + `80 passed` (profile-form, jsdom) + `10 passed` (notes-browser, real Chrome) +
 `18 passed` (stop-generating-browser, real Chrome) + `38 passed` (ui-refinement-browser, real Chrome) =
-**486 passed, 0 failed**. Without a browser the three real-browser suites print `SKIPPED` and the total is 420. The older "120" figure that used to be printed here
+**496 passed, 0 failed**. Without a browser the three real-browser suites print `SKIPPED` and the total is 430. The older "120" figure that used to be printed here
 pre-dates the P1 hardening suites and is no longer accurate.
 
 ## What each suite covers

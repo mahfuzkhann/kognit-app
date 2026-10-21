@@ -116,7 +116,11 @@
         // dialog (static/js/profile-menu.js).
         "account-modal": "closeAccountModal",
         "quiz-modal": "closeQuizModal",
-        "logout-confirm-modal": "closeLogoutConfirm"
+        "logout-confirm-modal": "closeLogoutConfirm",
+        // NOTEBOOKS: create/rename dialog and delete confirmation
+        // (static/js/nav-views.js).
+        "notebook-modal": "closeNotebookModal",
+        "notebook-delete-modal": "closeNotebookDeleteModal"
     };
 
     // Modals that must NOT close on Escape or on overlay click,
@@ -135,6 +139,15 @@
         // every downstream academic-context call depends on.
         "profile-modal": function (modal) {
             return modal.getAttribute("data-required") === "true";
+        },
+        // NOTEBOOKS: while a create / rename / delete request is in flight
+        // the dialog must not vanish (the student would not see whether it
+        // worked). nav-views.js sets data-busy for exactly that window.
+        "notebook-modal": function (modal) {
+            return modal.getAttribute("data-busy") === "true";
+        },
+        "notebook-delete-modal": function (modal) {
+            return modal.getAttribute("data-busy") === "true";
         }
     };
 

@@ -235,7 +235,7 @@
             <button type="button" id="nav-tab-projects" class="nav-rail-btn"
                     role="tab" aria-selected="false" aria-controls="projects-view" tabindex="-1">
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path></svg>
-                <span>Projects</span>
+                <span>Notebooks</span>
             </button>
             <button type="button" id="nav-tab-notes" class="nav-rail-btn"
                     role="tab" aria-selected="false" aria-controls="notes-view" tabindex="-1">
@@ -271,7 +271,7 @@
             <div class="sidebar-search-container hidden" id="sidebar-search-container">
                 <div class="search-input-wrapper">
                     <span class="search-input-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg></span>
-                    <input type="text" id="sidebar-search-input" placeholder="Search projects or chats..." aria-label="Search projects or chats" onkeyup="handleSidebarSearch(event)">
+                    <input type="text" id="sidebar-search-input" placeholder="Search notebooks or chats..." aria-label="Search notebooks or chats" onkeyup="handleSidebarSearch(event)">
                 </div>
             </div>
 
@@ -523,7 +523,7 @@
 
                         <button type="button" class="composer-menu-item" role="menuitem" disabled aria-disabled="true" title="Coming soon">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"></path></svg>
-                            <span>Add to Project</span>
+                            <span>Add to Notebook</span>
                             <span class="composer-menu-badge">Coming soon</span>
                         </button>
 
@@ -623,13 +623,14 @@
              section - no new backend endpoint, no invented quiz history. -->
         <div id="quizzes-view" class="nav-view hidden" role="tabpanel" aria-labelledby="nav-tab-quizzes"></div>
 
-        <!-- PHASE 9B: Projects destination (Decision 4 - a dedicated view,
-             not a filter). Populated by renderProjectsView() in
-             nav-views.js from the SAME `projects` array app.js already
-             maintains (via window.getProjectsSnapshot()) - no second data
-             model, no invented metadata. Only title and a derived chat
-             count are shown, because that is all the existing data model
-             actually contains. -->
+        <!-- PHASE 9B: Notebooks destination (Decision 4 - a dedicated view,
+             not a filter; "Notebooks" is the student-facing name of what the
+             data model still calls a project, so the ids below keep their
+             old names). Populated by renderProjectsView() in nav-views.js
+             from the SAME `projects` array app.js already maintains (via
+             window.getProjectsSnapshot()) - no second data model, no
+             invented metadata. Only title, chat count and a time derived
+             from real timestamps are shown. -->
         <div id="projects-view" class="nav-view hidden" role="tabpanel" aria-labelledby="nav-tab-projects"></div>
 
         <!-- POCKET NOTES view: content is built by static/js/notes.js -->
@@ -954,6 +955,48 @@
         <div class="confirm-actions">
             <button type="button" class="btn-confirm-cancel" data-autofocus onclick="closeLogoutConfirm()" data-i18n="logout.cancel">Cancel</button>
             <button type="button" class="btn-confirm-danger" onclick="confirmLogout()" data-i18n="logout.confirm">Log out</button>
+        </div>
+    </div>
+</div>
+
+<!-- NOTEBOOKS: create / rename dialog and delete confirmation. Driven by
+     static/js/nav-views.js. Ordinary .modal-overlay elements, so ui-core.js
+     supplies focus trapping, Escape and overlay-click dismissal (both are
+     blocked while a request is in flight via data-busy, and the close
+     functions are registered in ui-core.js's MODAL_CLOSERS). -->
+<div id="notebook-modal" class="modal-overlay hidden">
+    <div class="modal-card nb-dialog" role="dialog" aria-modal="true" aria-labelledby="notebook-modal-title">
+        <div class="modal-header">
+            <h2 id="notebook-modal-title">Create notebook</h2>
+            <button type="button" id="notebook-modal-close" class="close-modal-btn" aria-label="Close">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            </button>
+        </div>
+        <form id="notebook-form" class="nb-form" novalidate>
+            <div class="form-group">
+                <label for="notebook-name-input">Notebook name</label>
+                <input type="text" id="notebook-name-input" maxlength="80" autocomplete="off" spellcheck="false"
+                       placeholder="e.g. HSC Physics &mdash; Vector" data-autofocus
+                       aria-describedby="notebook-name-error">
+                <p id="notebook-name-error" class="nb-field-error hidden" role="alert"></p>
+            </div>
+            <div class="confirm-actions">
+                <button type="button" id="notebook-cancel" class="btn-confirm-cancel">Cancel</button>
+                <button type="submit" id="notebook-submit" class="nb-submit-btn">Create</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div id="notebook-delete-modal" class="modal-overlay hidden">
+    <div class="modal-card confirm-card nb-dialog" role="alertdialog" aria-modal="true"
+         aria-labelledby="notebook-delete-title" aria-describedby="notebook-delete-desc">
+        <h2 id="notebook-delete-title" class="confirm-title">Delete notebook?</h2>
+        <p id="notebook-delete-desc" class="confirm-desc"></p>
+        <p id="notebook-delete-error" class="nb-field-error hidden" role="alert"></p>
+        <div class="confirm-actions">
+            <button type="button" id="notebook-delete-cancel" class="btn-confirm-cancel" data-autofocus>Cancel</button>
+            <button type="button" id="notebook-delete-confirm" class="btn-confirm-danger">Delete notebook</button>
         </div>
     </div>
 </div>

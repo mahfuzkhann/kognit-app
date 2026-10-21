@@ -104,6 +104,100 @@ window.startRenamingProject = function(projId) {
 window.openProjectAndChat = function(projId, chatId) {
     loadChat(projId, chatId);
 };
+
+// NOTEBOOKS REDESIGN: the UI now calls a "project" a "notebook". ONLY the
+// visible wording changed - the `projects` array, the user_projects table,
+// the "kognit_projects" localStorage key, project/chat id formats and every
+// function name in this file are intentionally unchanged, so existing
+// student data keeps working exactly as before.
+//
+// The accessors below are the explicit contract static/js/nav-views.js
+// (the Notebooks page) relies on, in the same style as the PHASE 9B
+// accessors above. Each one wraps logic that already lives in this file;
+// none of them is a second data path.
+const NOTEBOOK_TITLE_MAX_LENGTH = 80;
+const DEFAULT_NEW_NOTEBOOK_TITLE = "New Notebook";
+// Projects created before this change were titled "New Project" and may
+// still be stored that way (database + local cache). Both spellings count
+// as "not named by the student yet" for the auto-title logic further down.
+const LEGACY_DEFAULT_PROJECT_TITLE = "New Project";
+
+function isPlaceholderNotebookTitle(title) {
+    return title === DEFAULT_NEW_NOTEBOOK_TITLE || title === LEGACY_DEFAULT_PROJECT_TITLE;
+}
+
+// Collapses whitespace, strips control characters and clamps the length.
+// Returns "" when nothing usable is left. (There is no server-side title
+// validation for projects: they are written straight from the browser to
+// Supabase under row-level security, so this client-side rule is the only
+// one that exists.)
+function normalizeNotebookTitle(raw) {
+    return String(raw == null ? "" : raw)
+        .replace(/[\u0000-\u001f\u007f]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, NOTEBOOK_TITLE_MAX_LENGTH);
+}
+
+// The reserved "Recent Chats" bucket is stored as a project too; the
+// Notebooks page must never list it as a notebook.
+window.getDefaultProjectId = function() {
+    return DEFAULT_PROJECT_ID;
+};
+
+// "loading" until the first project load has settled (database for a
+// signed-in student, local cache for a guest), then "ready". "degraded" =
+// the database fetch failed and the local cache is being shown instead.
+let projectsLoadState = "loading";
+let projectsRemoteFailed = false;
+
+function setProjectsLoadState(state) {
+    projectsLoadState = state;
+    try {
+        document.dispatchEvent(new CustomEvent("kloriz:projects-state", { detail: { state: state } }));
+    } catch (e) {
+        // Non-fatal: the Notebooks page also re-reads the state whenever it is shown.
+    }
+}
+
+window.getProjectsLoadState = function() {
+    return projectsLoadState;
+};
+
+// Retry for the Notebooks page's "couldn't load" banner. Re-runs the same
+// database load the app already performs at startup (guests have nothing to
+// retry - their data is local).
+window.reloadProjectsFromDatabase = async function() {
+    if (!currentUser) return;
+    await loadProjectsFromDatabase();
+};
+
+// Rename a notebook from the Notebooks page. Unlike the sidebar's inline
+// rename (which goes through saveProjectsToStorage and therefore only syncs
+// the ACTIVE project), this syncs the notebook that was actually renamed, and
+// only keeps the new title if the save succeeded (signed-in students).
+window.renameProject = async function(projId, newTitle) {
+    if (projId === DEFAULT_PROJECT_ID) return { ok: false, reason: "reserved" };
+    const proj = projects.find(p => p.id === projId);
+    if (!proj) return { ok: false, reason: "missing" };
+
+    const clean = normalizeNotebookTitle(newTitle);
+    if (!clean) return { ok: false, reason: "empty" };
+
+    const previousTitle = proj.title;
+    proj.title = clean;
+
+    if (currentUser) {
+        const savedRemotely = await syncProjectToDatabase(proj);
+        if (!savedRemotely) {
+            proj.title = previousTitle;
+            return { ok: false, reason: "sync" };
+        }
+    }
+    cacheProjectsLocally();
+    renderHistoryList();
+    return { ok: true, title: clean };
+};
 let editingChatId = null;
 let searchQuery = "";
 
@@ -282,7 +376,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 // creation already, so this only matters for pre-existing/imported data.
 function normalizeProjectTitles(projList) {
     (projList || []).forEach(p => {
-        if (!p.title) p.title = "Untitled Project";
+        if (!p.title) p.title = "Untitled notebook";
         (p.chats || []).forEach(c => {
             if (!c.title) c.title = "Untitled Chat";
         });
@@ -293,6 +387,9 @@ function normalizeProjectTitles(projList) {
 async function loadProjectsFromDatabase() {
     if (!currentUser) return;
 
+    projectsRemoteFailed = false;
+    setProjectsLoadState("loading");
+
     try {
         const { data, error } = await supabaseClient
             .from("user_projects")
@@ -301,6 +398,7 @@ async function loadProjectsFromDatabase() {
 
         if (error) {
             console.error("Error fetching projects:", error.message);
+            projectsRemoteFailed = true;
             loadProjectsFromLocalStorage();
             return;
         }
@@ -309,7 +407,10 @@ async function loadProjectsFromDatabase() {
             projects = normalizeProjectTitles(data.map(p => ({
                 id: p.id,
                 title: p.title,
-                chats: p.chats || []
+                chats: p.chats || [],
+                // Server-side "last saved" time. Only used to show
+                // "Updated ..." on the Notebooks page and to sort it.
+                updated_at: p.updated_at || null
             })));
         } else {
             // Security fix: this used to fall back to whatever was cached
@@ -322,12 +423,14 @@ async function loadProjectsFromDatabase() {
             // local cache, guest or otherwise.
             projects = [];
             createNewProject();
+            setProjectsLoadState("ready");
             return;
         }
 
         initializeActiveProject();
     } catch (err) {
         console.error("Database error:", err);
+        projectsRemoteFailed = true;
         loadProjectsFromLocalStorage();
     }
 }
@@ -403,6 +506,10 @@ function initializeActiveProject() {
         // that button.
         createStandaloneChat();
     }
+
+    // Every load path (database, guest/local cache, logout) ends here, so
+    // this is the one place the Notebooks page is told the list is settled.
+    setProjectsLoadState(projectsRemoteFailed ? "degraded" : "ready");
 }
 
 // P1-4: best-effort local cache. NEVER throws. Returns true if something
@@ -460,6 +567,10 @@ async function saveProjectsToStorage() {
         console.error("Project save failed: local cache and remote sync both unavailable.");
         alert("Your latest changes could not be saved on this device. Please check your connection or free up browser storage.");
     }
+
+    // Callers that ignore the result behave exactly as before; the
+    // Notebooks page uses it to tell "saved" from "kept on this device only".
+    return { cachedLocally, savedRemotely, signedIn: !!currentUser };
 }
 
 async function syncProjectToDatabase(project) {
@@ -485,6 +596,7 @@ async function syncProjectToDatabase(project) {
             console.error("Supabase Sync Error:", error.message);
             return false;
         }
+        project.updated_at = payload.updated_at;
         return true;
     } catch (e) {
         console.error("Supabase Sync Error:", e && e.message ? e.message : e);
@@ -492,16 +604,26 @@ async function syncProjectToDatabase(project) {
     }
 }
 
+// Returns true when the row is gone (or there is nothing remote to delete -
+// guests), false when the request failed. It used to return nothing, so a
+// failed delete was invisible to deleteProject() below.
 async function deleteProjectFromDatabase(projId) {
-    if (!currentUser) return;
+    if (!currentUser) return true;
 
-    const { error } = await supabaseClient
-        .from("user_projects")
-        .delete()
-        .eq("id", projId);
+    try {
+        const { error } = await supabaseClient
+            .from("user_projects")
+            .delete()
+            .eq("id", projId);
 
-    if (error) {
-        console.error("Delete from Supabase Error:", error.message);
+        if (error) {
+            console.error("Delete from Supabase Error:", error.message);
+            return false;
+        }
+        return true;
+    } catch (e) {
+        console.error("Delete from Supabase Error:", e && e.message ? e.message : e);
+        return false;
     }
 }
 
@@ -613,6 +735,7 @@ window.handleLogout = async function() {
     // whether a guest or a different account - cannot see or inherit this
     // user's chats/projects.
     safeLocalStorageRemove("kognit_projects");  // P1-4: a storage error must not skip the rest of this cleanup
+    projectsRemoteFailed = false;   // a guest session has no remote fetch that could have failed
     projects = [];
     activeProjectId = null;
     activeChatId = null;
@@ -2414,10 +2537,15 @@ function renderEmptyChatGreeting(chatBox) {
     chatBox.appendChild(greetingDiv);
 }
 
-window.createNewProject = function() {
+// NOTEBOOKS: `title` is optional (the sidebar "+" still calls this with no
+// argument). A non-string argument (e.g. a click Event) is ignored. Returns
+// the save promise so the Notebooks page can wait for persistence; existing
+// callers ignore the return value.
+window.createNewProject = function(title) {
+    const requestedTitle = typeof title === "string" ? normalizeNotebookTitle(title) : "";
     const newProj = {
         id: "proj_" + Date.now(),
-        title: "New Project",
+        title: requestedTitle || DEFAULT_NEW_NOTEBOOK_TITLE,
         chats: [
             {
                 id: "chat_" + Date.now(),
@@ -2436,9 +2564,10 @@ window.createNewProject = function() {
     activeChatId = newProj.chats[0].id;
     ensureProjectExpanded(newProj.id);
 
-    saveProjectsToStorage();
+    const savePromise = saveProjectsToStorage();
     renderHistoryList();
     loadChat(activeProjectId, activeChatId);
+    return savePromise;
 };
 
 window.createNewChat = function(projectId = null) {
@@ -2802,19 +2931,22 @@ function renderProjectCard(proj) {
 
         const addChatBtn = document.createElement("button");
         addChatBtn.className = "action-btn";
-        addChatBtn.title = "Add Chat";
+        addChatBtn.title = "Add chat to notebook";
+        addChatBtn.setAttribute("aria-label", "Add chat to notebook");
         addChatBtn.innerHTML = UI_ICONS.plus;
         addChatBtn.onclick = (e) => { e.stopPropagation(); createNewChat(proj.id); };
 
         const editBtn = document.createElement("button");
         editBtn.className = "action-btn";
-        editBtn.title = "Rename Project";
+        editBtn.title = "Rename notebook";
+        editBtn.setAttribute("aria-label", "Rename notebook");
         editBtn.innerHTML = UI_ICONS.edit;
         editBtn.onclick = (e) => { e.stopPropagation(); editingProjectId = proj.id; renderHistoryList(); };
 
         const delBtn = document.createElement("button");
         delBtn.className = "action-btn delete-btn";
-        delBtn.title = "Delete Project";
+        delBtn.title = "Delete notebook";
+        delBtn.setAttribute("aria-label", "Delete notebook");
         delBtn.innerHTML = UI_ICONS.trash;
         delBtn.onclick = (e) => { e.stopPropagation(); deleteProject(proj.id); };
 
@@ -2895,13 +3027,13 @@ function renderHistoryList() {
 
         const projectsTitle = document.createElement("h3");
         projectsTitle.className = "sidebar-section-title";
-        projectsTitle.textContent = "Projects";
+        projectsTitle.textContent = "Notebooks";
 
         const newProjectBtn = document.createElement("button");
         newProjectBtn.type = "button";
         newProjectBtn.className = "mini-icon-btn sidebar-nav-action";
-        newProjectBtn.title = "New project";
-        newProjectBtn.setAttribute("aria-label", "New project");
+        newProjectBtn.title = "New notebook";
+        newProjectBtn.setAttribute("aria-label", "New notebook");
         newProjectBtn.innerHTML = UI_ICONS.plus;
         newProjectBtn.onclick = () => createNewProject();
 
@@ -2916,24 +3048,48 @@ function renderHistoryList() {
         emptyNote.className = searchQuery !== "" ? "no-results" : "sidebar-empty-hint";
         // textContent, not innerHTML: the search text is user input.
         emptyNote.textContent = searchQuery !== ""
-            ? `No projects or chats found matching "${searchQuery}"`
+            ? `No notebooks or chats found matching "${searchQuery}"`
             : "No chats yet. Start one with +.";
         historyList.appendChild(emptyNote);
     }
 }
 
-async function deleteProject(projId) {
+// `options.confirmed === true` means the caller (the Notebooks page) has
+// already asked the student with its own dialog, so the native confirm() is
+// skipped. Without it the original confirm() runs, exactly as before.
+// Returns true when the notebook was deleted, false when it was not
+// (cancelled, reserved bucket, or the database delete failed).
+async function deleteProject(projId, options) {
     // Defensive guard: the Recent Chats bucket has no delete button in the
     // UI (renderProjectCard is never called for it - see renderHistoryList),
     // so this should be unreachable via normal use. Kept here anyway since
     // deleteProject is attached to `window`-adjacent click handlers and
     // this function must never be able to wipe out every standalone chat
     // even if called some other way.
-    if (projId === DEFAULT_PROJECT_ID) return;
+    if (projId === DEFAULT_PROJECT_ID) return false;
 
-    if (!confirm("Delete this project?")) return;
+    const alreadyConfirmed = !!(options && options.confirmed === true);
+    if (!alreadyConfirmed) {
+        const chatCount = ((projects.find(p => p.id === projId) || {}).chats || []).length;
+        const consequence = chatCount > 0
+            ? `Delete this notebook and its ${chatCount} ${chatCount === 1 ? "chat" : "chats"}? This can't be undone.`
+            : "Delete this notebook? This can't be undone.";
+        if (!confirm(consequence)) return false;
+    }
+
+    // The database row (which holds the notebook's chats) is deleted FIRST.
+    // It used to be removed from memory first and the result of the database
+    // call ignored, so a failed delete looked successful and the notebook
+    // came back on the next load.
+    const removedRemotely = await deleteProjectFromDatabase(projId);
+    if (!removedRemotely) {
+        if (!alreadyConfirmed) {
+            alert("Couldn't delete this notebook. Please check your connection and try again.");
+        }
+        return false;
+    }
+
     projects = projects.filter(p => p.id !== projId);
-    await deleteProjectFromDatabase(projId);
     saveProjectsToStorage();
 
     // Clean up the now-meaningless collapsed/expanded preference for this
@@ -2956,7 +3112,7 @@ async function deleteProject(projId) {
         activeChatId = (realProjects[0].chats && realProjects[0].chats.length > 0) ? realProjects[0].chats[0].id : null;
         renderHistoryList();
         if (activeChatId) loadChat(activeProjectId, activeChatId);
-        return;
+        return true;
     }
 
     // BUG 4 FIX: deleting the last real Project used to unconditionally
@@ -2987,6 +3143,7 @@ async function deleteProject(projId) {
         // merely because the Project list is empty.
         createStandaloneChat();
     }
+    return true;
 }
 
 function deleteChat(projId, chatId) {
@@ -3380,7 +3537,7 @@ async function maybeGenerateAiTitle(proj, chat) {
         if (data.title && chat.titleSource !== "manual") {
             chat.title = data.title;
             chat.titleSource = "ai";
-            if (proj && proj.title === "New Project") proj.title = data.title;
+            if (proj && isPlaceholderNotebookTitle(proj.title)) proj.title = data.title;
             saveProjectsToStorage();
             renderHistoryList();
         }
@@ -3487,7 +3644,7 @@ window.sendMessage = async function() {
         currentChat.title = generateChatTitle(promptText || "PDF/Image Query");
         currentChat.titleSource = "heuristic";
         currentChat.aiTitleGenerated = false;
-        if (proj.title === "New Project") proj.title = currentChat.title;
+        if (isPlaceholderNotebookTitle(proj.title)) proj.title = currentChat.title;
         renderHistoryList();
     }
 

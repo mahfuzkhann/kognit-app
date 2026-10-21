@@ -212,7 +212,7 @@
         var title = $("navbar-chat-title");
         if (title) {
             title.textContent = view === "quizzes" ? "Quizzes"
-                : view === "projects" ? "Projects"
+                : view === "projects" ? "Notebooks"
                 : activeChatTitle();
         }
 

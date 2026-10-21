@@ -212,7 +212,7 @@ for (const theme of ["dark", "light"]) {
 
     await check(`[${theme}] the logo, all four navigation rows and the profile row are still present and still touch-friendly (>= 36px rows)`, async () => {
         const nav = await page.evaluate(() => [...document.querySelectorAll(".nav-rail-btn")].map((b) => ({ t: b.textContent.trim(), h: b.getBoundingClientRect().height, w: b.getBoundingClientRect().width })));
-        eq(nav.map((n) => n.t).join("|"), "Chat|Quizzes|Projects|Pocket Notes");
+        eq(nav.map((n) => n.t).join("|"), "Chat|Quizzes|Notebooks|Pocket Notes");
         for (const n of nav) assert(n.h >= 36 && n.w >= 200, `${n.t} ${n.w}x${n.h}`);
         const brand = await rectOf(page, ".sidebar-brand .brand-mark");
         assert(brand.w >= 40 && brand.h >= 38, "logo size preserved");
