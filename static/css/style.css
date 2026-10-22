@@ -760,26 +760,36 @@ body {
     outline: none;
 }
 
+/* Quizzes use the white primary treatment (the same background/text token
+   pairing the app's other primary buttons use), not the indigo quiz accent.
+   --color-text-primary is white in the dark theme and near-black in the
+   light theme, so the button stays legible in both. */
 .start-quiz-btn {
-    background: var(--color-accent-quiz);
-    color: var(--color-text-primary);
+    background: var(--color-text-primary);
+    color: var(--color-background);
     border: none;
     padding: 12px;
+    min-height: var(--touch-target-min);
     border-radius: 8px;
     font-weight: 600;
     cursor: pointer;
-    transition: 0.2s;
+    transition: opacity var(--duration-fast) var(--ease-standard);
     margin-top: 8px;
 }
 
-.start-quiz-btn:hover {
-    background: var(--color-accent-quiz-hover);
+.start-quiz-btn:hover:not(:disabled) {
+    opacity: 0.88;
+}
+
+.start-quiz-btn:disabled {
+    opacity: 0.6;
+    cursor: progress;
 }
 
 /* Active Quiz Components */
 .quiz-progress-bar {
     font-size: 12px;
-    color: var(--indigo-300);
+    color: var(--color-text-secondary);
     font-weight: 600;
 }
 
@@ -787,7 +797,8 @@ body {
     font-size: 15px;
     color: var(--color-text-primary);
     margin-bottom: 12px;
-    line-height: 1.4;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
 }
 
 .quiz-options-list {
@@ -809,14 +820,34 @@ body {
 }
 
 .quiz-opt-btn:hover {
-    border-color: var(--color-accent-quiz);
+    border-color: var(--color-border-strong);
     background: var(--gray-935);
 }
 
+/* Selected = a clearly heavier white (dark theme) / dark (light theme)
+   outline plus semibold text, so the state is not carried by colour alone. */
 .quiz-opt-btn.selected {
-    background: var(--indigo-800);
-    border-color: var(--indigo-500);
+    background: var(--color-surface-hover);
+    border-color: var(--color-text-primary);
+    box-shadow: inset 0 0 0 1px var(--color-text-primary);
     color: var(--color-text-primary);
+    font-weight: 600;
+}
+
+/* Math inside quiz text (typeset by MathJax after the question is inserted).
+   Display math (e.g. a bare \begin{bmatrix}) gets tighter spacing than the
+   page default and scrolls inside its own box rather than widening the modal. */
+.quiz-q-title mjx-container[display="true"],
+.quiz-opt-btn mjx-container[display="true"],
+.result-item mjx-container[display="true"] {
+    margin: 0.5em 0;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+}
+
+.quiz-opt-btn mjx-container {
+    vertical-align: middle;
 }
 
 /* Quiz Results */
@@ -2281,8 +2312,8 @@ body {
 /* ---- Quizzes view ------------------------------------------ */
 .quizzes-start-btn {
     align-self: flex-start;
-    background: var(--color-accent-quiz);
-    color: var(--color-text-inverse);
+    background: var(--color-text-primary);
+    color: var(--color-background);
     border: none;
     padding: var(--space-lg) var(--space-2xl);
     border-radius: var(--radius-lg);
@@ -2290,11 +2321,11 @@ body {
     font-weight: var(--font-weight-semibold);
     cursor: pointer;
     min-height: var(--touch-target-min);
-    transition: background var(--duration-fast) var(--ease-standard);
+    transition: opacity var(--duration-fast) var(--ease-standard);
 }
 
 .quizzes-start-btn:hover {
-    background: var(--color-accent-quiz-hover);
+    opacity: 0.88;
 }
 
 .quizzes-topic-group-label {
@@ -2318,6 +2349,42 @@ body {
 
 .quizzes-topic-chip:hover {
     background: var(--color-surface-hover);
+    border-color: var(--color-border-strong);
+}
+
+.quizzes-retry-btn {
+    display: inline-flex;
+    align-items: center;
+    margin-left: var(--space-md);
+    padding: var(--space-xs) var(--space-lg);
+    min-height: 32px;
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-pill);
+    color: var(--color-text-primary);
+    font-family: inherit;
+    font-size: var(--font-size-sm);
+    cursor: pointer;
+}
+
+.quizzes-retry-btn:hover {
+    background: var(--color-surface-hover);
+}
+
+/* Focus rings for the Quizzes page and quiz modal controls: neutral (the
+   same text token as the primary button), not the blue global ring. Scoped
+   by class/ID so no other section's focus style changes. */
+.quizzes-start-btn:focus-visible,
+.quizzes-topic-chip:focus-visible,
+.quizzes-retry-btn:focus-visible,
+#quiz-modal .start-quiz-btn:focus-visible,
+#quiz-modal .quiz-opt-btn:focus-visible,
+#quiz-modal .close-modal-btn:focus-visible,
+#quiz-modal .form-group input:focus-visible,
+#quiz-modal .form-group select:focus-visible {
+    outline: 2px solid var(--color-text-primary);
+    outline-offset: 2px;
+    box-shadow: none;
 }
 
 .quizzes-topic-chip--needs-practice {

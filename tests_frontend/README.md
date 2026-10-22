@@ -11,16 +11,16 @@ source file drifts from what these expect, they fail.
 cd tests_frontend
 npm install      # installs jsdom, marked, mathjax, fake-indexeddb and puppeteer-core (test-only); no build step, no bundler,
                  # and NO browser download (puppeteer-core drives a browser you already have)
-npm test         # runs all eleven suites (the three real-browser ones print SKIPPED if no Chrome/Edge is found)
-npm run test:jsdom    # the eight jsdom suites only
-npm run test:browser  # the three real-browser suites only (Pocket Notes; Stop generating + disclaimer; UI refinement)
+npm test         # runs all thirteen suites (the four real-browser ones print SKIPPED if no Chrome/Edge is found)
+npm run test:jsdom    # the nine jsdom suites only
+npm run test:browser  # the four real-browser suites only (Pocket Notes; Stop generating + disclaimer; UI refinement; Quizzes)
 ```
 
 Expected: `38 passed` (ui-core) + `57 passed` (stream-render) + `14 passed` (theme) +
-`43 passed` (nav-views) + `62 passed` (security-hardening) + `91 passed` (notes, jsdom) +
-`45 passed` (stop-generating, jsdom) + `80 passed` (profile-form, jsdom) + `10 passed` (notes-browser, real Chrome) +
-`18 passed` (stop-generating-browser, real Chrome) + `38 passed` (ui-refinement-browser, real Chrome) =
-**496 passed, 0 failed**. Without a browser the three real-browser suites print `SKIPPED` and the total is 430. The older "120" figure that used to be printed here
+`52 passed` (nav-views) + `62 passed` (security-hardening) + `91 passed` (notes, jsdom) +
+`45 passed` (stop-generating, jsdom) + `80 passed` (profile-form, jsdom) + `38 passed` (profile-menu, jsdom) + `10 passed` (notes-browser, real Chrome) +
+`18 passed` (stop-generating-browser, real Chrome) + `38 passed` (ui-refinement-browser, real Chrome) +
+`14 passed` (quizzes-browser, real Chrome) = **557 passed, 0 failed**. Without a browser the four real-browser suites print `SKIPPED` and the total is 477. The older "120" figure that used to be printed here
 pre-dates the P1 hardening suites and is no longer accurate.
 
 ## What each suite covers
@@ -150,3 +150,13 @@ Also not covered: anything requiring real layout or rendered pixels.
 jsdom computes no styles and no layout, so contrast, spacing, and "does
 this actually look right" still need a browser — see the Phase 9 report's
 Visual QA section for exactly what remains unverified for that reason.
+
+`test_quizzes_browser.mjs` (Quizzes fix) — real Chrome + the real MathJax bundle. Pins the
+three Quizzes bugs: a signed-in student must never see the login message (the fake
+Supabase goes through the real `supabase.createClient` -> `const supabaseClient` path, which
+is NOT a `window` property; a stub that sets `window.supabaseClient` hides this bug), quiz
+questions/answers/results containing LaTeX (including a bare `\begin{bmatrix}` and Bengali text)
+render as math and stay safe against hostile HTML, and the Quizzes UI uses white/neutral
+accents (dark and light theme, hover/focus/selected/results) without touching the shared
+indigo token other sections use. `test_nav_views.mjs` additionally covers the Your Topics
+states (loading, logged out, error + retry, empty, populated, refresh after a saved quiz).

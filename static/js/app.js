@@ -4341,21 +4341,71 @@ window.generateAndStartQuiz = async function() {
     }
 };
 
+// QUIZ MATH FIX. Quiz questions, options and explanations are AI-generated
+// text that may contain LaTeX (e.g. a matrix: \begin{bmatrix} ... \end{bmatrix}).
+// They used to be inserted with innerHTML and NEVER handed to MathJax, so the
+// LaTeX source stayed on screen as plain text - only chat messages ever called
+// typesetMathJax(). Two small, quiz-only pieces fix that:
+//
+//  1. quizTextToSafeHtml() - the same protect -> restore pipeline the chat
+//     already uses (protectMathSegments / restoreProtectedMathSegments, so
+//     Bengali-in-math and "<" / ">" / "&" inside $...$ are handled exactly as
+//     in chat), plus the same HTML-escaping for the other math forms MathJax
+//     is configured to read (\( \), \[ \] and bare \begin{env}...\end{env}).
+//     Without that, something like $a<b$ would be parsed as an HTML tag by the
+//     sanitizer and swallowed. Everything still goes through the unchanged
+//     DOMPurify "inline" allow-list afterwards - no unsafe HTML is inserted.
+//  2. typesetQuizContent() - calls the existing shared typesetMathJax() after
+//     the DOM is updated (it waits for MathJax if it is still loading and
+//     never throws).
+const QUIZ_EXTRA_MATH_REGEX = /\\\([\s\S]+?\\\)|\\\[[\s\S]+?\\\]|\\begin\{([A-Za-z]+\*?)\}[\s\S]*?\\end\{\1\}/g;
+
+function quizTextToSafeHtml(text) {
+    const src = text == null ? "" : String(text);
+    // If the sanitizer is unavailable, sanitizeRenderedHtml() fails closed by
+    // escaping the whole string itself - do not pre-escape (double escaping).
+    if (!getKognitPurifier()) return sanitizeRenderedHtml(src, "inline");
+
+    const protectedMath = protectMathSegments(src);
+    const guarded = protectedMath.text.replace(QUIZ_EXTRA_MATH_REGEX, (segment) => escapeHtmlForMath(segment));
+    return sanitizeRenderedHtml(restoreProtectedMathSegments(guarded, protectedMath.segments), "inline");
+}
+
+// Clears MathJax's bookkeeping for the nodes about to be discarded (so
+// replaced questions leave no stale math items behind), then lets the caller
+// replace the markup.
+function clearQuizTypeset(container) {
+    try {
+        if (container && window.MathJax && typeof window.MathJax.typesetClear === "function") {
+            window.MathJax.typesetClear([container]);
+        }
+    } catch (e) {
+        console.warn("MathJax typesetClear failed:", e);
+    }
+}
+
+function typesetQuizContent(container) {
+    if (!container) return Promise.resolve();
+    return typesetMathJax([container]);
+}
+
 function renderQuizQuestion() {
     const q = quizQuestions[currentQuizIdx];
     document.getElementById("quiz-progress-text").textContent = `Question ${currentQuizIdx + 1} of ${quizQuestions.length}`;
 
     const container = document.getElementById("quiz-question-container");
+    clearQuizTypeset(container);
     container.innerHTML = `
-        <div class="quiz-q-title"><b>Q${currentQuizIdx + 1}:</b> ${sanitizeRenderedHtml(q.question, "inline")}</div>
-        <div class="quiz-options-list">
+        <div class="quiz-q-title"><b>Q${currentQuizIdx + 1}:</b> ${quizTextToSafeHtml(q.question)}</div>
+        <div class="quiz-options-list" role="group" aria-label="Answer choices">
             ${q.options.map((opt, i) => `
-                <button class="quiz-opt-btn ${userQuizAnswers[currentQuizIdx] === i ? 'selected' : ''}" onclick="selectQuizOption(${i})">
-                    ${String.fromCharCode(65 + i)}. ${sanitizeRenderedHtml(opt, "inline")}
+                <button type="button" class="quiz-opt-btn ${userQuizAnswers[currentQuizIdx] === i ? 'selected' : ''}" aria-pressed="${userQuizAnswers[currentQuizIdx] === i ? 'true' : 'false'}" onclick="selectQuizOption(${i})">
+                    ${String.fromCharCode(65 + i)}. ${quizTextToSafeHtml(opt)}
                 </button>
             `).join('')}
         </div>
     `;
+    typesetQuizContent(container);
 
     const nextBtn = document.getElementById("quiz-next-btn");
     nextBtn.textContent = currentQuizIdx === quizQuestions.length - 1 ? "Submit Test" : "Next Question";
@@ -4363,7 +4413,22 @@ function renderQuizQuestion() {
 
 window.selectQuizOption = function(optIdx) {
     userQuizAnswers[currentQuizIdx] = optIdx;
-    renderQuizQuestion();
+
+    // Update the selection IN PLACE instead of rebuilding the whole question:
+    // a rebuild threw away the already-typeset math (it flashed back to raw
+    // LaTeX and had to be typeset again on every click) and dropped keyboard
+    // focus. If the buttons are not there for any reason, fall back to the
+    // original full render.
+    const buttons = document.querySelectorAll("#quiz-question-container .quiz-opt-btn");
+    if (buttons.length !== (quizQuestions[currentQuizIdx] || { options: [] }).options.length) {
+        renderQuizQuestion();
+        return;
+    }
+    buttons.forEach((btn, i) => {
+        const isSelected = i === optIdx;
+        btn.classList.toggle("selected", isSelected);
+        btn.setAttribute("aria-pressed", isSelected ? "true" : "false");
+    });
 };
 
 window.nextQuizQuestion = function() {
@@ -4398,17 +4463,19 @@ function showQuizResults() {
     document.getElementById("result-score-text").textContent = `Your Score: ${score} / ${quizQuestions.length}`;
 
     const list = document.getElementById("result-details-list");
+    clearQuizTypeset(list);
     list.innerHTML = quizQuestions.map((q, i) => {
         const isCorrect = userQuizAnswers[i] === q.correct_index;
         return `
             <div class="result-item" style="border-left: 3px solid ${isCorrect ? '#4ade80' : '#f87171'};">
-                <div><b>Q${i + 1}:</b> ${sanitizeRenderedHtml(q.question, "inline")}</div>
-                <div>Your Answer: <span style="color:${isCorrect ? '#4ade80' : '#f87171'};">${sanitizeRenderedHtml(q.options[userQuizAnswers[i]], "inline")}</span></div>
-                ${!isCorrect ? `<div>Correct Answer: <span style="color:#4ade80;">${sanitizeRenderedHtml(q.options[q.correct_index], "inline")}</span></div>` : ''}
-                <div class="result-explanation">💡 <b>Explanation:</b> ${sanitizeRenderedHtml(q.explanation, "inline")}</div>
+                <div><b>Q${i + 1}:</b> ${quizTextToSafeHtml(q.question)}</div>
+                <div>Your Answer: <span style="color:${isCorrect ? '#4ade80' : '#f87171'};">${quizTextToSafeHtml(q.options[userQuizAnswers[i]])}</span></div>
+                ${!isCorrect ? `<div>Correct Answer: <span style="color:#4ade80;">${quizTextToSafeHtml(q.options[q.correct_index])}</span></div>` : ''}
+                <div class="result-explanation">💡 <b>Explanation:</b> ${quizTextToSafeHtml(q.explanation)}</div>
             </div>
         `;
     }).join('');
+    typesetQuizContent(list);
 
     submitQuizAttempt();
 }
@@ -4421,6 +4488,14 @@ function showQuizResults() {
 // independently (client-side here for instant display, server-side in
 // backend/database.py:save_quiz_attempt for the persisted, authoritative
 // record) and should normally agree.
+function notifyQuizAttemptSaved() {
+    try {
+        document.dispatchEvent(new CustomEvent("kloriz:quiz-saved"));
+    } catch (e) {
+        // Non-fatal: the Quizzes page also re-reads its data whenever it is opened.
+    }
+}
+
 async function submitQuizAttempt() {
     const statusEl = document.getElementById("quiz-save-status");
     if (!statusEl) return;
@@ -4460,6 +4535,9 @@ async function submitQuizAttempt() {
         if (res.ok) {
             statusEl.textContent = "✅ Result saved.";
             statusEl.className = "quiz-save-status success";
+            // The Quizzes page's "Your Topics" is derived from saved attempts;
+            // let it refresh now that this one is genuinely persisted.
+            notifyQuizAttemptSaved();
             // PHASE 8F: only after the attempt is genuinely persisted, because
             // the next-step engine reads from that stored evidence. Asking
             // before the write lands would show the student stale advice.

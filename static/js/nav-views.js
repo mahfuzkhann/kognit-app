@@ -151,6 +151,55 @@
         );
     }
 
+    // The auth client lives in app.js as a top-level `const supabaseClient`.
+    // A top-level const is visible to every classic script by its bare name
+    // but is NOT a property of `window`, so reading only `window.supabaseClient`
+    // (what this view used to do) is always undefined - every signed-in student
+    // was told to log in. notes.js and profile-menu.js already use this exact
+    // lookup; this is the same one.
+    function authClient() {
+        try { if (typeof supabaseClient !== "undefined" && supabaseClient) return supabaseClient; } catch (e) { /* not defined */ }
+        return window.supabaseClient || null;
+    }
+
+    // Distinguishes "no session" (logged out) from "could not find out"
+    // (client missing / getSession threw): the second must never be shown as
+    // a login prompt.
+    async function readSession() {
+        var client = authClient();
+        if (!client || !client.auth || typeof client.auth.getSession !== "function") return { ok: false };
+        try {
+            var result = await client.auth.getSession();
+            return { ok: true, session: result && result.data ? result.data.session : null };
+        } catch (e) {
+            return { ok: false };
+        }
+    }
+
+    var lastQuizzesSignedIn = null;
+
+    function quizzesPanelVisible() {
+        var panel = viewPanel("quizzes");
+        return !!panel && !panel.classList.contains("hidden");
+    }
+
+    function showTopicsMessage(topicsEl, text, retryLabel) {
+        topicsEl.textContent = "";
+        var box = document.createElement("div");
+        box.className = "sp-empty-state";
+        box.setAttribute("role", "status");
+        box.appendChild(document.createTextNode(text));
+        if (retryLabel) {
+            var retry = document.createElement("button");
+            retry.type = "button";
+            retry.className = "quizzes-retry-btn";
+            retry.textContent = retryLabel;
+            retry.addEventListener("click", function () { renderQuizzesView(); });
+            box.appendChild(retry);
+        }
+        topicsEl.appendChild(box);
+    }
+
     async function renderQuizzesView() {
         var panel = viewPanel("quizzes");
         if (!panel) return;
@@ -166,27 +215,43 @@
         var topicsEl = document.getElementById("quizzes-view-topics");
         if (!topicsEl) return;
 
-        topicsEl.innerHTML = '<div class="nav-view-loading">Loading your topics\u2026</div>';
+        topicsEl.innerHTML = '<div class="nav-view-loading" role="status">Loading your topics\u2026</div>';
+        topicsEl.setAttribute("aria-busy", "true");
 
         try {
-            var session = await getSessionSafely();
+            var auth = await readSession();
             if (myToken !== quizzesLoadToken) return; // a newer switch superseded this
 
-            if (!session) {
+            if (!auth.ok) {
+                topicsEl.removeAttribute("aria-busy");
+                showTopicsMessage(topicsEl, "Couldn\u2019t check your sign-in status right now.", "Try again");
+                return;
+            }
+
+            lastQuizzesSignedIn = !!auth.session;
+            if (!auth.session) {
+                topicsEl.removeAttribute("aria-busy");
                 topicsEl.innerHTML =
                     '<div class="sp-empty-state">Log in to see topics from your quiz history.</div>';
                 return;
             }
 
-            var snapshot = await window._spAuthedGet("/api/profile/snapshot", session.access_token);
+            var snapshot = await window._spAuthedGet("/api/profile/snapshot", auth.session.access_token);
             if (myToken !== quizzesLoadToken) return;
+            topicsEl.removeAttribute("aria-busy");
 
             var strengths = snapshot.strengths || [];
             var needsPractice = snapshot.needs_practice || [];
 
             if (strengths.length === 0 && needsPractice.length === 0) {
-                topicsEl.innerHTML =
-                    '<div class="sp-empty-state">Take a quiz to start building your topic history here.</div>';
+                // Two different truths share this empty list: no quiz has ever
+                // been taken, or quizzes exist but no topic has enough
+                // attempts yet to show a clear strength / area to practice
+                // (the backend's own rule - at least 2 attempts on a topic).
+                var summary = snapshot.evidence_summary || {};
+                showTopicsMessage(topicsEl, summary.has_quiz_evidence
+                    ? "Your quiz results are saved. A topic appears here once you have taken enough quizzes on it to show a clear strength or an area to practice."
+                    : "Take a quiz to start building your topic history here.");
                 return;
             }
 
@@ -236,17 +301,37 @@
             );
         } catch (e) {
             if (myToken !== quizzesLoadToken) return;
-            topicsEl.innerHTML =
-                '<div class="sp-empty-state">Couldn\u2019t load your topics right now.</div>';
+            topicsEl.removeAttribute("aria-busy");
+            // A failed request is an error, never an empty history.
+            showTopicsMessage(topicsEl, "Couldn\u2019t load your topics right now.", "Try again");
         }
     }
 
-    async function getSessionSafely() {
-        try {
-            var result = await window.supabaseClient.auth.getSession();
-            return result && result.data ? result.data.session : null;
-        } catch (e) {
-            return null;
+    var quizzesWiringDone = false;
+    function wireQuizzes() {
+        if (quizzesWiringDone) return;
+        quizzesWiringDone = true;
+
+        // A quiz result that was really saved changes "Your Topics".
+        document.addEventListener("kloriz:quiz-saved", function () {
+            if (quizzesPanelVisible()) renderQuizzesView();
+        });
+
+        // Logging in / out while this page is open must not leave the old
+        // message on screen. Only a real change of signed-in state re-renders
+        // (Supabase also fires SIGNED_IN on tab refocus), and it is deferred a
+        // tick because supabase-js must not be re-entered from its own
+        // auth-state callback.
+        var client = authClient();
+        if (client && client.auth && typeof client.auth.onAuthStateChange === "function") {
+            client.auth.onAuthStateChange(function (_event, session) {
+                var signedIn = !!session;
+                setTimeout(function () {
+                    if (quizzesPanelVisible() && lastQuizzesSignedIn !== null && lastQuizzesSignedIn !== signedIn) {
+                        renderQuizzesView();
+                    }
+                }, 0);
+            });
         }
     }
 
@@ -1187,6 +1272,7 @@
         wireClicks();
         wireKeyboard();
         wireNotebooks();
+        wireQuizzes();
         switchTo(initialTab(), { silent: true });
     }
 

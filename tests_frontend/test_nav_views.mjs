@@ -34,7 +34,7 @@ function makeFakeProjects() {
     ];
 }
 
-async function buildDom({ projects = makeFakeProjects(), activeProjectId = "p1", session = { access_token: "tok" }, snapshot = { strengths: [], needs_practice: [] }, loadState = "ready", deleteResult = true, renameResult = { ok: true } } = {}) {
+async function buildDom({ projects = makeFakeProjects(), activeProjectId = "p1", session = { access_token: "tok" }, snapshot = { strengths: [], needs_practice: [] }, loadState = "ready", deleteResult = true, renameResult = { ok: true }, clientMode = "global-const" } = {}) {
     let html = fs.readFileSync(path.join(ROOT, "templates", "index.html"), "utf8");
     html = html.replace(/<script src="https:\/\/[^"]*"[^>]*><\/script>/g, "");
     for (const f of ["app.js", "ui-core.js", "stream-render.js", "theme.js", "nav-views.js"]) {
@@ -76,9 +76,29 @@ async function buildDom({ projects = makeFakeProjects(), activeProjectId = "p1",
         });
         return groups;
     };
-    window.supabaseClient = { auth: { getSession: async () => ({ data: { session } }) } };
+    // The auth client. app.js declares `const supabaseClient = ...` at the top
+    // level of a classic script: visible to other scripts by its bare name but
+    // NOT a property of `window`. "global-const" (the default) reproduces that
+    // exactly; a stub that only sets window.supabaseClient is what HID the bug
+    // where every signed-in student was told to log in. "window" is kept to
+    // prove the fallback lookup still works; "none" = no client at all.
+    window.__testSession = session;
+    window.__authListeners = [];
+    const clientSource = "{ auth: { getSession: async () => ({ data: { session: window.__testSession } }), onAuthStateChange: (cb) => { window.__authListeners.push(cb); return { data: { subscription: { unsubscribe() {} } } }; } } }";
+    if (clientMode === "global-const") {
+        const clientScript = window.document.createElement("script");
+        clientScript.textContent = "const supabaseClient = " + clientSource + ";";
+        window.document.body.appendChild(clientScript);
+        assert(!("supabaseClient" in window), "test setup must NOT expose supabaseClient on window");
+    } else if (clientMode === "window") {
+        window.supabaseClient = window.eval("(" + clientSource + ")");
+    }
+    calls.snapshotCalls = 0;
     window._spAuthedGet = async (url) => {
-        if (url === "/api/profile/snapshot") return snapshot;
+        if (url === "/api/profile/snapshot") {
+            calls.snapshotCalls++;
+            return typeof snapshot === "function" ? snapshot(calls.snapshotCalls) : snapshot;
+        }
         throw new Error("unexpected URL in test: " + url);
     };
 
@@ -259,6 +279,101 @@ await check("logged-out student sees an honest login prompt, not a silent failur
     doc.getElementById("nav-tab-quizzes").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
     assert(doc.getElementById("quizzes-view-topics").textContent.toLowerCase().includes("log in"));
+});
+
+console.log("\nQuizzes - Your Topics states (history bug)");
+
+const quizzesText = (doc) => doc.getElementById("quizzes-view").textContent;
+const openQuizzesTab = async (doc, window) => { doc.getElementById("nav-tab-quizzes").dispatchEvent(new window.MouseEvent("click", { bubbles: true })); await new Promise((r) => setTimeout(r, 20)); };
+
+await check("A signed-in student with the REAL auth-client shape (global const, not a window property) sees topics, never the login message", async () => {
+    const { doc, window } = await buildDom({ snapshot: { strengths: [{ subject: "Math", topic: "Algebra" }], needs_practice: [{ subject: "Physics", topic: "Vectors" }] } });
+    await openQuizzesTab(doc, window);
+    assert(!quizzesText(doc).includes("Log in to see topics"), "false login message: " + quizzesText(doc));
+    eq(doc.querySelectorAll(".quizzes-topic-chip").length, 2);
+});
+
+await check("the legacy window.supabaseClient lookup still works as a fallback", async () => {
+    const { doc, window } = await buildDom({ clientMode: "window", snapshot: { strengths: [{ subject: "Math", topic: "Algebra" }], needs_practice: [] } });
+    await openQuizzesTab(doc, window);
+    eq(doc.querySelectorAll(".quizzes-topic-chip").length, 1);
+});
+
+await check("a genuinely logged-out student still gets the login guidance and no snapshot request", async () => {
+    const { doc, window, calls } = await buildDom({ session: null });
+    await openQuizzesTab(doc, window);
+    assert(quizzesText(doc).includes("Log in to see topics from your quiz history."));
+    eq(calls.snapshotCalls, 0);
+});
+
+await check("if the auth client cannot be found it is an ERROR with Try again, never a login prompt", async () => {
+    const { doc, window } = await buildDom({ clientMode: "none" });
+    await openQuizzesTab(doc, window);
+    const t = quizzesText(doc);
+    assert(/check your sign-in status/i.test(t) && t.includes("Try again") && !t.includes("Log in"), t);
+});
+
+await check("a failed history request shows an error with Try again (not empty, not login); retry recovers", async () => {
+    let fail = true;
+    const { doc, window, calls } = await buildDom({ snapshot: () => { if (fail) throw new Error("HTTP 502"); return { strengths: [{ subject: "Math", topic: "Algebra" }], needs_practice: [] }; } });
+    await openQuizzesTab(doc, window);
+    let t = quizzesText(doc);
+    assert(/couldn.t load your topics/i.test(t) && t.includes("Try again"), t);
+    assert(!t.includes("Log in") && !t.includes("Take a quiz"), "error rendered as logged-out/empty: " + t);
+    fail = false;
+    doc.querySelector(".quizzes-retry-btn").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 20));
+    eq(doc.querySelectorAll(".quizzes-topic-chip").length, 1);
+    eq(calls.snapshotCalls, 2);
+});
+
+await check("empty history: saved quizzes without a qualifying topic -> honest copy; no quizzes at all -> 'Take a quiz'; no invented topics", async () => {
+    let r = await buildDom({ snapshot: { strengths: [], needs_practice: [], evidence_summary: { has_quiz_evidence: true } } });
+    await openQuizzesTab(r.doc, r.window);
+    assert(quizzesText(r.doc).includes("Your quiz results are saved"));
+    eq(r.doc.querySelectorAll(".quizzes-topic-chip").length, 0);
+    r = await buildDom({ snapshot: { strengths: [], needs_practice: [], evidence_summary: { has_quiz_evidence: false } } });
+    await openQuizzesTab(r.doc, r.window);
+    assert(quizzesText(r.doc).includes("Take a quiz to start building your topic history here."));
+});
+
+await check("while history loads there is a loading state (aria-busy), not a login or empty message", async () => {
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    const { doc, window } = await buildDom({ snapshot: () => gate.then(() => ({ strengths: [{ subject: "Math", topic: "Algebra" }], needs_practice: [] })) });
+    await openQuizzesTab(doc, window);
+    const t = quizzesText(doc);
+    assert(t.includes("Loading your topics") && !t.includes("Log in") && !t.includes("Take a quiz"), t);
+    eq(doc.getElementById("quizzes-view-topics").getAttribute("aria-busy"), "true");
+    release(); await new Promise((r) => setTimeout(r, 20));
+    eq(doc.getElementById("quizzes-view-topics").hasAttribute("aria-busy"), false);
+    eq(doc.querySelectorAll(".quizzes-topic-chip").length, 1);
+});
+
+await check("a quiz that was really saved (kloriz:quiz-saved) refreshes Your Topics; hidden page is left alone", async () => {
+    const { doc, window, calls } = await buildDom({ snapshot: { strengths: [], needs_practice: [{ subject: "Physics", topic: "Vectors" }] } });
+    await openQuizzesTab(doc, window);
+    eq(calls.snapshotCalls, 1);
+    doc.dispatchEvent(new window.CustomEvent("kloriz:quiz-saved"));
+    await new Promise((r) => setTimeout(r, 20));
+    eq(calls.snapshotCalls, 2, "topics were not refreshed after a saved attempt");
+    doc.getElementById("nav-tab-chat").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    doc.dispatchEvent(new window.CustomEvent("kloriz:quiz-saved"));
+    await new Promise((r) => setTimeout(r, 20));
+    eq(calls.snapshotCalls, 2, "must not fetch while the Quizzes page is not shown");
+});
+
+await check("logging out while the page is open replaces the topics with the login guidance (and only on a real change)", async () => {
+    const { doc, window, calls } = await buildDom({ snapshot: { strengths: [{ subject: "Math", topic: "Algebra" }], needs_practice: [] } });
+    await openQuizzesTab(doc, window);
+    eq(doc.querySelectorAll(".quizzes-topic-chip").length, 1);
+    window.__authListeners.forEach((cb) => cb("SIGNED_IN", { access_token: "tok" }));    // refocus noise: no change
+    await new Promise((r) => setTimeout(r, 20));
+    eq(calls.snapshotCalls, 1, "an unchanged signed-in state must not re-render");
+    window.__testSession = null;
+    window.__authListeners.forEach((cb) => cb("SIGNED_OUT", null));
+    await new Promise((r) => setTimeout(r, 40));
+    assert(quizzesText(doc).includes("Log in to see topics"), quizzesText(doc));
 });
 
 console.log("\nNotebooks view - dedicated view, built from the SAME data (Decision 4)");
