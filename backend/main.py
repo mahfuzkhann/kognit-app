@@ -42,6 +42,9 @@ from backend.database import (
     DatabaseError,
 )
 from backend import notes_engine, notes_ai
+from backend import state_limits, quota_service, usage_telemetry
+from backend import database as _database_module
+from backend.quota_service import KIND_CHAT, KIND_QUIZ
 from backend.learning_memory import detect_learning_signals, is_meaningful_signal_set, resolve_academic_context
 from backend.learning_snapshot import build_learning_snapshot
 from backend.next_step_engine import compute_next_steps
@@ -180,6 +183,12 @@ active_pdf_contexts = {}
 #   }
 # ---------------------------------------------------------------------------
 active_quiz_definitions = {}
+
+# Pre-Phase 10 (H3): lifecycle rules for the two stores above. The stores stay
+# plain dicts (tests and callers use them directly); these managers add idle
+# expiry and per-user/global caps. See backend/state_limits.py.
+_pdf_contexts = state_limits.BoundedPdfContexts()
+_quiz_definitions = state_limits.BoundedQuizDefinitions()
 
 # Defensive ceiling on how many answers /api/quiz/submit will process in one
 # request. The UI only ever offers 5/10/15-question quizzes (see
@@ -592,6 +601,80 @@ async def _read_capped_image(image: UploadFile) -> bytes:
     return image_bytes
 
 
+# Pre-Phase 10 (AE2.0-08): every streamed answer holds one worker thread for the
+# whole generation (iterate_in_threadpool). Measured locally with
+# tools/local_load_test.py: throughput plateaus at roughly the size of AnyIO's
+# default thread pool (40) divided by the generation time, and latency then grows
+# linearly. THREADPOOL_MAX_THREADS lets the operator raise that ceiling without a
+# code change. 0 / unset (the default) leaves AnyIO's default untouched, so this
+# changes nothing until it is deliberately set. Threads waiting on the network are
+# cheap but not free (stack memory), and Gemini's own quota is the real limit -
+# size this from staging measurements, not from hope. Capped at 1000.
+THREADPOOL_MAX_THREADS = min(state_limits._env_int("THREADPOOL_MAX_THREADS", 0, minimum=0), 1000)
+
+
+@app.on_event("startup")
+async def _configure_thread_limiter() -> None:
+    if THREADPOOL_MAX_THREADS > 0:
+        import anyio.to_thread
+        anyio.to_thread.current_default_thread_limiter().total_tokens = THREADPOOL_MAX_THREADS
+        logger.info("thread pool ceiling set to %d (THREADPOOL_MAX_THREADS)", THREADPOOL_MAX_THREADS)
+
+
+async def _usage_collection(background_tasks: BackgroundTasks) -> usage_telemetry.UsageCollector:
+    """Starts privacy-safe AI usage collection for this request (see
+    backend/usage_telemetry.py). Registers a BackgroundTask that runs AFTER the
+    response is sent: it persists usage rows and gives a quota unit back when
+    the student received nothing usable. It has no auth dependency of its own:
+    each endpoint binds the verified identity (usage_telemetry.bind_current /
+    usage.bind) once it has it, and an unbound collection persists nothing."""
+    collector = usage_telemetry.start_collection(request_id=new_request_id(), operation_hint="")
+    background_tasks.add_task(usage_telemetry.finalize_ai_request, collector)
+    return collector
+
+
+def _require_expected_pdf(pdf_expected: str, user_id: str, chat_id: str) -> None:
+    """If the browser believes a PDF is attached to this chat but the server no
+    longer holds it (idle expiry, eviction, clear, restart), say so explicitly
+    instead of silently answering without the document. Runs BEFORE quota is
+    consumed, so this rejection never costs the student a chat."""
+    if (pdf_expected or "").strip().lower() not in ("1", "true", "yes"):
+        return
+    if chat_id and _pdf_contexts.get(active_pdf_contexts, user_id, chat_id):
+        return
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "PDF_CONTEXT_EXPIRED",
+            "message": "Your PDF is no longer loaded on the server (it expired or the server restarted). Please upload it again.",
+        },
+    )
+
+
+@app.get("/healthz")
+async def healthz():
+    """Liveness only: the process is up and serving. No external calls, no
+    secrets, no counts."""
+    return {"status": "ok"}
+
+
+@app.get("/readyz")
+async def readyz():
+    """Configuration readiness for deploy checks. Booleans only - it never
+    returns a value, key, URL or count."""
+    checks = {
+        "supabase_configured": bool(_database_module.SUPABASE_URL and _database_module.SUPABASE_ANON_KEY),
+        "gemini_key_configured": bool((os.getenv("GEMINI_API_KEY") or "").strip()),
+        "quota_mode_enforce": quota_service.quota_mode() == "enforce",
+    }
+    ready = checks["supabase_configured"] and checks["gemini_key_configured"]
+    return Response(
+        content=json.dumps({"ready": ready, "checks": checks}),
+        media_type="application/json",
+        status_code=200 if ready else 503,
+    )
+
+
 @app.post("/api/pdf/upload")
 async def upload_pdf(
     file: UploadFile = File(...),
@@ -603,6 +686,8 @@ async def upload_pdf(
     # attach it to is meaningless - there is nothing safe to fall back to.
     if not chat_id or not chat_id.strip():
         raise HTTPException(status_code=400, detail="chat_id is required to upload a PDF.")
+    if len(chat_id) > state_limits.MAX_CHAT_ID_CHARS:
+        raise HTTPException(status_code=400, detail="chat_id is too long.")
 
     is_pdf_content_type = file.content_type in ALLOWED_PDF_CONTENT_TYPES
     is_pdf_extension = (file.filename or "").lower().endswith(".pdf")
@@ -647,7 +732,11 @@ async def upload_pdf(
     # BUG 2 FIX: stored under this user's own chat_id bucket only - never
     # overwrites or is visible to any other chat_id, for this user or any
     # other.
-    active_pdf_contexts.setdefault(user_id, {})[chat_id] = pdf_text
+    try:
+        _pdf_contexts.put(active_pdf_contexts, user_id, chat_id, pdf_text)
+    except state_limits.ContextCapacityError:
+        logger.error("upload_pdf: document exceeds the configured context budget (user_id=%s)", user_id)
+        raise HTTPException(status_code=413, detail="This PDF is too large to keep open. Please upload a smaller file.")
     return {"status": "success", "filename": file.filename, "length": len(pdf_text)}
 
 
@@ -668,7 +757,7 @@ async def clear_pdf_endpoint(
     if not chat_id or not chat_id.strip():
         raise HTTPException(status_code=400, detail="chat_id is required to clear a PDF.")
 
-    active_pdf_contexts.get(user_id, {}).pop(chat_id, None)
+    _pdf_contexts.discard(active_pdf_contexts, user_id, chat_id)
     return {"status": "success"}
 
 def parse_and_validate_history(raw_history: str) -> list:
@@ -1000,8 +1089,10 @@ async def chat_endpoint(
     # the whole request. PDF upload/clear below DO require it, since those
     # actions are meaningless without a chat to attach to.
     chat_id: str = Form(""),
+    pdf_expected: str = Form(""),
     background_tasks: BackgroundTasks = None,
     response_headers: Response = None,
+    usage: usage_telemetry.UsageCollector = Depends(_usage_collection),
     user_and_token: Tuple[str, str] = Depends(_rate_limited_chat)
 ):
     # PHASE 10 parity with /api/chat/stream: one request id per call, used in
@@ -1029,10 +1120,20 @@ async def chat_endpoint(
     # is a separate, frontend-only change not made here).
     user_id, user_token = user_and_token
     t_request_start = time.perf_counter()
+
+    # Pre-Phase 10: explicit expired-PDF signal, then the server-side plan
+    # quota. Both sit BEFORE the try/except below for the same reason the image
+    # read does (an HTTPException inside it would be swallowed into a 200).
+    # The PDF check runs first so a rejected request never consumes a chat.
+    usage.bind(user_id, user_token)
+    _require_expected_pdf(pdf_expected, user_id, chat_id)
+    usage.request_id = request_id
+    quota_decision, usage.refund_ticket = await quota_service.enforce_quota(user_token, KIND_CHAT, request_id)
+    usage.plan = quota_decision.plan
     try:
         if not chat_id:
             logger.warning("chat_endpoint: request received with no chat_id - proceeding without PDF context")
-        pdf_context = active_pdf_contexts.get(user_id, {}).get(chat_id, "") if chat_id else ""
+        pdf_context = _pdf_contexts.get(active_pdf_contexts, user_id, chat_id) if chat_id else ""
         conversation_history = parse_and_validate_history(history)
         t_after_parsing = time.perf_counter()
 
@@ -1170,6 +1271,7 @@ async def chat_endpoint(
             "Unexpected error in /api/chat after %.3fs",
             time.perf_counter() - t_request_start
         )
+        usage.force_refund = True  # nothing usable was delivered: give the chat back
         return {"reply": "Sorry, something went wrong handling your request. Please try again."}
 
 
@@ -1234,7 +1336,9 @@ async def chat_stream_endpoint(
     image: Optional[UploadFile] = File(None),
     history: str = Form("[]"),
     chat_id: str = Form(""),
+    pdf_expected: str = Form(""),
     background_tasks: BackgroundTasks = None,
+    usage: usage_telemetry.UsageCollector = Depends(_usage_collection),
     user_and_token: Tuple[str, str] = Depends(_rate_limited_chat)
 ):
     # P0 STABILIZATION: one id per chat request, used in every log line of
@@ -1257,8 +1361,18 @@ async def chat_stream_endpoint(
 
     if not chat_id:
         logger.warning("chat_stream_endpoint: request received with no chat_id - proceeding without PDF context")
-    pdf_context = active_pdf_contexts.get(user_id, {}).get(chat_id, "") if chat_id else ""
+    _require_expected_pdf(pdf_expected, user_id, chat_id)
+    pdf_context = _pdf_contexts.get(active_pdf_contexts, user_id, chat_id) if chat_id else ""
     conversation_history = parse_and_validate_history(history)
+
+    # Pre-Phase 10: server-side plan quota. After every cheap validation (so a
+    # malformed request never costs a chat) and before any Supabase/Gemini
+    # work. The decision is a real HTTP status (429/503) BEFORE streaming
+    # starts, like the auth and rate-limit rejections above.
+    usage.bind(user_id, user_token)
+    usage.request_id = request_id
+    quota_decision, usage.refund_ticket = await quota_service.enforce_quota(user_token, KIND_CHAT, request_id)
+    usage.plan = quota_decision.plan
 
     # Identical academic-context resolution to /api/chat: profile-derived,
     # server-side, never client-supplied.
@@ -1361,6 +1475,7 @@ async def chat_stream_endpoint(
                     "and no text", request_id
                 )
                 terminal_sent = True
+                usage.force_refund = True  # no text was produced: give the chat back
                 yield _line({"type": "error", "reply": GENERIC_CHAT_ERROR, "code": ERROR_INTERNAL})
                 return
 
@@ -1428,6 +1543,7 @@ async def chat_stream_endpoint(
                 if final_text:
                     yield _line({"type": "done", "reply": final_text, "research": None})
                 else:
+                    usage.force_refund = True  # failed with no usable text: give the chat back
                     yield _line({"type": "error", "reply": GENERIC_CHAT_ERROR, "code": ERROR_INTERNAL})
 
     return StreamingResponse(
@@ -1456,6 +1572,7 @@ async def chat_title_endpoint(
     # than failing the whole request.
     chat_id: str = Form(""),
     background_tasks: BackgroundTasks = None,
+    usage: usage_telemetry.UsageCollector = Depends(_usage_collection),
     user_and_token: Tuple[str, str] = Depends(_rate_limited_chat_title)
 ):
     """
@@ -1481,6 +1598,7 @@ async def chat_title_endpoint(
     honest, intentional behavior, not an oversight.
     """
     user_id, user_token = user_and_token
+    usage_telemetry.bind_current(user_id, user_token)  # Pre-Phase 10: identity for the post-response usage writer
     conversation_history = parse_and_validate_history(history)
     if not conversation_history:
         return {"title": None}
@@ -1564,6 +1682,7 @@ async def quiz_generate_endpoint(
     subject: str = Form("Science"),
     topic: str = Form("General Practice"),
     count: int = Form(5),
+    usage: usage_telemetry.UsageCollector = Depends(_usage_collection),
     user_and_token: Tuple[str, str] = Depends(_rate_limited_quiz_generation)
 ):
     # ISSUE 1 FIX: board/user_class/stream are no longer client-supplied
@@ -1580,6 +1699,14 @@ async def quiz_generate_endpoint(
     # from here on use only the cleaned values (they are also what gets
     # stored in the server-side quiz definition below).
     subject, topic, count = validate_quiz_request(subject, topic, count)
+
+    # Pre-Phase 10: server-side weekly quiz quota, after validation so a
+    # rejected/malformed request never costs a quiz.
+    quiz_request_id = new_request_id()
+    usage.bind(user_id, user_token)
+    usage.request_id = quiz_request_id
+    quota_decision, usage.refund_ticket = await quota_service.enforce_quota(user_token, KIND_QUIZ, quiz_request_id)
+    usage.plan = quota_decision.plan
 
     user_class, stream = await _get_academic_context(user_token=user_token, user_id=user_id)
 
@@ -1611,6 +1738,7 @@ async def quiz_generate_endpoint(
         # handles an empty "questions" list as "Failed to generate quiz."
         # (see generateAndStartQuiz in static/js/app.js). quiz_id is simply
         # absent/None; nothing to persist for a quiz that doesn't exist.
+        usage.force_refund = True  # no quiz was produced: give the quiz back
         return {"questions": [], "quiz_id": None}
 
     # DATABASE FOUNDATION (Phase 1): keep the authoritative, validated quiz
@@ -1618,7 +1746,7 @@ async def quiz_generate_endpoint(
     # has something trustworthy to grade against later. See
     # active_quiz_definitions comment above for the full rationale.
     quiz_id = uuid.uuid4().hex
-    active_quiz_definitions[quiz_id] = {
+    _new_quiz_definition = {
         "user_id": user_id,
         "board": DEFAULT_BOARD,
         "user_class": stored_user_class,
@@ -1629,6 +1757,7 @@ async def quiz_generate_endpoint(
         "submitted": False,
         "created_at": time.time(),
     }
+    _quiz_definitions.put(active_quiz_definitions, quiz_id, _new_quiz_definition)
 
     return {"questions": questions, "quiz_id": quiz_id}
 
@@ -1661,7 +1790,7 @@ async def quiz_submit_endpoint(
     """
     user_id, user_token = user_and_token
 
-    definition = active_quiz_definitions.get(quiz_id)
+    definition = _quiz_definitions.get(active_quiz_definitions, quiz_id)
     if not definition or definition["user_id"] != user_id:
         # Covers: unknown quiz_id, a quiz_id generated before a server
         # restart (active_quiz_definitions is in-memory - see comment
@@ -2640,6 +2769,7 @@ async def _load_owned_note_for_ai(user_token: str, user_id: str, note_id: str, o
 @app.post("/api/notes/{note_id}/suggest-tags")
 async def suggest_note_topics_endpoint(
     note_id: str,
+    usage: usage_telemetry.UsageCollector = Depends(_usage_collection),
     user_and_token: Tuple[str, str] = Depends(get_current_user_and_token),
 ):
     """
@@ -2649,6 +2779,7 @@ async def suggest_note_topics_endpoint(
     reading of this note, NOT official curriculum classifications.
     """
     user_id, user_token = user_and_token
+    usage_telemetry.bind_current(user_id, user_token)  # Pre-Phase 10: identity for the post-response usage writer
     note = await _load_owned_note_for_ai(user_token, user_id, note_id, "suggest_note_topics_endpoint")
     _check_rate_limit(user_id, "notes_ai")
     try:
@@ -2670,6 +2801,7 @@ async def _generate_study_material(
     op: str,
 ):
     user_id, user_token = user_and_token
+    usage_telemetry.bind_current(user_id, user_token)  # Pre-Phase 10: identity for the post-response usage writer
     body = await _read_json_body(request, allow_empty=True)
     regenerate = body.get("regenerate") is True
 
@@ -2700,6 +2832,7 @@ async def _generate_study_material(
 async def generate_note_flashcards_endpoint(
     note_id: str,
     request: Request,
+    usage: usage_telemetry.UsageCollector = Depends(_usage_collection),
     user_and_token: Tuple[str, str] = Depends(get_current_user_and_token),
 ):
     """Flashcards for a note: returns the stored set if one exists, otherwise
@@ -2716,6 +2849,7 @@ async def generate_note_flashcards_endpoint(
 async def generate_note_mini_quiz_endpoint(
     note_id: str,
     request: Request,
+    usage: usage_telemetry.UsageCollector = Depends(_usage_collection),
     user_and_token: Tuple[str, str] = Depends(get_current_user_and_token),
 ):
     """Mini-quiz for a note (same persist/regenerate rules as flashcards).

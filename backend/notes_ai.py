@@ -35,12 +35,14 @@ DATA, mirroring the structural fix already used by generate_quiz_questions.
 
 import json
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 from backend.ai_engine import MODEL_NAME
 from backend.providers import ProviderError, ProviderRequest, get_provider
 from backend.providers.base import ProviderErrorKind
 from backend import notes_engine
+from backend import usage_collector
 
 logger = logging.getLogger("kognit.notes_ai")
 
@@ -80,6 +82,7 @@ def _build_note_data(content_md: str, question_md: Optional[str]) -> str:
 
 def _call_model(system_instruction: str, user_text: str) -> str:
     """One provider attempt. Returns the raw text or raises NotesAIError."""
+    _t_notes = time.perf_counter()
     try:
         result = get_provider().generate(ProviderRequest(
             system_instruction=system_instruction,
@@ -89,6 +92,10 @@ def _call_model(system_instruction: str, user_text: str) -> str:
             reasoning_effort=None,
         ))
     except ProviderError as exc:
+        usage_collector.record_ai_call(
+            operation="notes", status="error", model=MODEL_NAME,
+            error_code=str(getattr(exc.kind, "value", exc.kind)),
+        )
         # str(exc) is the safe label built by ProviderError itself.
         logger.warning("notes_ai provider error: %s", exc)
         if exc.kind == ProviderErrorKind.RATE_LIMITED:
@@ -99,9 +106,16 @@ def _call_model(system_instruction: str, user_text: str) -> str:
             raise NotesAIError(CODE_UNAVAILABLE) from exc
         raise NotesAIError(CODE_FAILED) from exc
     except Exception as exc:  # noqa: BLE001 - boundary: never leak anything upward
+        usage_collector.record_ai_call(
+            operation="notes", status="error", model=MODEL_NAME, error_code=type(exc).__name__,
+        )
         logger.error("notes_ai unexpected error type=%s", type(exc).__name__)
         raise NotesAIError(CODE_FAILED) from exc
 
+    usage_collector.record_ai_call(
+        operation="notes", status="success", model=MODEL_NAME, usage=getattr(result, "usage", None),
+        duration_seconds=time.perf_counter() - _t_notes,
+    )
     text = (getattr(result, "text", None) or "").strip()
     if not text:
         # Empty text is typically a safety block - nothing usable.

@@ -18,8 +18,12 @@
 --   details        which table.column entries are affected
 --
 -- Re-run this after applying a migration; when it returns zero rows you are in step
--- with the repository. (0002, 0004 and 0006 are safe to run twice. 0001, 0003, 0005
--- and 0007 create policies - run each of those only once.)
+-- with the repository. (0002, 0004, 0006, 0008, 0009 and 0010 are safe to run twice. 0001,
+-- 0003, 0005 and 0007 create policies - run each of those only once.)
+--
+-- ALSO RUN supabase/verify_policies.sql after 0010: it reports any row level
+-- security policy on the student-data tables that is NOT scoped to the signed-in
+-- user, which this column check cannot see.
 --
 -- This file is kept in step with the migrations by test_schema_contract.py.
 
@@ -82,7 +86,68 @@ with expected (table_name, column_name, added_by, relaxed_by) as (
     ('pocket_notes', 'tags', '0007_pocket_notes.sql', null),
     ('pocket_notes', 'takeaway', '0007_pocket_notes.sql', null),
     ('pocket_notes', 'updated_at', '0007_pocket_notes.sql', null),
-    ('pocket_notes', 'user_id', '0007_pocket_notes.sql', null)
+    ('pocket_notes', 'user_id', '0007_pocket_notes.sql', null),
+    ('plan_limits', 'first_day_limit_count', '0008_plans_quota_subscriptions.sql', null),
+    ('plan_limits', 'kind', '0008_plans_quota_subscriptions.sql', null),
+    ('plan_limits', 'limit_count', '0008_plans_quota_subscriptions.sql', null),
+    ('plan_limits', 'period', '0008_plans_quota_subscriptions.sql', null),
+    ('plan_limits', 'plan', '0008_plans_quota_subscriptions.sql', null),
+    ('plan_prices', 'amount_bdt', '0008_plans_quota_subscriptions.sql', null),
+    ('plan_prices', 'billing_period', '0008_plans_quota_subscriptions.sql', null),
+    ('plan_prices', 'plan', '0008_plans_quota_subscriptions.sql', null),
+    ('payments', 'amount_bdt', '0008_plans_quota_subscriptions.sql', null),
+    ('payments', 'billing_period', '0008_plans_quota_subscriptions.sql', null),
+    ('payments', 'created_at', '0008_plans_quota_subscriptions.sql', null),
+    ('payments', 'currency', '0008_plans_quota_subscriptions.sql', null),
+    ('payments', 'id', '0008_plans_quota_subscriptions.sql', null),
+    ('payments', 'provider', '0008_plans_quota_subscriptions.sql', null),
+    ('payments', 'provider_payment_id', '0008_plans_quota_subscriptions.sql', null),
+    ('payments', 'status', '0008_plans_quota_subscriptions.sql', null),
+    ('payments', 'user_id', '0008_plans_quota_subscriptions.sql', null),
+    ('payments', 'verified_at', '0008_plans_quota_subscriptions.sql', null),
+    ('subscriptions', 'billing_period', '0008_plans_quota_subscriptions.sql', null),
+    ('subscriptions', 'created_at', '0008_plans_quota_subscriptions.sql', null),
+    ('subscriptions', 'expires_at', '0008_plans_quota_subscriptions.sql', null),
+    ('subscriptions', 'id', '0008_plans_quota_subscriptions.sql', null),
+    ('subscriptions', 'payment_id', '0008_plans_quota_subscriptions.sql', null),
+    ('subscriptions', 'plan', '0008_plans_quota_subscriptions.sql', null),
+    ('subscriptions', 'starts_at', '0008_plans_quota_subscriptions.sql', null),
+    ('subscriptions', 'status', '0008_plans_quota_subscriptions.sql', null),
+    ('subscriptions', 'user_id', '0008_plans_quota_subscriptions.sql', null),
+    ('quota_ledger', 'created_at', '0008_plans_quota_subscriptions.sql', null),
+    ('quota_ledger', 'id', '0008_plans_quota_subscriptions.sql', null),
+    ('quota_ledger', 'kind', '0008_plans_quota_subscriptions.sql', null),
+    ('quota_ledger', 'period_key', '0008_plans_quota_subscriptions.sql', null),
+    ('quota_ledger', 'refund_token_hash', '0008_plans_quota_subscriptions.sql', null),
+    ('quota_ledger', 'refunded_at', '0008_plans_quota_subscriptions.sql', null),
+    ('quota_ledger', 'request_id', '0008_plans_quota_subscriptions.sql', null),
+    ('quota_ledger', 'user_id', '0008_plans_quota_subscriptions.sql', null),
+    ('ai_usage_events', 'attempt', '0009_ai_usage_events.sql', null),
+    ('ai_usage_events', 'created_at', '0009_ai_usage_events.sql', null),
+    ('ai_usage_events', 'duration_ms', '0009_ai_usage_events.sql', null),
+    ('ai_usage_events', 'error_code', '0009_ai_usage_events.sql', null),
+    ('ai_usage_events', 'estimated_cost_usd', '0009_ai_usage_events.sql', null),
+    ('ai_usage_events', 'id', '0009_ai_usage_events.sql', null),
+    ('ai_usage_events', 'input_tokens', '0009_ai_usage_events.sql', null),
+    ('ai_usage_events', 'model', '0009_ai_usage_events.sql', null),
+    ('ai_usage_events', 'operation', '0009_ai_usage_events.sql', null),
+    ('ai_usage_events', 'output_tokens', '0009_ai_usage_events.sql', null),
+    ('ai_usage_events', 'plan', '0009_ai_usage_events.sql', null),
+    ('ai_usage_events', 'pricing_version', '0009_ai_usage_events.sql', null),
+    ('ai_usage_events', 'provider', '0009_ai_usage_events.sql', null),
+    ('ai_usage_events', 'recovery_used', '0009_ai_usage_events.sql', null),
+    ('ai_usage_events', 'request_id', '0009_ai_usage_events.sql', null),
+    ('ai_usage_events', 'retry_count', '0009_ai_usage_events.sql', null),
+    ('ai_usage_events', 'status', '0009_ai_usage_events.sql', null),
+    ('ai_usage_events', 'thinking_tokens', '0009_ai_usage_events.sql', null),
+    ('ai_usage_events', 'total_tokens', '0009_ai_usage_events.sql', null),
+    ('ai_usage_events', 'ttft_ms', '0009_ai_usage_events.sql', null),
+    ('ai_usage_events', 'user_id', '0009_ai_usage_events.sql', null),
+    ('user_projects', 'chats', '0010_user_projects_baseline.sql', null),
+    ('user_projects', 'id', '0010_user_projects_baseline.sql', null),
+    ('user_projects', 'title', '0010_user_projects_baseline.sql', null),
+    ('user_projects', 'updated_at', '0010_user_projects_baseline.sql', null),
+    ('user_projects', 'user_id', '0010_user_projects_baseline.sql', null)
 ),
 column_problems as (
   select e.table_name,
@@ -108,7 +173,7 @@ rls_problems as (
          'enable row level security - see the migration that creates ' || tablename::text as run_migration
   from pg_tables
   where schemaname = 'public'
-    and tablename in ('conversation_index', 'learning_evidence', 'pocket_notes', 'quiz_answers', 'quiz_attempts', 'student_profiles')
+    and tablename in ('ai_usage_events', 'conversation_index', 'learning_evidence', 'payments', 'plan_limits', 'plan_prices', 'pocket_notes', 'quiz_answers', 'quiz_attempts', 'quota_ledger', 'student_profiles', 'subscriptions', 'user_projects')
     and not rowsecurity
 )
 select run_migration,

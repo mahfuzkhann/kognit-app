@@ -2299,6 +2299,7 @@ async function submitUserMessageAndAppendReplyInner(meta, msg, finalText, chat, 
     // already captured above for this request - reused here rather than
     // re-reading activeChatId, which could have changed by now.
     formData.append("chat_id", requestChatId);
+    if (isPDFLoaded) formData.append("pdf_expected", "1");  // PRE-PHASE 10: see sendMessage
 
     if (msg.image) {
         try {
@@ -2700,6 +2701,47 @@ function loadChat(projId, chatId) {
 
     typesetMathJax([chatBox]);
     chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+// PRE-PHASE 10: structured server responses. The backend now returns a JSON
+// body {"detail": {"code": "...", "message": "..."}} for four situations that
+// used to be silent or generic: the plan quota is used up (429
+// QUOTA_EXCEEDED), the quota backend cannot be reached (503 QUOTA_UNAVAILABLE),
+// the plan has no configured limits (403 PLAN_NOT_CONFIGURED), and the PDF the
+// browser thinks is attached is no longer held by the server (409
+// PDF_CONTEXT_EXPIRED). The ordinary rate limiter's 429 has a plain-string
+// detail, so it is NOT matched here and keeps its existing handling.
+// response.clone() leaves the original body readable for any fall-through.
+async function readStructuredError(response) {
+    try {
+        const data = await response.clone().json();
+        if (data && data.detail && typeof data.detail === "object" && typeof data.detail.code === "string") {
+            return data.detail;
+        }
+    } catch (e) { /* not JSON / no body - not a structured error */ }
+    return null;
+}
+
+function describeStructuredError(info) {
+    let text = (info && typeof info.message === "string" && info.message) ? info.message : "Something went wrong. Please try again.";
+    if (info && info.code === "QUOTA_EXCEEDED" && typeof info.resets_at === "string") {
+        const when = new Date(info.resets_at);
+        if (!isNaN(when.getTime())) {
+            text += " Resets: " + when.toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) + ".";
+        }
+    }
+    return text;
+}
+
+// The server no longer holds this chat's PDF (idle expiry, eviction or a
+// restart). Make the UI honest instead of silently answering without it.
+function markPDFExpiredForChat(projectId, chatId) {
+    const proj = projects.find(p => p.id === projectId);
+    const chat = proj ? proj.chats.find(c => c.id === chatId) : null;
+    if (!chat) return;
+    if (chat.pdf) chat.pdf.active = false;
+    saveProjectsToStorage();
+    if (activeProjectId === projectId && activeChatId === chatId) applyPDFStatusUI(chat);
 }
 
 // BUG 2 FIX: single place that syncs the #pdf-status-bar UI + isPDFLoaded
@@ -3700,6 +3742,9 @@ window.sendMessage = async function() {
     // continues) is the chat that actually owns this message - reused
     // here for the same CHAT-05 race-safety reason it exists at all.
     formData.append("chat_id", requestChatId);
+    // PRE-PHASE 10: if this chat shows an attached PDF, say so; the server
+    // answers 409 PDF_CONTEXT_EXPIRED instead of silently answering without it.
+    if (isPDFLoaded) formData.append("pdf_expected", "1");
 
     if (selectedImageFile) formData.append("image", selectedImageFile);
 
@@ -3787,6 +3832,26 @@ window.sendMessage = async function() {
         if (response.status === 401) {
             promptLoginRequired();
             return;
+        }
+
+        // PRE-PHASE 10: plan quota / quota backend / expired PDF. Rejected
+        // BEFORE any generation, so nothing was spent. Handled like the 401
+        // and 429 cases: show a clear message and return before touching chat
+        // state.
+        if (response.status === 429 || response.status === 503 || response.status === 403 || response.status === 409) {
+            const structured = await readStructuredError(response);
+            if (structured) {
+                if (structured.code === "PDF_CONTEXT_EXPIRED") {
+                    markPDFExpiredForChat(requestProjectId, requestChatId);
+                }
+                if (isStillViewingThisChat) {
+                    const limitDiv = document.createElement("div");
+                    limitDiv.className = "bot-message";
+                    limitDiv.textContent = describeStructuredError(structured);
+                    chatBox.appendChild(limitDiv);
+                }
+                return;
+            }
         }
 
         // PHASE 4: a 429 here means the backend rate limiter rejected this
@@ -4310,6 +4375,14 @@ window.generateAndStartQuiz = async function() {
         // questions` being undefined and show the generic "Failed to
         // generate quiz." alert, which doesn't tell the student anything
         // useful about what happened or what to do next.
+        // PRE-PHASE 10: weekly quiz quota / quota backend (structured detail).
+        if (res.status === 429 || res.status === 503 || res.status === 403) {
+            const structured = await readStructuredError(res);
+            if (structured) {
+                alert(describeStructuredError(structured));
+                return;
+            }
+        }
         if (res.status === 429) {
             alert("You're generating quizzes too quickly. Please wait a moment and try again.");
             return;

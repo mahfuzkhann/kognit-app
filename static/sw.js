@@ -47,7 +47,7 @@
    ============================================================ */
 "use strict";
 
-const SW_VERSION = "2026-10-19.1";
+const SW_VERSION = "2026-10-22.1";
 const SHELL_CACHE = "kognit-shell-" + SW_VERSION;
 const CDN_CACHE = "kognit-cdn-" + SW_VERSION;
 const CACHE_PREFIX = "kognit-";
