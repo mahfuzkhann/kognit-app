@@ -44,7 +44,7 @@ from backend.database import (
 from backend import notes_engine, notes_ai
 from backend import state_limits, quota_service, usage_telemetry
 from backend import database as _database_module
-from backend.quota_service import KIND_CHAT, KIND_QUIZ
+from backend.quota_service import KIND_CHAT, KIND_QUIZ, KIND_NOTES_AI
 from backend.learning_memory import detect_learning_signals, is_meaningful_signal_set, resolve_academic_context
 from backend.learning_snapshot import build_learning_snapshot
 from backend.next_step_engine import compute_next_steps
@@ -1265,6 +1265,17 @@ async def chat_endpoint(
         result = {"reply": response}
         if research_payload is not None:
             result["research"] = research_payload
+        # Decision A: from here the generated text is on its way to the
+        # student, so this request can no longer be refunded. (Records, not a
+        # client flag, decide: an error record means the body is a canned
+        # error message, not AI text.)
+        usage.mark_text_delivered_from_records()
+        # Q-11: a MAX_TOKENS / non-success finish is returned but labelled, never
+        # presented as a complete answer. Additive fields; `reply` is unchanged.
+        truncated_code = usage.interrupted_code()
+        if truncated_code:
+            result["interrupted"] = True
+            result["code"] = truncated_code
         return result
     except Exception:
         logger.exception(
@@ -1376,13 +1387,19 @@ async def chat_stream_endpoint(
 
     # Identical academic-context resolution to /api/chat: profile-derived,
     # server-side, never client-supplied.
-    (user_class, stream_value), student_name = await asyncio.gather(
-        _get_academic_context(user_token=user_token, user_id=user_id),
-        _get_student_display_name(user_token=user_token, user_id=user_id),
-    )
+    #
+    # Q-03: quota is already consumed here. If anything below raises, FastAPI
+    # turns it into a 500 and does NOT run the registered background tasks, so
+    # the refund decision is made right now by settle_on_exception (it still
+    # honours "never refund after text delivery" - none can have been sent yet).
+    async with usage_telemetry.settle_on_exception(usage):
+        (user_class, stream_value), student_name = await asyncio.gather(
+            _get_academic_context(user_token=user_token, user_id=user_id),
+            _get_student_display_name(user_token=user_token, user_id=user_id),
+        )
 
-    research_decision = decide_research(prompt)
-    enable_research = research_decision.research_requested
+        research_decision = decide_research(prompt)
+        enable_research = research_decision.research_requested
 
     # Metadata only - never the prompt or any student content.
     logger.info(
@@ -1408,6 +1425,7 @@ async def chat_stream_endpoint(
         return (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
 
     async def event_stream():
+        usage.mark_stream_started()
         yield _line({"type": "start", "context": context_label})
 
         final_text = ""
@@ -1437,6 +1455,13 @@ async def chat_stream_endpoint(
 
             async for chunk in iterate_in_threadpool(gen):
                 if chunk.kind == "text":
+                    if chunk.text:
+                        # Decision A: marked BEFORE the yield. Once the line is
+                        # handed to the response we cannot know whether the
+                        # client read it, so the safe (no-refund) side wins;
+                        # code after a yield would not run if the client left
+                        # at exactly this point.
+                        usage.mark_text_delivered()
                     yield _line({"type": "delta", "text": chunk.text})
                 elif chunk.kind == "retry":
                     # BUG 3 PHASE 2: NOT terminal - do not set terminal_sent,
@@ -1456,6 +1481,7 @@ async def chat_stream_endpoint(
                     # stream in), but tagged so the frontend cannot mistake
                     # it for a completed answer.
                     terminal_sent = True
+                    usage.mark_stream_finished()
                     yield _line({
                         "type": "interrupted", "reply": chunk.text,
                         "code": chunk.error_code or ERROR_STREAM_INTERRUPTED,
@@ -1463,6 +1489,7 @@ async def chat_stream_endpoint(
                     return
                 elif chunk.kind == "error":
                     terminal_sent = True
+                    usage.mark_stream_finished()
                     yield _line({
                         "type": "error", "reply": chunk.text,
                         "code": chunk.error_code or ERROR_INTERNAL,
@@ -1476,6 +1503,7 @@ async def chat_stream_endpoint(
                 )
                 terminal_sent = True
                 usage.force_refund = True  # no text was produced: give the chat back
+                usage.mark_stream_finished()
                 yield _line({"type": "error", "reply": GENERIC_CHAT_ERROR, "code": ERROR_INTERNAL})
                 return
 
@@ -1528,6 +1556,7 @@ async def chat_stream_endpoint(
             )
 
             terminal_sent = True
+            usage.mark_stream_finished()
             yield _line({"type": "done", "reply": final_text, "research": research_payload})
 
         except Exception:
@@ -1536,6 +1565,7 @@ async def chat_stream_endpoint(
                 request_id, ERROR_INTERNAL
             )
             if not terminal_sent:
+                usage.mark_stream_finished()
                 # The client must never be left waiting on a stream that
                 # stopped producing. If partial text was already delivered,
                 # finalize with it rather than discarding what the student
@@ -1603,7 +1633,14 @@ async def chat_title_endpoint(
     if not conversation_history:
         return {"title": None}
 
-    title = await run_in_threadpool(generate_chat_title, history=conversation_history, board=DEFAULT_BOARD)
+    # Q-05: AI title generation is metered in the database (kind "notes_ai"),
+    # separately from chat. Server-side, before the provider is called; the
+    # per-minute in-memory limiter above stays as defence in depth only.
+    await _enforce_notes_ai_quota(usage, user_id, user_token)
+    async with usage_telemetry.settle_on_exception(usage):
+        title = await run_in_threadpool(generate_chat_title, history=conversation_history, board=DEFAULT_BOARD)
+    if title:
+        usage.mark_text_delivered()  # Decision A
 
     if title and chat_id and chat_id.strip() and background_tasks is not None:
         try:
@@ -1636,6 +1673,20 @@ async def chat_title_endpoint(
             )
 
     return {"title": title}
+
+
+async def _enforce_notes_ai_quota(usage, user_id: str, user_token: str) -> None:
+    """Counts ONE AI operation against the separate Notes/title meter (kind
+    "notes_ai") in the database BEFORE any provider call, and attaches the
+    secret refund ticket to this request's collector. Raises the same stable
+    429 / 403 / 503 responses as chat and quiz. Never consulted for ordinary
+    note CRUD or for returning stored study material - only where a provider
+    call is about to be made."""
+    usage.bind(user_id, user_token)
+    ledger_id = quota_service.new_ledger_request_id()
+    usage.request_id = ledger_id
+    decision, usage.refund_ticket = await quota_service.enforce_quota(user_token, KIND_NOTES_AI, ledger_id)
+    usage.plan = decision.plan
 
 
 def _normalize_quiz_text(value, field_name: str, max_chars: int) -> str:
@@ -1708,58 +1759,64 @@ async def quiz_generate_endpoint(
     quota_decision, usage.refund_ticket = await quota_service.enforce_quota(user_token, KIND_QUIZ, quiz_request_id)
     usage.plan = quota_decision.plan
 
-    user_class, stream = await _get_academic_context(user_token=user_token, user_id=user_id)
+    # Q-03: quota is already consumed. Everything from here (profile lookup,
+    # quiz generation, storing the definition) runs under settle_on_exception
+    # so an escaping exception refunds NOW - the framework would skip the
+    # background tasks when it turns the exception into a 500.
+    async with usage_telemetry.settle_on_exception(usage):
+        user_class, stream = await _get_academic_context(user_token=user_token, user_id=user_id)
 
-    # quiz_attempts.user_class is NOT NULL (see
-    # supabase/migrations/0001_quiz_persistence.sql) - unlike the AI
-    # prompt (which omits the academic-level clause entirely for a
-    # missing profile, see ai_engine.py), the stored quiz-attempt record
-    # cannot literally be NULL here. UNSPECIFIED_USER_CLASS is a storage-
-    # only sentinel for the rare "no profile yet" case; it is never passed
-    # to generate_quiz_questions itself, which still sees the true
-    # user_class (None if missing) and does not fabricate a class in the
-    # prompt. No migration needed - `stream` was already nullable.
-    stored_user_class = user_class or UNSPECIFIED_USER_CLASS
+        # quiz_attempts.user_class is NOT NULL (see
+        # supabase/migrations/0001_quiz_persistence.sql) - unlike the AI
+        # prompt (which omits the academic-level clause entirely for a
+        # missing profile, see ai_engine.py), the stored quiz-attempt record
+        # cannot literally be NULL here. UNSPECIFIED_USER_CLASS is a storage-
+        # only sentinel for the rare "no profile yet" case; it is never passed
+        # to generate_quiz_questions itself, which still sees the true
+        # user_class (None if missing) and does not fabricate a class in the
+        # prompt. No migration needed - `stream` was already nullable.
+        stored_user_class = user_class or UNSPECIFIED_USER_CLASS
 
-    # Same blocking-call issue as /api/chat, same fix: offload to the
-    # threadpool so this request doesn't block the event loop either.
-    questions = await run_in_threadpool(
-        generate_quiz_questions,
-        board=DEFAULT_BOARD,
-        user_class=user_class,
-        subject=subject,
-        stream=stream,
-        topic=topic,
-        count=count
-    )
+        # Same blocking-call issue as /api/chat, same fix: offload to the
+        # threadpool so this request doesn't block the event loop either.
+        questions = await run_in_threadpool(
+            generate_quiz_questions,
+            board=DEFAULT_BOARD,
+            user_class=user_class,
+            subject=subject,
+            stream=stream,
+            topic=topic,
+            count=count
+        )
 
-    if not questions:
-        # Unchanged behavior for this failure path - the frontend already
-        # handles an empty "questions" list as "Failed to generate quiz."
-        # (see generateAndStartQuiz in static/js/app.js). quiz_id is simply
-        # absent/None; nothing to persist for a quiz that doesn't exist.
-        usage.force_refund = True  # no quiz was produced: give the quiz back
-        return {"questions": [], "quiz_id": None}
+        if not questions:
+            # Unchanged behavior for this failure path - the frontend already
+            # handles an empty "questions" list as "Failed to generate quiz."
+            # (see generateAndStartQuiz in static/js/app.js). quiz_id is simply
+            # absent/None; nothing to persist for a quiz that doesn't exist.
+            usage.force_refund = True  # no quiz was produced: give the quiz back
+            return {"questions": [], "quiz_id": None}
 
-    # DATABASE FOUNDATION (Phase 1): keep the authoritative, validated quiz
-    # definition server-side, keyed by a fresh quiz_id, so /api/quiz/submit
-    # has something trustworthy to grade against later. See
-    # active_quiz_definitions comment above for the full rationale.
-    quiz_id = uuid.uuid4().hex
-    _new_quiz_definition = {
-        "user_id": user_id,
-        "board": DEFAULT_BOARD,
-        "user_class": stored_user_class,
-        "subject": subject,
-        "stream": stream,
-        "topic": topic,
-        "questions": questions,
-        "submitted": False,
-        "created_at": time.time(),
-    }
-    _quiz_definitions.put(active_quiz_definitions, quiz_id, _new_quiz_definition)
+        # DATABASE FOUNDATION (Phase 1): keep the authoritative, validated quiz
+        # definition server-side, keyed by a fresh quiz_id, so /api/quiz/submit
+        # has something trustworthy to grade against later. See
+        # active_quiz_definitions comment above for the full rationale.
+        quiz_id = uuid.uuid4().hex
+        _new_quiz_definition = {
+            "user_id": user_id,
+            "board": DEFAULT_BOARD,
+            "user_class": stored_user_class,
+            "subject": subject,
+            "stream": stream,
+            "topic": topic,
+            "questions": questions,
+            "submitted": False,
+            "created_at": time.time(),
+        }
+        _quiz_definitions.put(active_quiz_definitions, quiz_id, _new_quiz_definition)
 
-    return {"questions": questions, "quiz_id": quiz_id}
+        usage.mark_text_delivered()  # Decision A: the questions are now being returned
+        return {"questions": questions, "quiz_id": quiz_id}
 
 
 @app.post("/api/quiz/submit")
@@ -2782,17 +2839,21 @@ async def suggest_note_topics_endpoint(
     usage_telemetry.bind_current(user_id, user_token)  # Pre-Phase 10: identity for the post-response usage writer
     note = await _load_owned_note_for_ai(user_token, user_id, note_id, "suggest_note_topics_endpoint")
     _check_rate_limit(user_id, "notes_ai")
-    try:
-        suggestions = await run_in_threadpool(
-            notes_ai.suggest_topics, note["content_md"], note.get("question_md"), note.get("tags")
-        )
-    except notes_ai.NotesAIError as exc:
-        raise _notes_ai_http_error(exc)
+    await _enforce_notes_ai_quota(usage, user_id, user_token)  # Q-05: DB meter, before the provider
+    async with usage_telemetry.settle_on_exception(usage):
+        try:
+            suggestions = await run_in_threadpool(
+                notes_ai.suggest_topics, note["content_md"], note.get("question_md"), note.get("tags")
+            )
+        except notes_ai.NotesAIError as exc:
+            raise _notes_ai_http_error(exc)
+        usage.mark_text_delivered()  # Decision A: the suggestions are being returned
     return _notes_json({"suggestions": suggestions})
 
 
 async def _generate_study_material(
     *,
+    usage,
     note_id: str,
     request: Request,
     user_and_token: Tuple[str, str],
@@ -2814,17 +2875,25 @@ async def _generate_study_material(
         return _notes_json({column: note[column], "note": note, "regenerated": False})
 
     _check_rate_limit(user_id, "notes_ai")
-    try:
-        material = await run_in_threadpool(generator, note["content_md"], note.get("question_md"))
-    except notes_ai.NotesAIError as exc:
-        raise _notes_ai_http_error(exc)
-
-    try:
-        updated = await update_pocket_note(user_token, user_id, note_id, {column: material})
-    except DatabaseError:
-        raise _notes_db_error(op, user_id)
+    await _enforce_notes_ai_quota(usage, user_id, user_token)  # Q-05: DB meter, before the provider
+    async with usage_telemetry.settle_on_exception(usage):
+        try:
+            material = await run_in_threadpool(generator, note["content_md"], note.get("question_md"))
+        except notes_ai.NotesAIError as exc:
+            raise _notes_ai_http_error(exc)
+        try:
+            updated = await update_pocket_note(user_token, user_id, note_id, {column: material})
+        except DatabaseError:
+            # Infrastructure fault after the provider answered: the student
+            # gets nothing, so the unit is refunded (guard forces it).
+            raise _notes_db_error(op, user_id)
     if updated is None:
+        # The student deleted the note while it was being generated. Nothing is
+        # delivered, but the provider call was made on their action, so the unit
+        # stays counted (a provider-success record means refund_due() is False).
+        # Refunding here would let a delete-race turn into free generations.
         raise HTTPException(status_code=404, detail=_NOTE_NOT_FOUND)
+    usage.mark_text_delivered()  # Decision A: the material is being returned
     return _notes_json({column: material, "note": updated, "regenerated": True})
 
 
@@ -2839,7 +2908,7 @@ async def generate_note_flashcards_endpoint(
     generates, validates and stores one. Body `{"regenerate": true}` forces a
     new set (rate limited). AI-generated, not independently verified."""
     return await _generate_study_material(
-        note_id=note_id, request=request, user_and_token=user_and_token,
+        usage=usage, note_id=note_id, request=request, user_and_token=user_and_token,
         column="flashcards", generator=notes_ai.generate_flashcards,
         op="generate_note_flashcards_endpoint",
     )
@@ -2856,7 +2925,7 @@ async def generate_note_mini_quiz_endpoint(
     SELF-GRADED ONLY: scoring happens in the browser and nothing here writes
     quiz_attempts, mastery or learning evidence."""
     return await _generate_study_material(
-        note_id=note_id, request=request, user_and_token=user_and_token,
+        usage=usage, note_id=note_id, request=request, user_and_token=user_and_token,
         column="mini_quiz", generator=notes_ai.generate_mini_quiz,
         op="generate_note_mini_quiz_endpoint",
     )

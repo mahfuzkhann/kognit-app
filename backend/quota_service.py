@@ -34,14 +34,29 @@ POLICY (CEO decisions recorded for this implementation)
   Days/weeks reset in Asia/Dhaka; weeks start on Monday.
   A "chat" is one request to /api/chat or /api/chat/stream. Counting requests
   (not distinct chat_ids) means opening many chats cannot bypass the limit.
+  Notes/title AI (kind "notes_ai", migration 0011) is a SEPARATE meter, so a
+  chat title or a Pocket Notes flashcard set never spends a chat. It covers
+  POST /api/chat/title and the three on-demand Pocket Notes AI routes
+  (suggest-tags, flashcards, mini-quiz). Its Free limit is a PROPOSAL awaiting
+  CEO approval (see 0011 and docs/DEPLOYMENT.md); like every limit it lives in
+  public.plan_limits, never in this file. Returning already-stored study
+  material and ordinary note CRUD are not AI operations and are not counted.
 
 WHAT COUNTS
 -----------
 A request is counted when it is accepted, BEFORE the provider is called. A
-request rejected for exceeding the quota is not counted. If the provider then
-fails and the student received nothing usable, the backend refunds the unit
-(see backend/usage_telemetry.finalize_ai_request). A client that simply
-re-sends is a new request and is counted again.
+request rejected for exceeding the quota is not counted. If the request then
+fails and the student received NO generated text, the backend refunds the unit.
+Once even one piece of generated text has been delivered the request is final
+and is never refunded (CEO decision A - see usage_collector.refund_due). A
+client that simply re-sends is a new request and is counted again.
+
+If the consume call itself fails ambiguously (timeout / lost response) the
+database may or may not have recorded the unit. enforce_quota therefore makes
+one best-effort compensating refund using the request's own secret ticket
+before it fails closed: refund_quota only ever flips an EXISTING, matching,
+not-yet-refunded ledger row, so when nothing was recorded it is a harmless
+no-op and can never create a credit.
 
 ROLLOUT SWITCH
 --------------
@@ -55,6 +70,7 @@ import hashlib
 import logging
 import os
 import secrets
+import uuid
 from dataclasses import dataclass
 from typing import Optional
 
@@ -67,7 +83,8 @@ logger = logging.getLogger("kognit.quota")
 
 KIND_CHAT = "chat"
 KIND_QUIZ = "quiz"
-VALID_KINDS = (KIND_CHAT, KIND_QUIZ)
+KIND_NOTES_AI = "notes_ai"   # chat titles + Pocket Notes AI tools (migration 0011)
+VALID_KINDS = (KIND_CHAT, KIND_QUIZ, KIND_NOTES_AI)
 
 PLAN_UNMETERED = "unmetered"  # reported when QUOTA_MODE=off
 
@@ -75,7 +92,7 @@ CODE_QUOTA_EXCEEDED = "QUOTA_EXCEEDED"
 CODE_QUOTA_UNAVAILABLE = "QUOTA_UNAVAILABLE"
 CODE_PLAN_NOT_CONFIGURED = "PLAN_NOT_CONFIGURED"
 
-_KIND_NOUN = {KIND_CHAT: "chats", KIND_QUIZ: "quizzes"}
+_KIND_NOUN = {KIND_CHAT: "chats", KIND_QUIZ: "quizzes", KIND_NOTES_AI: "AI note tools"}
 
 
 class QuotaUnavailable(Exception):
@@ -106,6 +123,14 @@ class RefundTicket:
 def quota_mode() -> str:
     mode = (os.getenv("QUOTA_MODE") or "enforce").strip().lower()
     return "off" if mode == "off" else "enforce"
+
+
+def new_ledger_request_id() -> str:
+    """A full 128-bit request id for ledger rows of the notes_ai meter. The
+    chat endpoints' 12-hex-char display ids are fine for logs, but a ledger
+    collision would be treated as a replay (allowed, uncounted), so new meters
+    use the full uuid4 hex (32 chars; the SQL accepts 8-64)."""
+    return uuid.uuid4().hex
 
 
 def new_refund_ticket(kind: str, request_id: str) -> RefundTicket:
@@ -206,6 +231,7 @@ async def refund_quota(user_token: str, ticket: RefundTicket) -> bool:
 _EXCEEDED_MESSAGES = {
     KIND_CHAT: "You've used all of your chats for this period. Your chats reset at the time shown.",
     KIND_QUIZ: "You've used all of your quizzes for this period. Your quizzes reset at the time shown.",
+    KIND_NOTES_AI: "You've used all of your AI note tools for this period. They reset at the time shown.",
 }
 
 
@@ -248,11 +274,21 @@ def unavailable_http_exception() -> HTTPException:
 
 async def enforce_quota(user_token: str, kind: str, request_id: str):
     """Endpoint helper. Returns (decision, ticket). Raises the appropriate
-    HTTPException when the request must not proceed."""
+    HTTPException when the request must not proceed.
+
+    Fails closed: if the quota backend cannot give a trustworthy answer the
+    request is refused (503) and never runs unmetered. Because a lost response
+    does not prove the unit was NOT recorded, one compensating refund is
+    attempted first (a safe no-op when nothing was recorded)."""
     ticket = new_refund_ticket(kind, request_id) if quota_mode() != "off" else None
     try:
         decision = await consume_quota(user_token, kind, request_id, ticket)
     except QuotaUnavailable:
+        if ticket is not None:
+            try:
+                await refund_quota(user_token, ticket)  # never raises
+            except Exception:  # noqa: BLE001 - must not mask the 503 below
+                logger.warning("quota compensation failed request_id=%s kind=%s", request_id, kind)
         raise unavailable_http_exception()
     if not decision.allowed:
         raise exceeded_http_exception(decision)

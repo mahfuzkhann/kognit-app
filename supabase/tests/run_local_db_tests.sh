@@ -18,9 +18,11 @@ for f in "$repo"/supabase/migrations/*.sql; do
   echo "applying $(basename "$f")"
   psql -v ON_ERROR_STOP=1 -X -q -f "$f" >/dev/null
 done
-echo "re-applying idempotent migrations 0008-0010 (must succeed twice)"
-for f in "$repo"/supabase/migrations/0008*.sql "$repo"/supabase/migrations/0009*.sql "$repo"/supabase/migrations/0010*.sql; do
+echo "re-applying idempotent migrations 0008-0011 (must succeed twice)"
+for f in "$repo"/supabase/migrations/0008*.sql "$repo"/supabase/migrations/0009*.sql "$repo"/supabase/migrations/0010*.sql "$repo"/supabase/migrations/0011*.sql; do
   psql -v ON_ERROR_STOP=1 -X -q -f "$f" >/dev/null
 done
 psql -v ON_ERROR_STOP=1 -X -q -f "$here/quota_behaviour_test.sql"
+psql -v ON_ERROR_STOP=1 -X -q -f "$here/hardening_behaviour_test.sql"
 bash "$here/concurrency_test.sh" 24
+bash "$here/concurrency_notes_test.sh" 30

@@ -9,6 +9,15 @@ gaining a transitive dependency on the database layer.
 
 Persistence and quota refunds live in backend/usage_telemetry.py.
 
+REFUND POLICY (CEO decision A, pre-Phase 10 finalization)
+---------------------------------------------------------
+A counted request is given back ONLY when the student received no generated
+text. The moment ONE non-empty piece of generated text is handed to the
+response (`mark_text_delivered`), the request is final: a later provider
+failure, MAX_TOKENS, timeout, failed recovery or client disconnect never
+refunds it. `refund_due()` enforces this above every other signal. Delivery is
+set by the endpoint, from server-side state only - never from a client flag.
+
 HOW IT HOOKS IN (no signature changes anywhere)
 -----------------------------------------------
 backend/main.py's endpoints depend on `_usage_collection`, which calls
@@ -69,6 +78,17 @@ class UsageCollector:
     records: list = field(default_factory=list)
     refund_ticket: Any = None          # backend.quota_service.RefundTicket (server memory only)
     force_refund: bool = False
+    # Decision A: True once ANY generated text has been handed to the response.
+    text_delivered: bool = False
+    # Streaming lifecycle. A stream that started but never reached a terminal
+    # event was abandoned (client closed the tab / pressed Stop). That is the
+    # student's own choice, not a service failure, and is never refunded.
+    stream_started: bool = False
+    stream_finished: bool = False
+    # Idempotency guards for the (possibly repeated) settlement paths.
+    usage_persisted: bool = False
+    refund_attempts: int = 0
+    refund_done: bool = False
     user_id: Optional[str] = None
     # The student's own token, held in server memory for the life of ONE request
     # so the post-response writer can use it. repr=False keeps it out of any
@@ -82,6 +102,31 @@ class UsageCollector:
         self.user_id = user_id
         self.user_token = user_token
 
+    def mark_text_delivered(self) -> None:
+        """Called at the instant generated text is handed to the response."""
+        self.text_delivered = True
+
+    def mark_stream_started(self) -> None:
+        self.stream_started = True
+
+    def mark_stream_finished(self) -> None:
+        self.stream_finished = True
+
+    def mark_text_delivered_from_records(self) -> None:
+        """For NON-streaming endpoints: the generated text is returned in the
+        JSON body in one piece, so it counts as delivered exactly when the
+        provider produced usable text (a success/interrupted record). Error
+        records mean the body carried a canned error message, not AI text."""
+        if any(r["status"] in ("success", "interrupted") for r in self.snapshot()):
+            self.text_delivered = True
+
+    def interrupted_code(self) -> Optional[str]:
+        """Error code of the last 'interrupted' record (truncated output), or None."""
+        for r in reversed(self.snapshot()):
+            if r["status"] == "interrupted":
+                return r.get("error_code") or "STREAM_INTERRUPTED"
+        return None
+
     def add(self, record: dict) -> None:
         with self._lock:
             if len(self.records) < MAX_RECORDS_PER_REQUEST:
@@ -92,11 +137,23 @@ class UsageCollector:
             return [dict(r) for r in self.records]
 
     def refund_due(self) -> bool:
-        """True when a counted unit should be given back: the endpoint said so,
-        or the request ended in failure with no successful provider result.
-        A student merely cancelling a stream is NOT a failure (no refunds for
-        reading an answer and pressing Stop)."""
+        """True when a counted unit should be given back.
+
+        Order matters (most authoritative first):
+          1. no ticket (request was never counted)       -> never
+          2. text delivered (CEO decision A)             -> never, whatever
+             happened afterwards (failure, MAX_TOKENS, timeout, disconnect)
+          3. abandoned stream (started, no terminal)     -> never (the student
+             left; refunding would let anyone cancel for free credits)
+          4. the endpoint said nothing usable was made   -> refund
+          5. otherwise the provider records decide: a success means keep the
+             count; only errors/interruptions with NO success means refund.
+        """
         if self.refund_ticket is None:
+            return False
+        if self.text_delivered:
+            return False
+        if self.stream_started and not self.stream_finished:
             return False
         if self.force_refund:
             return True

@@ -49,3 +49,33 @@ where table_schema = 'public'
   and grantee in ('anon', 'authenticated')
 group by table_name, grantee
 order by table_name, grantee;
+
+-- Query 4 (migration 0011, Q-06): students and anonymous clients must hold NO
+-- privilege at all on the usage telemetry tables. EXPECTED RESULT: ZERO ROWS.
+select table_name, grantee, privilege_type
+from information_schema.role_table_grants
+where table_schema = 'public'
+  and table_name in ('ai_usage_events', 'usage_write_keys')
+  and grantee in ('anon', 'authenticated', 'public')
+order by table_name, grantee, privilege_type;
+
+-- Query 5 (migration 0011, Q-13): functions in the public schema that either have
+-- no fixed search_path, or are SECURITY DEFINER and executable by anon/public.
+-- EXPECTED RESULT: ZERO ROWS.
+select p.proname, pg_get_function_identity_arguments(p.oid) as args, p.prosecdef as security_definer,
+       has_function_privilege('anon', p.oid, 'execute') as anon_can_execute
+from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+where n.nspname = 'public'
+  and ( p.proconfig is null or not exists (select 1 from unnest(p.proconfig) c where c like 'search_path=%')
+        or (p.prosecdef and has_function_privilege('anon', p.oid, 'execute')) )
+order by p.proname;
+
+-- Query 6 (migration 0011): is the trusted usage writer configured? One row means a
+-- key hash is stored (telemetry will be recorded once the server also has the matching
+-- USAGE_WRITE_KEY). ZERO rows means usage events are NOT being recorded yet. This only
+-- shows that a hash exists - never the key.
+select count(*) as configured_key_hashes from public.usage_write_keys;
+
+-- Query 7 (migration 0011, Q-08): Pro limits that must exist before Pro can be sold.
+-- EXPECTED once Pro is approved: three rows (chat, quiz, notes_ai). Today: none.
+select kind, period, limit_count from public.plan_limits where plan = 'pro' order by kind;

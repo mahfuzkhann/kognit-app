@@ -8,7 +8,7 @@
 --   * Cost needs a verified price list. None is stored in this repository, so the
 --     queries take prices as parameters you type in (USD per MILLION tokens). Check
 --     Google's official pricing page first; do not paste a number from a blog.
---   * This table is telemetry: a student could insert rows for their own user_id.
+--   * This table is telemetry. Since migration 0011 only the trusted backend writer can add rows (students cannot insert or read); rows written BEFORE 0011 may have been forged - see query 99.
 --     It is not a billing ledger.
 --
 -- Set the window and prices once, then run the queries. (In the SQL editor, replace
@@ -97,3 +97,26 @@ group by 1, 2 order by 2 desc, 1;
 --    retention period is a founder/legal decision; 180 days is only a starting point.
 -- delete from public.ai_usage_events where created_at < now() - interval '180 days';
 -- delete from public.quota_ledger    where created_at < now() - interval '180 days';
+-- ---------------------------------------------------------------------------
+-- 99. INTEGRITY REVIEW (migration 0011, Q-06) - READ-ONLY.
+-- Before 0011 any signed-in student could insert rows for themselves with any
+-- plan/model/token/cost/timestamp values and in any number. Rows written since 0011
+-- can only come from the trusted writer (cost columns always NULL, plan derived,
+-- created_at = server time). This lists OLDER rows that look forged or abusive so
+-- YOU can decide what to do. Nothing is deleted automatically.
+select user_id, count(*) as rows_total,
+       count(*) filter (where estimated_cost_usd is not null or pricing_version is not null) as rows_with_cost_or_pricing,
+       count(*) filter (where created_at < '2026-10-01') as rows_before_launch_window,
+       count(*) filter (where operation not in ('chat','stream','quiz','title','notes')) as odd_operations,
+       count(*) filter (where input_tokens > 1000000 or output_tokens > 1000000) as huge_token_rows,
+       min(created_at) as first_seen, max(created_at) as last_seen
+from public.ai_usage_events
+group by user_id
+having count(*) > 500
+    or count(*) filter (where estimated_cost_usd is not null or pricing_version is not null) > 0
+    or count(*) filter (where input_tokens > 1000000 or output_tokens > 1000000) > 0
+order by rows_total desc
+limit 100;
+
+-- 100. RETENTION (run deliberately, e.g. monthly; nothing runs it for you). Keeps ~180 days.
+-- delete from public.ai_usage_events where created_at < now() - interval '180 days';

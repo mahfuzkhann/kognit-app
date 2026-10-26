@@ -140,6 +140,16 @@
         return text.length > 140 ? text.slice(0, 140) + "\u2026" : text;
     }
 
+    // Quota refusals (429/403/503 from the AI routes) carry an OBJECT detail
+    // {code, message, ...}; ordinary errors carry a plain string. Show the
+    // server's student-facing message for either, never a generic fallback.
+    function detailMessage(data) {
+        if (!data) return null;
+        if (typeof data.detail === "string") return data.detail;
+        if (data.detail && typeof data.detail.message === "string") return data.detail.message;
+        return null;
+    }
+
     function makeError(kind, status, detail) {
         var err = new Error("notes: " + kind);
         err.kind = kind;          // "auth" | "network" | "http"
@@ -163,7 +173,7 @@
             }
             return fetch(path, options).then(function (resp) {
                 return resp.json().catch(function () { return null; }).then(function (data) {
-                    if (!resp.ok) throw makeError("http", resp.status, data && typeof data.detail === "string" ? data.detail : null);
+                    if (!resp.ok) throw makeError("http", resp.status, detailMessage(data));
                     return { status: resp.status, data: data };
                 });
             }, function () { throw makeError("network"); });

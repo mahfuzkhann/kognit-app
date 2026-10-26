@@ -1060,11 +1060,14 @@ def generate_ai_response(
               response_id: Optional[str] = None,
               elapsed_seconds: Optional[float] = None,
               grounding=None,
-              error_code: Optional[str] = None):
+              error_code: Optional[str] = None,
+              status: Optional[str] = None):
         # Pre-Phase 10 usage record (no-op unless the endpoint started a
         # collection; never raises). One record per terminal outcome.
+        # `status` is only passed for a TRUNCATED answer ("interrupted"): text
+        # exists but the provider did not finish cleanly (Q-11).
         usage_collector.record_ai_call(
-            operation="chat", status="error" if is_error else "success",
+            operation="chat", status=status or ("error" if is_error else "success"),
             model=MODEL_NAME, usage=usage, duration_seconds=elapsed_seconds,
             error_code=error_code,
         )
@@ -1139,6 +1142,20 @@ def generate_ai_response(
                 return _wrap(BLOCKED_RESPONSE_ERROR, is_error=True, elapsed_seconds=elapsed, error_code=code)
 
             _log_usage(result.usage, attempt, elapsed, mode, bool(image_bytes), bool(pdf_context))
+            # Q-11: parity with the streaming path. Text that ended with a
+            # non-success finish_reason (MAX_TOKENS, ...) is a TRUNCATED answer.
+            # It is still returned (the student can read what exists) but it is
+            # recorded as "interrupted" with a stable code, never as a clean
+            # success, so the endpoint can label it and the quota policy sees
+            # the truth. None / STOP are the normal complete case.
+            truncated = not _is_successful_finish(getattr(result, "finish_reason", None))
+            if truncated:
+                code = _error_code_for_finish_reason(result.finish_reason, ERROR_STREAM_INTERRUPTED)
+                logger.warning(
+                    "request_id=%s generate_ai_response non-success finish_reason=%s code=%s "
+                    "attempt=%d/%d (mode=%s) - returned as truncated, not complete",
+                    request_id, result.finish_reason, code, attempt, MAX_ATTEMPTS, mode
+                )
             # Grounding comes back already normalized by the provider, and is
             # None unless web search was requested (and on every error path);
             # research_models.py treats a None grounding on a research-
@@ -1146,6 +1163,8 @@ def generate_ai_response(
             return _wrap(
                 result_text,
                 is_error=False,
+                status="interrupted" if truncated else None,
+                error_code=code if truncated else None,
                 usage=result.usage,
                 resolved_model_version=result.model_version,
                 response_id=result.response_id,
@@ -1819,6 +1838,12 @@ def stream_ai_response(
         logger.warning(
             "request_id=%s request build failed - student-facing message returned code=%s",
             request_id, ERROR_REQUEST_INVALID,
+        )
+        # Q-10: this used to leave NO usage record, so a counted request that
+        # produced nothing (e.g. an undecodable image) was neither visible in
+        # telemetry nor eligible for a refund. No provider call was made.
+        usage_collector.record_ai_call(
+            operation="stream", status="error", model=MODEL_NAME, error_code=ERROR_REQUEST_INVALID,
         )
         yield StreamChunk(kind="error", text=exc.message, error_code=ERROR_REQUEST_INVALID)
         return

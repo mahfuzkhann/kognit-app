@@ -88,6 +88,11 @@ end $$;
 commit;
 
 -- ---- 6. Pro activation (service_role only), idempotency, price check, renewal
+-- 0011 refuses to activate Pro until pro limits exist for every kind (Q-08), so this
+-- section configures them first (as the founder would), then removes them again so the
+-- "Pro with no configured limits" check below still starts from the unconfigured state.
+insert into public.plan_limits (plan, kind, period, limit_count) values
+  ('pro','chat','day', 7), ('pro','quiz','day', 5), ('pro','notes_ai','day', 4) on conflict do nothing;
 begin;
 set local role service_role;
 do $$ declare s1 uuid; s2 uuid; s3 uuid; e1 timestamptz; e3 timestamptz; bad boolean := false; begin
@@ -109,6 +114,8 @@ do $$ declare s1 uuid; s2 uuid; s3 uuid; e1 timestamptz; e3 timestamptz; bad boo
   perform pg_temp.check((select count(*) from public.payments where user_id = '00000000-0000-0000-0000-00000000000b') = 2, 'two verified payments recorded');
 end $$;
 commit;
+
+delete from public.plan_limits where plan = 'pro';
 
 -- Pro user with no configured limits is refused, not given invented numbers
 begin;
@@ -142,16 +149,17 @@ do $$ declare r jsonb; begin
 end $$;
 commit;
 
--- ---- 7. usage events: insert-own only, no reads
+-- ---- 7. usage events: students have NO direct write or read access (0011 closes
+-- the 0009 "insert own" hole; the full integrity suite is hardening_behaviour_test.sql)
 begin;
 set local role authenticated;
 set local request.jwt.claim.sub = '00000000-0000-0000-0000-00000000000a';
 do $$ declare denied int := 0; begin
-  insert into public.ai_usage_events (user_id, operation, status, model) values (auth.uid(), 'chat', 'success', 'm');
-  begin insert into public.ai_usage_events (user_id, operation, status) values ('00000000-0000-0000-0000-00000000000b', 'chat', 'success'); exception when insufficient_privilege or check_violation then denied := denied + 1; end;
+  begin insert into public.ai_usage_events (user_id, operation, status, model) values (auth.uid(), 'chat', 'success', 'm'); exception when insufficient_privilege then denied := denied + 1; end;
+  begin insert into public.ai_usage_events (user_id, operation, status) values ('00000000-0000-0000-0000-00000000000b', 'chat', 'success'); exception when insufficient_privilege then denied := denied + 1; end;
   begin perform 1 from public.ai_usage_events; exception when insufficient_privilege then denied := denied + 1; end;
-  begin insert into public.ai_usage_events (user_id, operation, status) values (auth.uid(), 'bogus', 'success'); exception when check_violation then denied := denied + 1; end;
-  perform pg_temp.check(denied = 3, format('usage-event guards (got %s)', denied));
+  begin insert into public.ai_usage_events (user_id, operation, status) values (auth.uid(), 'bogus', 'success'); exception when insufficient_privilege then denied := denied + 1; end;
+  perform pg_temp.check(denied = 4, format('usage-event guards (got %s)', denied));
 end $$;
 commit;
 
