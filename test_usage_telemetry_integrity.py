@@ -179,3 +179,22 @@ class TestMigrationContract:
     def test_migration_does_not_delete_or_drop_student_data(self):
         body = re.sub(r"--.*", "", self.SQL)
         assert not re.search(r"\b(drop table|truncate table|delete from public\.(?!plan_limits)|alter table .* drop column)", body, re.I)
+
+class TestMigration0012Contract:
+    SQL = (ROOT / "supabase/migrations/0012_usage_privileges_and_ledger_cap.sql").read_text(encoding="utf-8")
+
+    def test_it_only_removes_privileges_from_api_roles(self):
+        assert "revoke all on table public.ai_usage_events from public, anon, authenticated" in self.SQL
+        body = re.sub(r"--.*", "", self.SQL)
+        grants = re.findall(r"\bgrant\b[^;]*;", body, re.I)
+        assert grants == ["grant execute on function public.consume_quota(text, text, text) to authenticated;"], grants
+
+    def test_consume_quota_keeps_its_hardening_and_has_the_cap(self):
+        m = re.search(r"create or replace function public\.consume_quota\(([\s\S]*?)\n\$\$;", self.SQL)
+        assert m and "security definer" in m.group(0) and "set search_path = public, pg_temp" in m.group(0)
+        assert "v_cap        constant integer := 500" in m.group(0) and "'rate_limited'" in m.group(0)
+        assert "'chat', 'quiz', 'notes_ai'" in m.group(0), "all three kinds are still accepted"
+
+    def test_it_deletes_nothing(self):
+        body = re.sub(r"--.*", "", self.SQL)
+        assert not re.search(r"\b(delete\s+from|drop\s+table|truncate|alter\s+table[^;]*drop)", body, re.I)

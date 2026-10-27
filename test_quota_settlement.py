@@ -559,3 +559,47 @@ class TestNonStreamingTruncation:
         provider(text_attempt("Good answer."))
         client.post("/api/chat", data={"prompt": "Explain", "chat_id": "c1"})
         assert ledger.named("refund_quota") == [] and ledger.live("chat") == 1
+
+# ===========================================================================
+# F-07 - ledger-growth cap (migration 0012) as seen by the API
+# ===========================================================================
+
+class TestLedgerGrowthCapResponse:
+    def _capped(self, monkeypatch):
+        async def rpc(user_token, function, params):
+            if function == "consume_quota":
+                return {"allowed": False, "reason": "rate_limited", "plan": "free", "kind": params["p_kind"],
+                        "resets_at": "2026-10-27T10:00:00+06:00"}
+            raise AssertionError(f"unexpected {function}")
+        monkeypatch.setenv("QUOTA_MODE", "enforce")
+        monkeypatch.setattr(quota_service, "_rpc", rpc)
+
+    def test_capped_request_gets_a_429_with_an_honest_message_and_never_reaches_the_provider(self, client, monkeypatch):
+        self._capped(monkeypatch)
+        mock = provider(text_attempt("never"))
+        resp = post_stream(client)
+        assert resp.status_code == 429
+        detail = resp.json()["detail"]
+        assert detail["code"] == "QUOTA_EXCEEDED" and detail["resets_at"].startswith("2026-10-27")
+        assert "Too many requests" in detail["message"] and "used all" not in detail["message"]
+        assert mock.call_count == 0
+
+    def test_capped_request_is_not_refunded_because_nothing_was_counted(self, client, monkeypatch):
+        self._capped(monkeypatch)
+        provider(text_attempt("never"))
+        post_stream(client)   # the fake rpc raises if refund_quota is ever called
+
+    def test_capped_notes_route_is_refused_before_the_provider_too(self, client, monkeypatch):
+        self._capped(monkeypatch)
+        mock = MockProvider([text_attempt("never")])
+        set_provider(mock)
+        history = json.dumps([{"role": "user", "text": "hi"}, {"role": "bot", "text": "hello"}])
+
+        async def student():
+            return ("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "student-token")
+        main.app.dependency_overrides[main._rate_limited_chat_title] = student
+        try:
+            resp = client.post("/api/chat/title", data={"history": history})
+        finally:
+            main.app.dependency_overrides.pop(main._rate_limited_chat_title, None)
+        assert resp.status_code == 429 and mock.call_count == 0

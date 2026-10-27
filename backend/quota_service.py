@@ -104,7 +104,7 @@ class QuotaDecision:
     allowed: bool
     kind: str
     plan: str
-    reason: str = "ok"                 # ok | quota_exceeded | plan_not_configured | unmetered
+    reason: str = "ok"                 # ok | quota_exceeded | rate_limited | plan_not_configured | unmetered
     limit: Optional[int] = None
     used: Optional[int] = None
     remaining: Optional[int] = None
@@ -250,6 +250,12 @@ def exceeded_http_exception(decision: QuotaDecision) -> HTTPException:
             },
         )
     headers = {}
+    message = _EXCEEDED_MESSAGES.get(decision.kind, "You've reached your limit for this period.")
+    if decision.reason == "rate_limited":
+        # Migration 0012's per-user ledger-growth cap (500 rows / 24 h, refunds included).
+        # Only an automated consume/refund loop can reach it; same code and shape as an
+        # ordinary quota refusal so existing clients render it, with an honest message.
+        message = "Too many requests in a short time. Please try again later."
     detail = {
         "code": CODE_QUOTA_EXCEEDED,
         "kind": decision.kind,
@@ -257,7 +263,7 @@ def exceeded_http_exception(decision: QuotaDecision) -> HTTPException:
         "limit": decision.limit,
         "used": decision.used,
         "resets_at": decision.resets_at,
-        "message": _EXCEEDED_MESSAGES.get(decision.kind, "You've reached your limit for this period."),
+        "message": message,
     }
     return HTTPException(status_code=429, detail=detail, headers=headers or None)
 

@@ -26,7 +26,7 @@ configured). Liveness: `GET /healthz`.
 ## 2. Database migrations
 
 Apply in numeric order in the Supabase SQL editor. Run each file once, except `0002, 0004, 0006,
-0008, 0009, 0010, 0011`, which are safe to re-run.
+0008, 0009, 0010, 0011, 0012`, which are safe to re-run.
 
 1. `0001`–`0007` — existing schema.
 2. `0008_plans_quota_subscriptions.sql` — plans, limits, prices, payments, subscriptions, quota
@@ -37,13 +37,19 @@ Apply in numeric order in the Supabase SQL editor. Run each file once, except `0
 5. `0011_quota_notes_meter_and_telemetry_integrity.sql` — adds the separate `notes_ai` quota meter
    (chat titles + Pocket Notes AI), **closes the student-writable `ai_usage_events` hole**, adds the
    Pro-limits guard on `activate_pro_subscription`, and fixes function search paths. Deletes nothing.
+6. `0012_usage_privileges_and_ledger_cap.sql` — revokes the last unneeded privileges (`REFERENCES`,
+   `TRIGGER`) that API roles held on `ai_usage_events`, so `supabase/verify_policies.sql` query 4 returns
+   zero rows, and caps `quota_ledger` growth per user (500 rows per rolling 24 h, refunded rows included)
+   so a signed-in student cannot grow the ledger without bound by looping the quota functions. Adds an
+   index. Deletes nothing; the backend works with or without it. **If you ever set Pro daily limits,
+   keep a Pro student's legitimate rows per day well under 500, or raise the cap in the function first.**
 
 After applying, run `supabase/verify_schema.sql` (expect **zero rows**) and
 `supabase/verify_policies.sql` (query 1 must return **zero rows**; review any policy it lists — a
 hand-made policy such as `using (true)` on `user_projects` would still be in force and must be
 removed deliberately).
 
-**Deploy order matters:** apply `0008`–`0011` **before** deploying code running with
+**Deploy order matters:** apply `0008`–`0012` **before** deploying code running with
 `QUOTA_MODE=enforce`. If the migration is missing, chat and quiz requests fail closed with a safe
 503 (`QUOTA_UNAVAILABLE`) rather than running unmetered.
 
@@ -182,3 +188,16 @@ Deleting the file does not revoke the key. Never paste keys into chats or docume
 `ai_usage_events` stores no prompt, document or answer text, but it does link a student id to usage
 over time. A retention period, deletion-on-request procedure, and any parental-consent requirement
 for minors are open decisions; this repository makes no legal-compliance claim.
+
+## Python dependencies (changed in the pre-Phase 10 remediation)
+
+`requirements.txt` now pins **fastapi 0.133.0 / starlette 1.3.1** (previously 0.110.1 / 0.37.2),
+jinja2 3.1.6, Pillow 13.0.0, pypdf 6.21.2 and python-dotenv 1.2.2. Why: `pip-audit` reported 7 distinct
+Starlette advisories (14 database entries) on 0.37.2, and two of them were reproduced against this app (a 2 MB text form field and a
+2,500-field form were accepted instead of refused: CVE-2024-47874, CVE-2026-54283). FastAPI 0.133.0 is the
+oldest release whose declared Starlette range includes a fixed version; `pip check` is clean and `pip-audit`
+reports no known vulnerabilities for the full resolved set. There is no Python lockfile, so transitive
+packages (pydantic, anyio, ...) float: re-run `pip-audit` before each deploy. Install with
+`python -m pip install -r requirements.txt` in a **fresh virtual environment**, then run the test suite.
+`test_real_server_uploads.py` runs the app under a real uvicorn server and pins the upload and form limits.
+Live Gemini behaviour after the upgrade is not verified: see `docs/PRE_PHASE10_LIVE_VERIFICATION_CHECKLIST.md`.

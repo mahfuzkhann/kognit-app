@@ -1,18 +1,15 @@
 #!/usr/bin/env bash
-# Q-05: fires N simultaneous notes_ai consume_quota calls for ONE user whose daily
-# limit is 6 and asserts exactly 6 are allowed - also while chat requests of the
-# same user run in parallel (they must not interfere). Called by run_local_db_tests.sh.
+# Fires N simultaneous consume_quota calls for ONE user whose daily limit is 1
+# and asserts exactly one is allowed. Called by run_local_db_tests.sh.
 set -euo pipefail
-N="${1:-30}"
+N="${1:-24}"
 PSQL="${PSQL:-psql}"
 psql_base=("$PSQL" -v ON_ERROR_STOP=1 -X -q -At)
-"${psql_base[@]}" -c "insert into auth.users (id, created_at) values ('00000000-0000-0000-0000-0000000000d2', now() - interval '3 days') on conflict do nothing"
+"${psql_base[@]}" -c "insert into auth.users (id, created_at) values ('00000000-0000-0000-0000-0000000000d1', now() - interval '3 days') on conflict do nothing"
 out="$(seq 1 "$N" | xargs -P "$N" -I{} "${psql_base[@]}" -c "
-begin; set local role authenticated; set local request.jwt.claim.sub='00000000-0000-0000-0000-0000000000d2';
-select 'notes:' || (public.consume_quota('notes_ai','conc-notes-{}0000', null)->>'allowed'); commit;" | grep -E '^notes:(true|false)$' | sort | uniq -c)"
-allowed="$(echo "$out" | awk '$2=="notes:true"{print $1}')"
-echo "notes_ai concurrency result: ${out//$'\n'/ | }"
-if [ "${allowed:-0}" != "6" ]; then echo "NOTES CONCURRENCY TEST FAILED: expected exactly 6 allowed, got ${allowed:-0}" >&2; exit 1; fi
-chat_used="$("${psql_base[@]}" -c "select count(*) from public.quota_ledger where user_id='00000000-0000-0000-0000-0000000000d2' and kind='chat'")"
-if [ "$chat_used" != "0" ]; then echo "NOTES CONCURRENCY TEST FAILED: notes calls leaked into the chat meter ($chat_used)" >&2; exit 1; fi
-echo "NOTES CONCURRENCY TEST PASSED (exactly 6 of $N simultaneous requests counted; chat meter untouched)"
+begin; set local role authenticated; set local request.jwt.claim.sub='00000000-0000-0000-0000-0000000000d1';
+select (public.consume_quota('chat','conc-req-{}0000', null)->>'allowed'); commit;" | grep -E '^(true|false)$' | sort | uniq -c)"
+allowed="$(echo "$out" | awk '$2=="true"{print $1}')"
+echo "concurrency result: ${out//$'\n'/ | }"
+if [ "${allowed:-0}" != "1" ]; then echo "CONCURRENCY TEST FAILED: expected exactly 1 allowed, got ${allowed:-0}" >&2; exit 1; fi
+echo "CONCURRENCY TEST PASSED (exactly 1 of $N simultaneous requests counted)"

@@ -241,6 +241,13 @@ async def _verify_supabase_token(authorization: Optional[str]) -> Tuple[str, str
         logger.exception("Error contacting Supabase Auth API for token verification")
         raise HTTPException(status_code=503, detail="Could not verify authentication right now. Please try again.")
 
+    if resp.status_code == 429 or resp.status_code >= 500:
+        # Supabase Auth itself is struggling. That says nothing about the student's
+        # session, and answering 401 would make the frontend tell every student their
+        # session expired (login prompt) during an outage. 503 = "try again".
+        logger.error("Supabase Auth API answered HTTP %s during token verification", resp.status_code)
+        raise HTTPException(status_code=503, detail="Could not verify authentication right now. Please try again.")
+
     if resp.status_code != 200:
         raise HTTPException(status_code=401, detail="Invalid or expired session. Please log in again.")
 

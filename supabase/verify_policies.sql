@@ -50,14 +50,23 @@ where table_schema = 'public'
 group by table_name, grantee
 order by table_name, grantee;
 
--- Query 4 (migration 0011, Q-06): students and anonymous clients must hold NO
--- privilege at all on the usage telemetry tables. EXPECTED RESULT: ZERO ROWS.
-select table_name, grantee, privilege_type
-from information_schema.role_table_grants
-where table_schema = 'public'
-  and table_name in ('ai_usage_events', 'usage_write_keys')
-  and grantee in ('anon', 'authenticated', 'public')
-order by table_name, grantee, privilege_type;
+-- Query 4 (migrations 0011 + 0012; Q-06, F-02): students and anonymous clients must hold NO
+-- privilege of any kind on the server-owned tables and their sequences - not even
+-- REFERENCES or TRIGGER. The application never needs them: telemetry is written by the
+-- SECURITY DEFINER function record_ai_usage_events, and quota rows by consume_quota/
+-- refund_quota. EXPECTED RESULT: ZERO ROWS. (If this lists ai_usage_events REFERENCES/TRIGGER,
+-- migration 0012 has not been applied yet.) Uses the ACLs directly, so it also catches
+-- privileges inherited from default privileges and grants to PUBLIC.
+select c.relname as object, case c.relkind when 'S' then 'sequence' else 'table' end as kind,
+       coalesce(ro.rolname, 'PUBLIC') as grantee, a.privilege_type
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+cross join lateral aclexplode(coalesce(c.relacl, acldefault((case c.relkind when 'S' then 's' else 'r' end)::"char", c.relowner))) a
+left join pg_roles ro on ro.oid = a.grantee
+where n.nspname = 'public'
+  and c.relname in ('ai_usage_events', 'ai_usage_events_id_seq', 'usage_write_keys', 'quota_ledger', 'quota_ledger_id_seq')
+  and (a.grantee = 0 or ro.rolname in ('anon', 'authenticated'))
+order by 1, 3, 4;
 
 -- Query 5 (migration 0011, Q-13): functions in the public schema that either have
 -- no fixed search_path, or are SECURITY DEFINER and executable by anon/public.
