@@ -115,7 +115,14 @@
         // ACCOUNT MENU: Settings / Get Help / Update Plan / Learn More
         // dialog (static/js/profile-menu.js).
         "account-modal": "closeAccountModal",
-        "quiz-modal": "closeQuizModal",
+        // The quiz closes through its progress-aware request (app.js
+        // requestCloseQuiz): with real progress it asks first, otherwise it
+        // closes. X button, Escape and an outside click all follow that rule.
+        "quiz-modal": "requestCloseQuiz",
+        // Escape / outside click on the quiz confirmation means "keep going".
+        "quiz-discard-modal": "closeQuizDiscardConfirm",
+        // Opt-in chat sharing dialog (static/js/share.js).
+        "share-modal": "closeShareModal",
         "logout-confirm-modal": "closeLogoutConfirm",
         // NOTEBOOKS: create/rename dialog and delete confirmation
         // (static/js/nav-views.js).
@@ -127,11 +134,12 @@
     // because dismissing them mid-flow would lose student work or
     // leave the app in a state the student cannot recover from.
     var NON_DISMISSIBLE = {
-        // An in-progress quiz: Escape here would discard answers the
-        // student has already entered with no way back.
-        "quiz-modal": function (modal) {
-            var active = modal.querySelector("#quiz-active-view");
-            return isVisible(active);
+        // (The in-progress quiz used to be listed here, which silently
+        // swallowed Escape and outside clicks. It now asks first instead -
+        // see requestCloseQuiz in app.js - so all close routes behave alike.)
+        // The share dialog is busy while a link is being created or removed.
+        "share-modal": function (modal) {
+            return modal.getAttribute("data-busy") === "true";
         },
         // First-run profile onboarding: app.js opens this
         // automatically when a logged-in student has no profile yet.

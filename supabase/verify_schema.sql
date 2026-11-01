@@ -18,7 +18,7 @@
 --   details        which table.column entries are affected
 --
 -- Re-run this after applying a migration; when it returns zero rows you are in step
--- with the repository. (0002, 0004, 0006, 0008, 0009, 0010 and 0011 are safe to run twice. 0001,
+-- with the repository. (0002, 0004, 0006, 0008, 0009, 0010, 0011 and 0013 are safe to run twice. 0001,
 -- 0003, 0005 and 0007 create policies - run each of those only once.)
 --
 -- ALSO RUN supabase/verify_policies.sql after 0010: it reports any row level
@@ -67,6 +67,14 @@ with expected (table_name, column_name, added_by, relaxed_by) as (
     ('learning_evidence', 'topic', '0003_learning_memory_foundation.sql', '0004_learning_evidence_subject_only_attribution.sql'),
     ('learning_evidence', 'topic_key', '0003_learning_memory_foundation.sql', '0004_learning_evidence_subject_only_attribution.sql'),
     ('learning_evidence', 'user_id', '0003_learning_memory_foundation.sql', null),
+    ('shared_chats', 'chat_ref', '0013_shared_chats.sql', null),
+    ('shared_chats', 'created_at', '0013_shared_chats.sql', null),
+    ('shared_chats', 'id', '0013_shared_chats.sql', null),
+    ('shared_chats', 'message_count', '0013_shared_chats.sql', null),
+    ('shared_chats', 'share_token', '0013_shared_chats.sql', null),
+    ('shared_chats', 'snapshot', '0013_shared_chats.sql', null),
+    ('shared_chats', 'title', '0013_shared_chats.sql', null),
+    ('shared_chats', 'user_id', '0013_shared_chats.sql', null),
     ('student_profiles', 'created_at', '0005_student_profile.sql', null),
     ('student_profiles', 'name', '0005_student_profile.sql', null),
     ('student_profiles', 'stream', '0005_student_profile.sql', '0006_student_profile_stream_optional.sql'),
@@ -175,7 +183,7 @@ rls_problems as (
          'enable row level security - see the migration that creates ' || tablename::text as run_migration
   from pg_tables
   where schemaname = 'public'
-    and tablename in ('ai_usage_events', 'conversation_index', 'learning_evidence', 'payments', 'plan_limits', 'plan_prices', 'pocket_notes', 'quiz_answers', 'quiz_attempts', 'quota_ledger', 'student_profiles', 'subscriptions', 'usage_write_keys', 'user_projects')
+    and tablename in ('ai_usage_events', 'conversation_index', 'learning_evidence', 'payments', 'plan_limits', 'plan_prices', 'pocket_notes', 'quiz_answers', 'quiz_attempts', 'quota_ledger', 'shared_chats', 'student_profiles', 'subscriptions', 'usage_write_keys', 'user_projects')
     and not rowsecurity
 )
 select run_migration,

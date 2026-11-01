@@ -1,0 +1,166 @@
+/* ============================================================
+   SHARED-CHAT PAGE (public, read-only) - templates/shared.html
+   Uses only the shared design tokens (tokens.css). No dependency on
+   the app's other stylesheets, so the page stays small and standalone.
+   ============================================================ */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+    margin: 0;
+    background: var(--color-background);
+    color: var(--color-text-primary);
+    font-family: var(--font-family-base);
+    font-size: 15px;
+    line-height: 1.65;
+    padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+             env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+}
+
+.brand-mark {
+    display: block;
+    background-color: currentColor;
+    -webkit-mask: url("/static/img/kognit-logo.svg") center / contain no-repeat;
+            mask: url("/static/img/kognit-logo.svg") center / contain no-repeat;
+    flex-shrink: 0;
+}
+
+.shared-page {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 20px 16px 48px;
+}
+
+.shared-header { padding: 4px 0 20px; }
+
+.shared-brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--color-text-primary);
+    text-decoration: none;
+    min-height: 44px;
+}
+.shared-brand-mark { width: 34px; height: 33px; }
+.shared-brand-name { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+
+.shared-card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 14px;
+    padding: 22px 20px;
+}
+
+.shared-title {
+    margin: 0;
+    font-size: 21px;
+    line-height: 1.35;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+.shared-meta { margin: 6px 0 20px; font-size: 13px; color: var(--color-text-muted); }
+
+.shared-status { margin: 0; color: var(--color-text-secondary); }
+.shared-status-error { color: var(--color-text-primary); }
+
+.shared-retry {
+    margin-top: 14px;
+    min-height: 44px;
+    padding: 0 18px;
+    border-radius: 10px;
+    border: none;
+    cursor: pointer;
+    font: inherit;
+    font-weight: 600;
+    background: var(--color-text-primary);
+    color: var(--color-background);
+}
+
+.shared-messages { display: flex; flex-direction: column; gap: 14px; }
+
+.shared-msg {
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    padding: 12px 14px;
+    min-width: 0;
+}
+.shared-msg-user { background: var(--color-surface-raised); }
+.shared-msg-who {
+    margin: 0 0 6px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--color-text-muted);
+}
+.shared-msg-body { overflow-wrap: anywhere; min-width: 0; }
+.shared-msg-user .shared-msg-body { white-space: pre-wrap; }
+
+.shared-msg-body p { margin: 0 0 0.8em; }
+.shared-msg-body p:last-child { margin-bottom: 0; }
+.shared-msg-body ul, .shared-msg-body ol { margin: 0 0 0.8em; padding-left: 1.4em; }
+.shared-msg-body h1, .shared-msg-body h2, .shared-msg-body h3,
+.shared-msg-body h4, .shared-msg-body h5, .shared-msg-body h6 {
+    margin: 1em 0 0.4em;
+    line-height: 1.35;
+    font-size: 1.05em;
+}
+.shared-msg-body blockquote {
+    margin: 0 0 0.8em;
+    padding-left: 12px;
+    border-left: 3px solid var(--color-border-strong);
+    color: var(--color-text-secondary);
+}
+.shared-msg-body a { color: var(--color-accent); }
+.shared-msg-body code {
+    font-family: var(--font-family-mono);
+    font-size: 0.92em;
+    background: var(--color-surface-hover);
+    padding: 1px 5px;
+    border-radius: 4px;
+}
+.shared-msg-body pre {
+    margin: 0 0 0.8em;
+    padding: 10px 12px;
+    background: var(--color-surface-hover);
+    border-radius: 8px;
+    overflow-x: auto;
+}
+.shared-msg-body pre code { background: none; padding: 0; }
+.shared-msg-body table { border-collapse: collapse; display: block; max-width: 100%; overflow-x: auto; margin: 0 0 0.8em; }
+.shared-msg-body th, .shared-msg-body td { border: 1px solid var(--color-border-strong); padding: 6px 10px; text-align: left; }
+.shared-msg-body mjx-container { max-width: 100%; overflow-x: auto; overflow-y: hidden; }
+
+.shared-plain { white-space: pre-wrap; }
+
+.shared-footer {
+    margin-top: 22px;
+    font-size: 13px;
+    color: var(--color-text-muted);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    align-items: flex-start;
+}
+.shared-footer p { margin: 0; }
+.shared-cta {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 0 18px;
+    border-radius: 10px;
+    background: var(--color-text-primary);
+    color: var(--color-background);
+    font-weight: 600;
+    text-decoration: none;
+}
+
+a:focus-visible, button:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}

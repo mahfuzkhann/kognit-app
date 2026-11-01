@@ -629,96 +629,301 @@ async function deleteProjectFromDatabase(projId) {
 
 // ==================== AUTH FUNCTIONS ====================
 
+// ------------------------------------------------------------------
+// SIGN-IN / SIGN-UP DIALOG
+// ------------------------------------------------------------------
+// Same Supabase calls and session handling as before (signUp,
+// signInWithPassword, signInWithOAuth). What changed is everything around
+// them: one real <form> (Enter submits), a pending state that makes a second
+// click a no-op, Bangla error text mapped from the provider's error CODE
+// (never its raw English message), no native alert() boxes, and no trimming
+// of the password. Nothing here logs or echoes a password or an email.
+let authPending = false;
+
+function authEl(id) { return document.getElementById(id); }
+
+function clearAuthMessages() {
+    const err = authEl("auth-error-msg");
+    const note = authEl("auth-notice-msg");
+    if (err) { err.textContent = ""; err.classList.add("hidden"); }
+    if (note) { note.textContent = ""; note.classList.add("hidden"); }
+    ["auth-email-input", "auth-password-input"].forEach(function (id) {
+        const el = authEl(id);
+        if (el) el.removeAttribute("aria-invalid");
+    });
+}
+
+function setAuthError(text) {
+    const note = authEl("auth-notice-msg");
+    if (note) { note.textContent = ""; note.classList.add("hidden"); }
+    const err = authEl("auth-error-msg");
+    if (!err) return;
+    err.textContent = text;
+    err.classList.remove("hidden");
+}
+
+function setAuthNotice(text) {
+    const err = authEl("auth-error-msg");
+    if (err) { err.textContent = ""; err.classList.add("hidden"); }
+    const note = authEl("auth-notice-msg");
+    if (!note) return;
+    note.textContent = text;
+    note.classList.remove("hidden");
+}
+
+function authSubmitLabel(type, pending) {
+    if (pending) return type === "signup" ? "Creating account…" : "Signing in…";
+    return type === "signup" ? "Sign Up" : "Sign In";
+}
+
+// While a request is in flight: the submit button is disabled and marked busy,
+// and the controls that could start a second/different request (Google,
+// switching mode) are disabled too. Re-enabled in `finally`, so a failure can
+// never leave the dialog stuck.
+function setAuthPending(pending, type) {
+    authPending = pending;
+    const btn = authEl("auth-submit-btn");
+    const label = btn ? btn.querySelector(".auth-submit-label") : null;
+    if (btn) {
+        btn.disabled = pending;
+        if (pending) btn.setAttribute("aria-busy", "true"); else btn.removeAttribute("aria-busy");
+    }
+    if (label) label.textContent = authSubmitLabel(type || (isSignUpMode ? "signup" : "login"), pending);
+    ["auth-google-btn", "auth-toggle-link"].forEach(function (id) {
+        const el = authEl(id);
+        if (el) el.disabled = pending;
+    });
+}
+
+// Applies isSignUpMode to the visible copy and to the autofill hint (the
+// browser offers a saved password for sign-in, a generated one for sign-up).
+function applyAuthModeUI() {
+    const card = document.querySelector("#auth-modal .auth-card");
+    const titleText = authEl("auth-modal-title-text");
+    const subtitle = authEl("auth-modal-desc");
+    const label = authEl("auth-submit-btn") ? authEl("auth-submit-btn").querySelector(".auth-submit-label") : null;
+    const toggleDesc = authEl("auth-toggle-desc");
+    const toggleLink = authEl("auth-toggle-link");
+    const pw = authEl("auth-password-input");
+
+    if (card) card.setAttribute("data-auth-mode", isSignUpMode ? "signup" : "login");
+    if (isSignUpMode) {
+        if (titleText) titleText.textContent = "Create your Kloriz account";
+        if (subtitle) subtitle.textContent = "Save your chats and track your progress.";
+        if (label && !authPending) label.textContent = "Sign Up";
+        if (toggleDesc) toggleDesc.textContent = "Already have an account?";
+        if (toggleLink) toggleLink.textContent = "Sign In";
+        if (pw) pw.setAttribute("autocomplete", "new-password");
+    } else {
+        if (titleText) titleText.textContent = "Sign in to Kloriz";
+        if (subtitle) subtitle.textContent = "Pick up your studies where you left off.";
+        if (label && !authPending) label.textContent = "Sign In";
+        if (toggleDesc) toggleDesc.textContent = "Don't have an account?";
+        if (toggleLink) toggleLink.textContent = "Sign Up";
+        if (pw) pw.setAttribute("autocomplete", "current-password");
+    }
+}
+
+// Maps a Supabase auth error to a short Bangla sentence using its stable
+// `code` / HTTP status (falling back to well-known message fragments for older
+// client versions). Unknown errors get the generic message; the raw text is
+// never shown and never logged.
+function mapAuthError(error, type) {
+    const code = String((error && error.code) || "").toLowerCase();
+    const msg = String((error && error.message) || "").toLowerCase();
+    const status = error && typeof error.status === "number" ? error.status : null;
+
+    if (code === "invalid_credentials" || msg.indexOf("invalid login credentials") !== -1) return fbMsg("authWrongCredentials");
+    if (code === "email_not_confirmed" || msg.indexOf("email not confirmed") !== -1) return fbMsg("authEmailNotConfirmed");
+    if (code === "user_already_exists" || code === "email_exists" || msg.indexOf("already registered") !== -1) return fbMsg("authUserExists");
+    if (code === "weak_password" || msg.indexOf("password should be") !== -1 || msg.indexOf("weak password") !== -1) {
+        const min = /at least (\d{1,2})/.exec(msg);
+        return min && window.KlorizFeedback
+            ? window.KlorizFeedback.msg("authPasswordMin", { n: Number(min[1]).toLocaleString("bn-BD") })
+            : fbMsg("authWeakPassword");
+    }
+    if (code.indexOf("rate_limit") !== -1 || status === 429) return fbMsg("authRateLimited");
+    if ((error && (error.name === "AuthRetryableFetchError" || error.name === "TypeError")) || status === 0 || msg.indexOf("failed to fetch") !== -1 || msg.indexOf("networkerror") !== -1) {
+        return fbMsg("network");
+    }
+    return type === "signup" ? fbMsg("signupFailed") : fbMsg("authFailed");
+}
+
 window.openAuthModal = function() {
-    document.getElementById("auth-modal").classList.remove("hidden");
-    document.getElementById("auth-error-msg").classList.add("hidden");
+    clearAuthMessages();
+    applyAuthModeUI();
+    const pw = authEl("auth-password-input");
+    if (pw && pw.type !== "password") window.toggleAuthPasswordVisibility();
+    // Focus the email field on pointer devices only. On a phone, focusing it on
+    // open would raise the keyboard before the student has even read the dialog.
+    const email = authEl("auth-email-input");
+    if (email) {
+        const coarse = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+        if (coarse) email.removeAttribute("data-autofocus"); else email.setAttribute("data-autofocus", "");
+    }
+    authEl("auth-modal").classList.remove("hidden");
 };
 
 window.closeAuthModal = function() {
-    document.getElementById("auth-modal").classList.add("hidden");
+    authEl("auth-modal").classList.add("hidden");
 };
 
 window.toggleAuthMode = function() {
+    if (authPending) return;
     isSignUpMode = !isSignUpMode;
-    // FEATURE 8: the modal header icon (lock, in the HTML markup) is fixed
-    // and no longer overwritten here - only the text span next to it
-    // changes between the two modes.
-    const titleText = document.getElementById("auth-modal-title-text");
-    const submitBtn = document.getElementById("auth-submit-btn");
-    const toggleDesc = document.getElementById("auth-toggle-desc");
-    const toggleLink = document.getElementById("auth-toggle-link");
+    // The typed email/password are kept on purpose - switching tabs because
+    // you found you have no account should not make you retype.
+    clearAuthMessages();
+    applyAuthModeUI();
+};
 
-    if (isSignUpMode) {
-        titleText.textContent = "Create a Kloriz Account";
-        submitBtn.textContent = "Sign Up";
-        toggleDesc.textContent = "Already have an account?";
-        toggleLink.textContent = "Sign In";
-        submitBtn.onclick = () => handleEmailAuth('signup');
-    } else {
-        titleText.textContent = "Sign In to Kloriz";
-        submitBtn.textContent = "Sign In";
-        toggleDesc.textContent = "Don't have an account?";
-        toggleLink.textContent = "Sign Up";
-        submitBtn.onclick = () => handleEmailAuth('login');
-    }
+window.toggleAuthPasswordVisibility = function() {
+    const pw = authEl("auth-password-input");
+    const btn = authEl("auth-password-toggle");
+    if (!pw || !btn) return;
+    const show = pw.type === "password";
+    pw.type = show ? "text" : "password";
+    btn.setAttribute("aria-pressed", show ? "true" : "false");
+    btn.setAttribute("aria-label", show ? "Hide password" : "Show password");
 };
 
 window.handleEmailAuth = async function(type) {
-    const email = document.getElementById("auth-email-input").value.trim();
-    const password = document.getElementById("auth-password-input").value.trim();
-    const errorMsg = document.getElementById("auth-error-msg");
+    if (authPending) return;     // one request at a time: a second click/Enter is a no-op
+    const mode = type === "signup" ? "signup" : "login";
+    const emailInput = authEl("auth-email-input");
+    const passwordInput = authEl("auth-password-input");
+    const email = emailInput.value.trim();
+    // The password is used exactly as typed. (It used to be .trim()med, which
+    // silently changed any password with a leading/trailing space.)
+    const password = passwordInput.value;
 
-    errorMsg.classList.add("hidden");
+    clearAuthMessages();
 
     if (!email || !password) {
-        errorMsg.textContent = "Please enter both email and password.";
-        errorMsg.classList.remove("hidden");
+        setAuthError(fbMsg("authEmpty"));
+        const empty = !email ? emailInput : passwordInput;
+        empty.setAttribute("aria-invalid", "true");
+        empty.focus();
+        return;
+    }
+    if (!/^\S+@\S+\.\S+$/.test(email)) {
+        setAuthError(fbMsg("authEmailInvalid"));
+        emailInput.setAttribute("aria-invalid", "true");
+        emailInput.focus();
         return;
     }
 
-    let result;
-    if (type === 'signup') {
-        result = await supabaseClient.auth.signUp({ email, password });
-    } else {
-        result = await supabaseClient.auth.signInWithPassword({ email, password });
+    setAuthPending(true, mode);
+    let result = null;
+    try {
+        result = mode === "signup"
+            ? await supabaseClient.auth.signUp({ email, password })
+            : await supabaseClient.auth.signInWithPassword({ email, password });
+    } catch (e) {
+        // Network failure / unexpected exception: say so, keep what was typed.
+        console.warn("Auth request failed:", e && e.name);
+        setAuthError(fbMsg("network"));
+        setAuthPending(false, mode);
+        return;
     }
+    setAuthPending(false, mode);
 
     if (result.error) {
-        errorMsg.textContent = result.error.message;
-        errorMsg.classList.remove("hidden");
-    } else {
-        // CHAT-05 fix: onAuthStateChange no longer triggers project loads
-        // (see its comment above) - this explicit user action needs to
-        // drive the load itself now.
-        currentUser = result.data.user;
-        // ISSUE 2 FIX: must happen before loadProjectsFromDatabase() -
-        // see DEFAULT_PROJECT_ID's definition above for why.
-        _setDefaultProjectIdForUser(currentUser);
-        updateAuthUI(currentUser);
-        await loadProjectsFromDatabase();
-        // PHASE 6A: no-op if there's no active session yet (e.g. signup
-        // pending email verification) - fetchOwnProfile() checks for a
-        // session itself before calling the backend.
-        await checkAndLoadProfile();
-        closeAuthModal();
-        alert(type === 'signup' ? "Registration successful! Please check your email to verify." : "Logged in successfully!");
+        console.warn("Auth rejected:", result.error.code || result.error.status || "unknown");
+        setAuthError(mapAuthError(result.error, mode));
+        if (mode === "login") { passwordInput.setAttribute("aria-invalid", "true"); passwordInput.focus(); passwordInput.select(); }
+        return;
     }
+
+    const data = result.data || {};
+    if (mode === "signup") {
+        // Supabase hides "this email already exists" behind a user with an empty
+        // identities list (so signup can not be used to probe for accounts).
+        if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+            setAuthError(fbMsg("authUserExists"));
+            return;
+        }
+        if (!data.session) {
+            // Email confirmation is required: the account exists but nobody is
+            // signed in yet. Do NOT treat the student as logged in.
+            passwordInput.value = "";
+            isSignUpMode = false;
+            applyAuthModeUI();
+            setAuthNotice(fbMsg("signupCheckEmail"));
+            return;
+        }
+    }
+
+    // CHAT-05 fix: onAuthStateChange no longer triggers project loads
+    // (see its comment above) - this explicit user action needs to
+    // drive the load itself now.
+    currentUser = data.user;
+    // ISSUE 2 FIX: must happen before loadProjectsFromDatabase() -
+    // see DEFAULT_PROJECT_ID's definition above for why.
+    _setDefaultProjectIdForUser(currentUser);
+    updateAuthUI(currentUser);
+    try {
+        await loadProjectsFromDatabase();
+        // PHASE 6A: no-op if there's no active session yet - fetchOwnProfile()
+        // checks for a session itself before calling the backend.
+        await checkAndLoadProfile();
+    } catch (e) {
+        // The student IS signed in; a failed project/profile load must not read as
+        // a failed login. Those loaders report their own problems.
+        console.warn("Post-login load failed:", e && e.name);
+    }
+    passwordInput.value = "";
+    closeAuthModal();
 };
 
 window.handleGoogleSignIn = async function() {
-    const { error } = await supabaseClient.auth.signInWithOAuth({
-        provider: 'google',
-        options: {
-            redirectTo: window.location.origin
+    if (authPending) return;
+    clearAuthMessages();
+    authPending = true;
+    const btn = authEl("auth-google-btn");
+    if (btn) { btn.disabled = true; btn.setAttribute("aria-busy", "true"); }
+    try {
+        const { error } = await supabaseClient.auth.signInWithOAuth({
+            provider: 'google',
+            options: {
+                redirectTo: window.location.origin
+            }
+        });
+        if (error) {
+            console.warn("Google sign-in rejected:", error.code || error.status || "unknown");
+            setAuthError(fbMsg("googleFailed"));
         }
-    });
-
-    if (error) {
-        const errorMsg = document.getElementById("auth-error-msg");
-        errorMsg.textContent = error.message;
-        errorMsg.classList.remove("hidden");
+        // On success the browser is redirected to Google; nothing more to do here.
+    } catch (e) {
+        console.warn("Google sign-in failed:", e && e.name);
+        setAuthError(fbMsg("network"));
+    } finally {
+        authPending = false;
+        if (btn) { btn.disabled = false; btn.removeAttribute("aria-busy"); }
     }
 };
+
+// One-time wiring of the form and the password-visibility button.
+(function wireAuthForm() {
+    const form = authEl("auth-form");
+    if (form) {
+        form.addEventListener("submit", function (event) {
+            event.preventDefault();
+            window.handleEmailAuth(isSignUpMode ? "signup" : "login");
+        });
+    }
+    const toggle = authEl("auth-password-toggle");
+    if (toggle) toggle.addEventListener("click", window.toggleAuthPasswordVisibility);
+    // A tapped field must not hide behind the on-screen keyboard.
+    ["auth-email-input", "auth-password-input"].forEach(function (id) {
+        const el = authEl(id);
+        if (el) el.addEventListener("focus", function () {
+            if (window.matchMedia && window.matchMedia("(pointer: coarse)").matches) {
+                setTimeout(function () { try { el.scrollIntoView({ block: "center" }); } catch (e) { /* ignore */ } }, 250);
+            }
+        });
+    });
+})();
 
 window.handleLogout = async function() {
     await supabaseClient.auth.signOut();
@@ -758,7 +963,7 @@ window.handleLogout = async function() {
     }
 
     loadProjectsFromLocalStorage();
-    alert("Logged out successfully!");
+    // (No alert: the sidebar footer has already switched back to the guest view.)
 };
 
 function updateAuthUI(user) {
@@ -995,7 +1200,7 @@ window.openProfileModal = function(opts = {}) {
     const nameInput = document.getElementById("profile-name-input");
     // Enter in the name field saves; selecting a class/stream never submits.
     nameInput.onkeydown = (e) => {
-        if (e.key === "Enter") { e.preventDefault(); window.saveProfile(); }
+        if (e.key === "Enter" && !isImeEnter(e)) { e.preventDefault(); window.saveProfile(); }
     };
 
     if (currentProfile) {
@@ -1130,13 +1335,11 @@ window.saveProfile = async function() {
 // unchanged) - it only opens that modal and reuses its existing
 // #auth-error-msg slot to show a short explanatory message. No new UI,
 // no new authentication system.
-function promptLoginRequired() {
+function promptLoginRequired(reasonKey) {
     openAuthModal();
-    const errorMsg = document.getElementById("auth-error-msg");
-    if (errorMsg) {
-        errorMsg.textContent = "Please log in or create an account to continue using Kloriz.";
-        errorMsg.classList.remove("hidden");
-    }
+    // An explanation, not an error: shown in the dialog's status line (Bangla).
+    // "sessionExpired" when a signed-in session lapsed, "loginRequired" otherwise.
+    setAuthNotice(fbMsg(reasonKey === "sessionExpired" ? "sessionExpired" : "loginRequired"));
 }
 
 // ==================== WORKSPACE & CHAT FUNCTIONS ====================
@@ -1762,7 +1965,16 @@ function createBotMessageElement(rawText, meta = {}) {
         // honest wording.
         notice.textContent = meta.stopped
             ? "Generation stopped. This answer is incomplete."
-            : "This answer was interrupted before it finished generating.";
+            : fbMsg("interrupted");
+        if (!meta.stopped && typeof meta.onRetry === "function") {
+            const retryBtn = document.createElement("button");
+            retryBtn.type = "button";
+            retryBtn.className = "chat-failure-action answer-interrupted-retry";
+            retryBtn.textContent = fbMsg("regenerate");
+            retryBtn.addEventListener("click", meta.onRetry);
+            notice.appendChild(document.createTextNode(" "));
+            notice.appendChild(retryBtn);
+        }
         wrapper.appendChild(notice);
     }
 
@@ -1834,12 +2046,14 @@ function buildBotToolbar(rawText, meta) {
     likeBtn.type = "button";
     likeBtn.className = "toolbar-btn";
     likeBtn.title = "Good answer";
+    likeBtn.setAttribute("aria-label", "Good answer");
     likeBtn.innerHTML = TOOLBAR_ICONS.thumbsUp;
 
     const dislikeBtn = document.createElement("button");
     dislikeBtn.type = "button";
     dislikeBtn.className = "toolbar-btn";
     dislikeBtn.title = "Needs improvement";
+    dislikeBtn.setAttribute("aria-label", "Needs improvement");
     dislikeBtn.innerHTML = TOOLBAR_ICONS.thumbsDown;
 
     const canGiveFeedback = meta && meta.projId && meta.chatId && Number.isInteger(meta.msgIndex);
@@ -1883,11 +2097,14 @@ function buildBotToolbar(rawText, meta) {
 function applyFeedbackVisualState(likeBtn, dislikeBtn, feedback) {
     likeBtn.classList.toggle("active-like", feedback === "like");
     dislikeBtn.classList.toggle("active-dislike", feedback === "dislike");
+    // Toggle buttons: expose the on/off state to assistive technology too.
+    likeBtn.setAttribute("aria-pressed", feedback === "like" ? "true" : "false");
+    dislikeBtn.setAttribute("aria-pressed", feedback === "dislike" ? "true" : "false");
 }
 
 function copyBotMessageText(rawText, btnEl) {
     if (!navigator.clipboard) {
-        alert("Clipboard access isn't available in this browser.");
+        reportNotice("copyFailed", "error");
         return;
     }
     const originalHtml = btnEl.innerHTML;
@@ -1899,7 +2116,7 @@ function copyBotMessageText(rawText, btnEl) {
             btnEl.disabled = false;
         }, 1500);
     }).catch(() => {
-        alert("Couldn't copy to clipboard. Please try selecting the text manually.");
+        reportNotice("copyFailed", "error");
     });
 }
 
@@ -1964,7 +2181,7 @@ async function regenerateBotMessage(meta, btnEl) {
 
     const userMsg = chat.messages[meta.msgIndex - 1];
     if (!userMsg || userMsg.role !== "user") {
-        alert("Can't find the original question for this answer.");
+        reportNotice("regenerateFailed", "error");
         return;
     }
 
@@ -2002,7 +2219,7 @@ async function regenerateBotMessage(meta, btnEl) {
             formData.append("image", dataURLToFile(userMsg.image, "attachment.png"));
         } catch (e) {
             console.error("Couldn't reattach image for regenerate:", e);
-            alert("Couldn't reattach the original image for regenerate. Please try again.");
+            reportNotice("imageReattach", "error");
             btnEl.disabled = false;
             btnEl.innerHTML = originalHtml;
             return;
@@ -2026,12 +2243,32 @@ async function regenerateBotMessage(meta, btnEl) {
         if (response.status === 401) {
             btnEl.disabled = false;
             btnEl.innerHTML = originalHtml;
-            promptLoginRequired();
+            promptLoginRequired("sessionExpired");
+            return;
+        }
+
+        // Any other non-OK answer (plan limit, rate limit, server trouble): the
+        // existing answer is KEPT. Before this, a 429's JSON body had no `reply`
+        // field, so the good answer was overwritten with "No response received."
+        if (typeof response.status === "number" && response.status >= 400) {
+            btnEl.disabled = false;
+            btnEl.innerHTML = originalHtml;
+            const info = await failureFromResponse(response);
+            reportFailureToast(info, {
+                retry: function () { regenerateBotMessage(meta, btnEl); },
+                login: function () { promptLoginRequired("sessionExpired"); }
+            });
             return;
         }
 
         const data = await response.json();
-        let replyText = data.reply || "No response received.";
+        if (!data || typeof data.reply !== "string" || !data.reply) {
+            btnEl.disabled = false;
+            btnEl.innerHTML = originalHtml;
+            reportNotice("regenerateFailed", "error");
+            return;
+        }
+        let replyText = data.reply;
 
         // PHASE 9C, Decision 6: same deterministic extraction as the
         // streaming path (static/js/stream-render.js), applied here too so
@@ -2051,7 +2288,7 @@ async function regenerateBotMessage(meta, btnEl) {
             loadChat(meta.projId, meta.chatId);
         }
     } catch (e) {
-        alert("Couldn't regenerate this answer. Please try again.");
+        reportFailureToast(failureFromException(e), { retry: function () { regenerateBotMessage(meta, btnEl); } });
         btnEl.disabled = false;
         btnEl.innerHTML = originalHtml;
     }
@@ -2080,6 +2317,8 @@ function createUserMessageElement(msg, meta) {
         const img = document.createElement("img");
         img.src = msg.image;
         img.className = "user-msg-image";
+        // An image decoding after insertion changes the height; keep a following reader at the bottom.
+        img.addEventListener("load", function () { scrollChatToBottom(false); });
         wrapper.appendChild(img);
     }
     if (msg.text) {
@@ -2160,6 +2399,8 @@ function enterUserMessageEditMode(meta) {
         const img = document.createElement("img");
         img.src = msg.image;
         img.className = "user-msg-image";
+        // An image decoding after insertion changes the height; keep a following reader at the bottom.
+        img.addEventListener("load", function () { scrollChatToBottom(false); });
         wrapper.appendChild(img);
     }
 
@@ -2186,7 +2427,7 @@ function enterUserMessageEditMode(meta) {
     saveBtn.onclick = () => {
         const newText = textarea.value.trim();
         if (!newText && !msg.image) {
-            alert("Message can't be empty.");
+            reportNotice("messageEmpty", "info");
             return;
         }
         submitUserMessageAndAppendReply(meta, newText);
@@ -2251,7 +2492,7 @@ async function submitUserMessageAndAppendReply(meta, textOverride) {
 
     const finalText = (textOverride !== undefined ? textOverride : (msg.text || "")).trim();
     if (!finalText && !msg.image) {
-        alert("Message can't be empty.");
+        reportNotice("messageEmpty", "info");
         return;
     }
 
@@ -2306,6 +2547,7 @@ async function submitUserMessageAndAppendReplyInner(meta, msg, finalText, chat, 
             formData.append("image", dataURLToFile(msg.image, "attachment.png"));
         } catch (e) {
             console.error("Couldn't reattach image for edit/resend:", e);
+            reportNotice("imageReattach", "error");
         }
     }
 
@@ -2315,7 +2557,7 @@ async function submitUserMessageAndAppendReplyInner(meta, msg, finalText, chat, 
         loadingDiv.className = "bot-message";
         loadingDiv.textContent = "Kloriz is searching through your book & notes...";
         chatBox.appendChild(loadingDiv);
-        chatBox.scrollTop = chatBox.scrollHeight;
+        scrollChatToBottom(true);
     }
 
     try {
@@ -2335,12 +2577,30 @@ async function submitUserMessageAndAppendReplyInner(meta, msg, finalText, chat, 
             if (isStillViewingThisChat() && loadingDiv && document.getElementById("chat-box").contains(loadingDiv)) {
                 loadingDiv.remove();
             }
-            promptLoginRequired();
+            promptLoginRequired("sessionExpired");
+            return;
+        }
+
+        // Non-OK (plan limit, rate limit, server trouble): explain it in Bangla and
+        // offer the real retry. Nothing is saved - before this, a 429 body (no
+        // `reply` field) was stored in the chat as a bot answer reading
+        // "No response received."
+        if (typeof response.status === "number" && response.status >= 400) {
+            const info = await failureFromResponse(response);
+            if (isStillViewingThisChat() && loadingDiv && document.getElementById("chat-box").contains(loadingDiv)) {
+                loadingDiv.replaceWith(createChatFailureElement(info, function () { resendUserMessage(meta, null); }));
+            }
             return;
         }
 
         const data = await response.json();
-        const replyText = data.reply || "No response received.";
+        if (!data || typeof data.reply !== "string" || !data.reply) {
+            if (isStillViewingThisChat() && loadingDiv && document.getElementById("chat-box").contains(loadingDiv)) {
+                loadingDiv.replaceWith(createChatFailureElement(classifyFailureInfo({ status: 502 }), function () { resendUserMessage(meta, null); }));
+            }
+            return;
+        }
+        const replyText = data.reply;
 
         chat.messages.push({ role: "bot", text: replyText, research: data.research || null });
         saveProjectsToStorage();
@@ -2351,7 +2611,7 @@ async function submitUserMessageAndAppendReplyInner(meta, msg, finalText, chat, 
         }
     } catch (e) {
         if (isStillViewingThisChat() && loadingDiv && document.getElementById("chat-box").contains(loadingDiv)) {
-            loadingDiv.textContent = "Error connecting to Kloriz Engine.";
+            loadingDiv.replaceWith(createChatFailureElement(failureFromException(e), function () { resendUserMessage(meta, null); }));
         }
     }
 }
@@ -2451,7 +2711,12 @@ window.setMode = function(mode) {
 };
 
 window.handleSidebarSearch = function(event) {
-    searchQuery = event.target.value.trim().toLowerCase();
+    // Wired to BOTH keyup (as before) and input (new: a paste, a drag-drop, a clear
+    // button or an IME commit changes the text without a key release). A real
+    // keystroke fires both events, so an unchanged query is not re-rendered twice.
+    const next = event.target.value.trim().toLowerCase();
+    if (next === searchQuery) return;
+    searchQuery = next;
     renderHistoryList();
 };
 
@@ -2700,7 +2965,7 @@ function loadChat(projId, chatId) {
     applyChatSettingsUI(chat);
 
     typesetMathJax([chatBox]);
-    chatBox.scrollTop = chatBox.scrollHeight;
+    scrollChatToBottom(true);
 }
 
 // PRE-PHASE 10: structured server responses. The backend now returns a JSON
@@ -2731,6 +2996,115 @@ function describeStructuredError(info) {
         }
     }
     return text;
+}
+
+// ------------------------------------------------------------------
+// FAILURE FEEDBACK (Bangla, via static/js/feedback.js)
+// ------------------------------------------------------------------
+// One path turns "what went wrong" into the student-facing sentence and the one
+// action that can actually be performed. describeStructuredError() above stays
+// as the last-resort fallback if feedback.js did not load.
+function fbMsg(key) {
+    return window.KlorizFeedback ? window.KlorizFeedback.msg(key) : "Something went wrong. Please try again.";
+}
+
+function classifyFailureInfo(input) {
+    if (window.KlorizFeedback) return window.KlorizFeedback.classifyFailure(input);
+    return { code: "UNKNOWN", text: "Something went wrong. Please try again.", action: null, actionLabel: null };
+}
+
+// Reads a non-OK fetch Response into {code,text,action,actionLabel}. The body is
+// cloned, so the caller can still read it.
+async function failureFromResponse(response) {
+    let structured = null;
+    if (response && (response.status === 429 || response.status === 503 || response.status === 403 || response.status === 409)) {
+        structured = await readStructuredError(response);
+    }
+    let retryAfter = null;
+    try { retryAfter = response && response.headers ? response.headers.get("Retry-After") : null; } catch (e) { /* ignore */ }
+    return classifyFailureInfo({ status: response ? response.status : null, structured: structured, retryAfter: retryAfter });
+}
+
+// Network failure / timeout (fetch rejected). Never carries exception text.
+function failureFromException(error) {
+    const timedOut = !!(error && (error.name === "TimeoutError" || error.name === "AbortError"));
+    return classifyFailureInfo({ status: null, timedOut: timedOut });
+}
+
+// Non-blocking, accessible notice with the real recovery action (retry / login /
+// plans). Replaces the native alert() boxes in the flows listed in feedback.js.
+function reportFailureToast(info, actions) {
+    if (window.KlorizFeedback) {
+        window.KlorizFeedback.toastFailure(info, actions || {});
+    } else {
+        alert(info.text);
+    }
+}
+
+function reportNotice(key, kind) {
+    const fb = window.KlorizFeedback;
+    if (fb) fb.toast(fb.msg(key), { kind: kind || "info" });
+    else alert(key);
+}
+
+// A failed STREAM carries a stable code from the server (ai_engine ERROR_*).
+// Maps it to the Bangla sentence and - only where retrying can help - a retry
+// action. `serverText` is the server's own text, kept ONLY for provider-quota
+// errors (already Bangla there); every other cause uses the catalog.
+function describeStreamError(code, serverText) {
+    const retry = { action: "retry", actionLabel: fbMsg("retry") };
+    const none = { action: null, actionLabel: null };
+    switch (code) {
+        case "STREAM_INTERRUPTED_NO_TEXT":
+            return Object.assign({ code: code, text: fbMsg("interruptedNoText") }, retry);
+        case "STREAM_INTERRUPTED":
+            return Object.assign({ code: code, text: fbMsg("interrupted") }, retry);
+        case "PROVIDER_UNAVAILABLE":
+            return Object.assign({ code: code, text: fbMsg("serverBusy") }, retry);
+        case "PROVIDER_TIMEOUT":
+            return Object.assign({ code: code, text: fbMsg("timeout") }, retry);
+        case "PROVIDER_RATE_LIMITED":
+            return Object.assign({ code: code, text: serverText || fbMsg("rateLimited") }, retry);
+        case "PROVIDER_SAFETY":
+            return Object.assign({ code: code, text: fbMsg("blocked") }, none);
+        case "PROVIDER_MAX_TOKENS":
+            return Object.assign({ code: code, text: fbMsg("tooLongAnswer") }, none);
+        case "REQUEST_INVALID":
+            return Object.assign({ code: code, text: fbMsg("imageUnreadable") }, none);
+        default:
+            return Object.assign({ code: code || "UNKNOWN", text: fbMsg("unknown") }, retry);
+    }
+}
+
+// The in-chat version of a failure: a normal bot-message row with role="alert"
+// and, when one exists, one real button. `onRetry` is only wired for a "retry"
+// action; "plans" opens the existing Plan screen; "login" opens the sign-in
+// dialog. Nothing here is saved into the chat history.
+function createChatFailureElement(info, onRetry) {
+    const div = document.createElement("div");
+    div.className = "bot-message chat-failure";
+    div.setAttribute("role", "alert");
+
+    const text = document.createElement("span");
+    text.className = "chat-failure-text";
+    text.textContent = info.text;
+    div.appendChild(text);
+
+    let handler = null;
+    if (info.action === "plans") handler = function () { if (window.KlorizFeedback) window.KlorizFeedback.openPlans(); };
+    else if (info.action === "login") handler = function () { promptLoginRequired("sessionExpired"); };
+    else if (info.action === "retry" && typeof onRetry === "function") {
+        handler = function () { div.remove(); onRetry(); };
+    }
+    if (handler && info.actionLabel) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "chat-failure-action";
+        btn.textContent = info.actionLabel;
+        btn.addEventListener("click", handler);
+        div.appendChild(btn);
+    }
+    return div;
 }
 
 // The server no longer holds this chat's PDF (idle expiry, eviction or a
@@ -2817,7 +3191,7 @@ function renderChatItem(proj, chat) {
         };
 
         input.onkeydown = (e) => {
-            if (e.key === "Enter") saveChatTitle();
+            if (e.key === "Enter" && !isImeEnter(e)) saveChatTitle();
             if (e.key === "Escape") { editingChatId = null; renderHistoryList(); }
         };
         input.onblur = saveChatTitle;
@@ -2939,7 +3313,7 @@ function renderProjectCard(proj) {
         };
 
         input.onkeydown = (e) => {
-            if (e.key === "Enter") saveProjectTitle();
+            if (e.key === "Enter" && !isImeEnter(e)) saveProjectTitle();
             if (e.key === "Escape") { editingProjectId = null; renderHistoryList(); }
         };
         input.onblur = saveProjectTitle;
@@ -3289,17 +3663,140 @@ document.addEventListener("keydown", (event) => {
     }
 });
 
+// ------------------------------------------------------------------
+// SCROLL FOLLOWING
+// ------------------------------------------------------------------
+// The chat used to jump to the bottom whenever an answer finished, even if the
+// student had scrolled up to re-read an earlier step. Now the chat only keeps
+// scrolling for a reader who is FOLLOWING (at, or within CHAT_FOLLOW_THRESHOLD_PX
+// of, the bottom). Scrolling up opts out; scrolling back down opts back in.
+//   - actions the student takes (send, regenerate, upload, open a chat) always
+//     bring the newest content into view: scrollChatToBottom(true)
+//   - content that arrives on its own (streamed text, the final answer, an
+//     equation finishing its typeset) only scrolls a reader who is following
+// While a reader is away and something new arrives (or an answer is still
+// being written) a small pill offers "নিচে যান" / "নতুন উত্তর দেখুন".
+const CHAT_FOLLOW_THRESHOLD_PX = 120;
+let chatFollowing = true;
+let chatNewContentWhileAway = false;
+
+function chatDistanceFromBottom(box) {
+    return box.scrollHeight - box.scrollTop - box.clientHeight;
+}
+
+function positionScrollPill(pill) {
+    const view = document.getElementById("chat-view");
+    const composer = view ? view.querySelector(".input-container") : null;
+    if (!view || !composer) return;
+    const gap = view.getBoundingClientRect().bottom - composer.getBoundingClientRect().top + 12;
+    if (gap > 0) pill.style.setProperty("--scroll-pill-bottom", Math.round(gap) + "px");
+}
+
+function updateScrollPill() {
+    const pill = document.getElementById("scroll-latest-btn");
+    const box = document.getElementById("chat-box");
+    if (!pill || !box) return;
+
+    const away = !chatFollowing && chatDistanceFromBottom(box) > CHAT_FOLLOW_THRESHOLD_PX;
+    const generating = typeof activeGenerations !== "undefined" && activeGenerations.has(activeChatId);
+    if (!away || !(generating || chatNewContentWhileAway)) {
+        if (!away) chatNewContentWhileAway = false;
+        pill.classList.add("hidden");
+        return;
+    }
+
+    const label = document.getElementById("scroll-latest-label");
+    const fb = window.KlorizFeedback;
+    if (label && fb) label.textContent = fb.msg(chatNewContentWhileAway ? "newAnswerBelow" : "goToLatest");
+    positionScrollPill(pill);
+    pill.classList.remove("hidden");
+}
+
+function onChatScroll() {
+    const box = document.getElementById("chat-box");
+    if (!box) return;
+    chatFollowing = chatDistanceFromBottom(box) <= CHAT_FOLLOW_THRESHOLD_PX;
+    updateScrollPill();
+}
+
+// force=true: the student just did something that should show the newest
+// content (send, regenerate, upload, open a chat). Otherwise only a following
+// reader is moved.
+function scrollChatToBottom(force) {
+    const box = document.getElementById("chat-box");
+    if (!box) return;
+    if (force) chatFollowing = true;
+    if (chatFollowing) {
+        box.scrollTop = box.scrollHeight;
+        chatNewContentWhileAway = false;
+    } else {
+        chatNewContentWhileAway = true;
+    }
+    updateScrollPill();
+}
+
+window.scrollChatToLatest = function() {
+    const box = document.getElementById("chat-box");
+    if (!box) return;
+    chatFollowing = true;
+    chatNewContentWhileAway = false;
+    const reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (typeof box.scrollTo === "function") {
+        box.scrollTo({ top: box.scrollHeight, behavior: reduce ? "auto" : "smooth" });
+    } else {
+        box.scrollTop = box.scrollHeight;
+    }
+    updateScrollPill();
+};
+
+(function initChatScrollFollowing() {
+    const box = document.getElementById("chat-box");
+    if (!box) return;
+    box.addEventListener("scroll", onChatScroll, { passive: true });
+    window.addEventListener("resize", updateScrollPill);
+})();
+
+// ------------------------------------------------------------------
+// IME-SAFE ENTER (Bangla and other composed input)
+// ------------------------------------------------------------------
+// With a composing keyboard/IME (e.g. phonetic Bangla), the Enter key that
+// CONFIRMS a candidate is not a "send" - it belongs to the IME. Browsers
+// signal that three different ways, and no single one is reliable everywhere:
+//   - KeyboardEvent.isComposing        (Chrome, Firefox)
+//   - keyCode 229 ("processing")       (most Chromium/Android IMEs)
+//   - Safari fires compositionend BEFORE the confirming keydown, with
+//     isComposing already false - so a short grace window after
+//     compositionend is also treated as "still the IME's Enter".
+// Composition state is tracked once, on the document (capture phase), so every
+// text field that submits on Enter can use the same check.
+let imeComposing = false;
+let imeCompositionEndedAt = -Infinity;
+const IME_END_GRACE_MS = 80;
+
+document.addEventListener("compositionstart", function () { imeComposing = true; }, true);
+document.addEventListener("compositionend", function () {
+    imeComposing = false;
+    imeCompositionEndedAt = (typeof performance !== "undefined" ? performance.now() : Date.now());
+}, true);
+
+function isImeEnter(event) {
+    if (!event) return false;
+    if (event.isComposing || event.keyCode === 229 || imeComposing) return true;
+    const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
+    return now - imeCompositionEndedAt < IME_END_GRACE_MS;
+}
+window.isImeEnter = isImeEnter;
+
 window.handleKeyDown = function(event) {
-    const textarea = document.getElementById("user-input");
-    
     if (event.key === "Enter") {
-        // Ctrl+Enter or plain Enter sends the message
-        // Shift+Enter inserts a newline
+        // The Enter that confirms IME text must never send the message.
+        if (isImeEnter(event)) return;
+        // Plain Enter sends; Shift+Enter inserts a newline (the textarea's
+        // default behaviour, so it is left alone).
         if (!event.shiftKey) {
             event.preventDefault();
             sendMessage();
         }
-        // If Shift is held, the default textarea newline behavior proceeds
     }
 };
 
@@ -3348,7 +3845,7 @@ window.handlePDFUpload = async function(event) {
         loadingMsg.className = "bot-message";
         loadingMsg.textContent = "📖 Reading and indexing PDF: " + file.name + "...";
         chatBox.appendChild(loadingMsg);
-        chatBox.scrollTop = chatBox.scrollHeight;
+        scrollChatToBottom(true);
     }
 
     const headers = {};
@@ -3371,11 +3868,15 @@ window.handlePDFUpload = async function(event) {
             // reaching the backend - use the same login prompt as every
             // other protected action instead of a plain alert.
             if (response.status === 401) {
-                promptLoginRequired();
+                promptLoginRequired("sessionExpired");
             } else {
-                alert("Failed to upload and parse PDF.");
+                let info = await failureFromResponse(response);
+                // A 400 from the upload route means "this particular PDF can not be
+                // read" (encrypted, scanned, empty, corrupt) - say so, do not offer a retry.
+                if (info.code === "BAD_REQUEST") info = { code: info.code, text: fbMsg("pdfUploadFailed"), action: null, actionLabel: null };
+                reportFailureToast(info, {});
             }
-            if (isStillViewingThisChat()) chatBox.scrollTop = chatBox.scrollHeight;
+            if (isStillViewingThisChat()) scrollChatToBottom(true);
             return;
         }
 
@@ -3398,11 +3899,11 @@ window.handlePDFUpload = async function(event) {
             successDiv.className = "bot-message";
             successDiv.innerHTML = `✅ <b>PDF Loaded Successfully!</b> You can now ask questions directly from <i>${escapeUserText(file.name)}</i>.`;
             chatBox.appendChild(successDiv);
-            chatBox.scrollTop = chatBox.scrollHeight;
+            scrollChatToBottom(true);
         }
     } catch (e) {
         if (loadingMsg && chatBox.contains(loadingMsg)) chatBox.removeChild(loadingMsg);
-        alert("Failed to upload and parse PDF.");
+        reportFailureToast(failureFromException(e), {});
     }
 };
 
@@ -3701,6 +4202,14 @@ window.sendMessage = async function() {
 
     const userMsgObj = { role: "user", text: promptText, image: selectedImageBase64 };
     currentChat.messages.push(userMsgObj);
+    // Where this message sits in the chat: the in-chat "try again" button below
+    // re-sends exactly this message through the existing resend path.
+    const sentUserMsgIndex = currentChat.messages.length - 1;
+    const retryProjId = activeProjectId;
+    const retryChatId = activeChatId;
+    const retryThisMessage = function () {
+        resendUserMessage({ projId: retryProjId, chatId: retryChatId, msgIndex: sentUserMsgIndex }, null);
+    };
     const newUserMsgIndex = currentChat.messages.length - 1;
     saveProjectsToStorage();
 
@@ -3752,7 +4261,7 @@ window.sendMessage = async function() {
     // Reset textarea height to minimum after sending
     inputField.style.height = "auto";
     clearSelectedImage();
-    chatBox.scrollTop = chatBox.scrollHeight;
+    scrollChatToBottom(true);
 
     // PHASE 8E: the loading line used to always claim Kognit was "searching
     // through your book & notes" even when no PDF was attached and no search
@@ -3830,7 +4339,7 @@ window.sendMessage = async function() {
         // block below already leaves the sent user message untouched on
         // a network failure.
         if (response.status === 401) {
-            promptLoginRequired();
+            promptLoginRequired("sessionExpired");
             return;
         }
 
@@ -3838,39 +4347,20 @@ window.sendMessage = async function() {
         // BEFORE any generation, so nothing was spent. Handled like the 401
         // and 429 cases: show a clear message and return before touching chat
         // state.
-        if (response.status === 429 || response.status === 503 || response.status === 403 || response.status === 409) {
-            const structured = await readStructuredError(response);
-            if (structured) {
-                if (structured.code === "PDF_CONTEXT_EXPIRED") {
-                    markPDFExpiredForChat(requestProjectId, requestChatId);
-                }
-                if (isStillViewingThisChat) {
-                    const limitDiv = document.createElement("div");
-                    limitDiv.className = "bot-message";
-                    limitDiv.textContent = describeStructuredError(structured);
-                    chatBox.appendChild(limitDiv);
-                }
-                return;
+        // EVERY non-OK answer (plan limit, short-term rate limit, expired PDF,
+        // temporary server trouble, an invalid request...) is explained in
+        // Bangla by what actually happened and offers the one real recovery
+        // action. It is shown in the chat, not saved into history, and the
+        // student's own message stays where it is. Before this, only some
+        // statuses were handled and the rest fell through to the stream reader.
+        if (typeof response.status === "number" && response.status >= 400) {
+            const info = await failureFromResponse(response);
+            if (info.code === "PDF_EXPIRED") {
+                markPDFExpiredForChat(requestProjectId, requestChatId);
             }
-        }
-
-        // PHASE 4: a 429 here means the backend rate limiter rejected this
-        // request before it ever reached Gemini (see
-        // backend/main.py:_check_rate_limit). Without this check, the code
-        // below would fall through to `data.reply || "No response
-        // received."` - a 429 JSON body is `{"detail": ...}` with no
-        // `reply` field, so the student would see the misleading "No
-        // response received." as if the backend were broken, instead of
-        // "you're sending messages too fast." Handled the same way as the
-        // 401 case above: return early, before touching chat state.
-        if (response.status === 429) {
-            // loadingDiv was already removed above (if still viewing this
-            // chat) - just show the rate-limit message in its place.
             if (isStillViewingThisChat) {
-                const rateLimitDiv = document.createElement("div");
-                rateLimitDiv.className = "bot-message";
-                rateLimitDiv.textContent = "You're sending messages too quickly. Please wait a moment and try again.";
-                chatBox.appendChild(rateLimitDiv);
+                chatBox.appendChild(createChatFailureElement(info, retryThisMessage));
+                scrollChatToBottom(false);
             }
             return;
         }
@@ -3899,6 +4389,8 @@ window.sendMessage = async function() {
         // text happens to be non-empty.
         let streamState = window.KognitStream.createStreamState();
         let streamFailed = false;
+        let streamErrorCode = null;
+        let failureInfo = null;
 
         // The live streaming bubble. Created on the first delta so a stream
         // that errors before producing anything leaves no empty bubble.
@@ -3962,9 +4454,8 @@ window.sendMessage = async function() {
                 streamContent.appendChild(tail);
             }
 
-            const nearBottom =
-                chatBox.scrollHeight - chatBox.scrollTop - chatBox.clientHeight < 120;
-            if (nearBottom) chatBox.scrollTop = chatBox.scrollHeight;
+            // Streamed text only moves a reader who is following the answer.
+            scrollChatToBottom(false);
         };
 
         const schedulePaint = () => {
@@ -3979,6 +4470,11 @@ window.sendMessage = async function() {
                 // STOP GENERATING: a chunk that was already in flight when Stop
                 // was pressed must not change the answer the student kept.
                 if (generation.stopRequested) return;
+
+                // The server tags a failed stream with a stable code; keep it so the
+                // student gets a Bangla message that matches the cause. (The reducer
+                // below only keeps the server's own English text.)
+                if (event.type === "error" && typeof event.code === "string") streamErrorCode = event.code;
 
                 if (event.type === "start") {
                     if (isStillViewingThisChat && chatBox.contains(loadingDiv)) {
@@ -4131,7 +4627,14 @@ window.sendMessage = async function() {
             if (!replyText) {
                 // Nothing was ever generated - a plain, self-explanatory
                 // message is enough, no separate notice needed.
-                replyText = "The connection was interrupted before Kloriz could answer. Please try again.";
+                failureInfo = describeStreamError("STREAM_INTERRUPTED_NO_TEXT", "");
+                replyText = failureInfo.text;
+            } else if (streamState.terminalType === "error") {
+                // The server's own text is English for most causes; show the Bangla
+                // message that matches the code (provider quota already arrives in
+                // Bangla and is kept as sent).
+                failureInfo = describeStreamError(streamErrorCode, replyText);
+                replyText = failureInfo.text;
             } else if (streamState.terminalType !== "error") {
                 // Genuine partial content the student already watched
                 // stream in (interrupted terminal, or a drop with no
@@ -4197,7 +4700,12 @@ window.sendMessage = async function() {
             maybeGenerateAiTitle(targetProj, targetChat);
         }
 
-        if (viewingThisChatNow() && !stoppedWithoutText) {
+        if (viewingThisChatNow() && !stoppedWithoutText && failureInfo) {
+            // A failed generation with nothing to keep: one alert-role bubble with
+            // the real recovery action, never a normal-looking answer.
+            chatBox.appendChild(createChatFailureElement(failureInfo, retryThisMessage));
+            scrollChatToBottom(false);
+        } else if (viewingThisChatNow() && !stoppedWithoutText) {
             const botDiv = createBotMessageElement(replyText, {
                 projId: requestProjectId,
                 chatId: requestChatId,
@@ -4208,11 +4716,17 @@ window.sendMessage = async function() {
                 // notice (see createBotMessageElement) instead of letting a
                 // truncated answer look identical to a complete one.
                 interrupted: isPartialAnswer,
-                stopped: isStoppedAnswer
+                stopped: isStoppedAnswer,
+                // A cut-off answer offers the same "generate it again" action
+                // the failure bubble does (it was never saved, so the toolbar's
+                // Regenerate is not available for it).
+                onRetry: (isPartialAnswer && !isStoppedAnswer) ? retryThisMessage : null
             });
             chatBox.appendChild(botDiv);
 
-            typesetMathJax([botDiv]);
+            // An equation finishing its typeset changes the height after the fact;
+            // a following reader is kept at the bottom, a reader who scrolled up is not moved.
+            Promise.resolve(typesetMathJax([botDiv])).then(function () { scrollChatToBottom(false); });
         }
         // If the user switched chats before the response arrived, it's
         // still correctly saved above - it will simply be there the next
@@ -4229,10 +4743,10 @@ window.sendMessage = async function() {
             if (chatBox.contains(loadingDiv)) chatBox.removeChild(loadingDiv);
         } else if (isStillViewingThisChat) {
             if (chatBox.contains(loadingDiv)) chatBox.removeChild(loadingDiv);
-            const errorDiv = document.createElement("div");
-            errorDiv.className = "bot-message";
-            errorDiv.textContent = "Error connecting to Kloriz Engine.";
-            chatBox.appendChild(errorDiv);
+            // No response at all (offline, DNS, dropped connection, timeout):
+            // say so in Bangla and offer the real retry - never exception text.
+            chatBox.appendChild(createChatFailureElement(failureFromException(error), retryThisMessage));
+            scrollChatToBottom(false);
         }
     } finally {
         // STOP GENERATING: runs on EVERY exit - success, error, 401/429 early
@@ -4245,18 +4759,39 @@ window.sendMessage = async function() {
     }
 
     if (activeProjectId === requestProjectId && activeChatId === requestChatId) {
-        chatBox.scrollTop = chatBox.scrollHeight;
+        // Only a reader who is still following the answer is moved; someone who
+        // scrolled up keeps their place and gets the "নতুন উত্তর দেখুন" pill.
+        scrollChatToBottom(false);
     }
 };
 
 // Share
-window.shareChatLink = function() {
-    const shareableUrl = `${window.location.origin}/#project=${activeProjectId}&chat=${activeChatId}`;
-    navigator.clipboard.writeText(shareableUrl).then(() => {
-        alert("Shareable link copied to clipboard!");
-    }).catch(err => {
-        alert("Failed to copy link.");
-    });
+// The old Share button copied "<origin>/#project=..&chat=.." and said "Shareable link
+// copied" - but nothing ever read that URL, so the link opened nothing for anyone.
+// Sharing now lives in static/js/share.js (an opt-in, revocable snapshot with a
+// preview), which defines window.shareChatLink. app.js only exposes the narrow
+// read-only bridge that file needs; it hands over role + text, nothing else
+// (no ids of projects, no images, no PDF state).
+window.KlorizAppBridge = {
+    isSignedIn: function () { return !!currentUser; },
+    promptLogin: function () { promptLoginRequired(); },
+    getAccessToken: async function () {
+        try {
+            const { data: { session } } = await supabaseClient.auth.getSession();
+            return session ? session.access_token : null;
+        } catch (e) { return null; }
+    },
+    // The currently open chat as a plain, minimal object, or null.
+    getShareableChat: function () {
+        const proj = projects.find(function (p) { return p.id === activeProjectId; });
+        const chat = proj ? proj.chats.find(function (c) { return c.id === activeChatId; }) : null;
+        if (!chat) return null;
+        return {
+            chatId: chat.id,
+            title: chat.title || "",
+            messages: (chat.messages || []).map(function (m) { return { role: m.role, text: typeof m.text === "string" ? m.text : "" }; })
+        };
+    }
 };
 
 // ==================== PHASE 5A: QUIZ SUBJECT SELECTION ====================
@@ -4305,6 +4840,42 @@ window.openQuizModal = function() {
 
 window.closeQuizModal = function() {
     document.getElementById("quiz-modal").classList.add("hidden");
+};
+
+// QUIZ PROGRESS GUARD. "Meaningful progress" = the student is in the active
+// view AND has either picked an answer or moved past question 1. The setup
+// view (nothing generated yet) and the result view (the attempt is already
+// scored and saved) close with no friction. Progress is held in memory only;
+// a page refresh has always ended the quiz, and nothing here claims otherwise.
+function quizHasProgress() {
+    const active = document.getElementById("quiz-active-view");
+    if (!active || active.classList.contains("hidden")) return false;
+    if (currentQuizIdx > 0) return true;
+    return userQuizAnswers.some(function (a) { return a !== null && a !== undefined; });
+}
+
+// EVERY close route (the X button, Escape, a click outside - the last two via
+// ui-core.js MODAL_CLOSERS) comes through here, so they all follow one rule.
+window.requestCloseQuiz = function() {
+    if (quizHasProgress()) {
+        document.getElementById("quiz-discard-modal").classList.remove("hidden");
+        return;
+    }
+    window.closeQuizModal();
+};
+
+// "Continue the quiz": only the confirmation closes; the quiz, its answers and
+// the current question are untouched.
+window.closeQuizDiscardConfirm = function() {
+    const dlg = document.getElementById("quiz-discard-modal");
+    if (dlg) dlg.classList.add("hidden");
+};
+
+// "Discard": the only path that resets this attempt.
+window.confirmQuizDiscard = function() {
+    window.closeQuizDiscardConfirm();
+    resetQuizModal();
+    window.closeQuizModal();
 };
 
 function resetQuizModal() {
@@ -4376,15 +4947,12 @@ window.generateAndStartQuiz = async function() {
         // generate quiz." alert, which doesn't tell the student anything
         // useful about what happened or what to do next.
         // PRE-PHASE 10: weekly quiz quota / quota backend (structured detail).
-        if (res.status === 429 || res.status === 503 || res.status === 403) {
-            const structured = await readStructuredError(res);
-            if (structured) {
-                alert(describeStructuredError(structured));
-                return;
-            }
-        }
-        if (res.status === 429) {
-            alert("You're generating quizzes too quickly. Please wait a moment and try again.");
+        // Any non-OK answer gets a Bangla message that matches what happened
+        // (plan limit vs. short-term rate limit vs. temporary server trouble),
+        // with the real recovery action. The old English native dialogs are gone.
+        if (res.status >= 400) {
+            const info = await failureFromResponse(res);
+            reportFailureToast(info, { retry: function () { window.generateAndStartQuiz(); }, login: function () { promptLoginRequired("sessionExpired"); } });
             return;
         }
 
@@ -4404,10 +4972,10 @@ window.generateAndStartQuiz = async function() {
             document.getElementById("quiz-active-view").classList.remove("hidden");
             renderQuizQuestion();
         } else {
-            alert("Failed to generate quiz.");
+            reportNotice("quizNoQuestions", "error");
         }
     } catch (e) {
-        alert("Error connecting to Quiz Engine.");
+        reportFailureToast(failureFromException(e), { retry: function () { window.generateAndStartQuiz(); } });
     } finally {
         setupBtn.textContent = "Generate Quiz with AI";
         setupBtn.disabled = false;
@@ -4506,7 +5074,7 @@ window.selectQuizOption = function(optIdx) {
 
 window.nextQuizQuestion = function() {
     if (userQuizAnswers[currentQuizIdx] === null) {
-        alert("Please select an answer!");
+        reportNotice("quizSelectAnswer", "info");
         return;
     }
 
@@ -4577,7 +5145,7 @@ async function submitQuizAttempt() {
         // Nothing to submit against (e.g. an older/degraded generate
         // response without a quiz_id) - be honest about it rather than
         // silently doing nothing.
-        statusEl.textContent = "⚠️ This result was not saved to your history.";
+        statusEl.textContent = "⚠️ " + fbMsg("quizSaveFailed");
         statusEl.className = "quiz-save-status warning";
         return;
     }
@@ -4589,7 +5157,7 @@ async function submitQuizAttempt() {
     if (!session) {
         // Session expired sometime during the quiz - the result the
         // student just saw is still theirs, it just won't be saved.
-        statusEl.textContent = "⚠️ Please log in again to save this result.";
+        statusEl.textContent = "⚠️ " + fbMsg("sessionExpired");
         statusEl.className = "quiz-save-status warning";
         return;
     }
@@ -4625,14 +5193,14 @@ async function submitQuizAttempt() {
             statusEl.className = "quiz-save-status success";
             currentQuizId = null;
         } else if (res.status === 401) {
-            statusEl.textContent = "⚠️ Please log in again to save this result.";
+            statusEl.textContent = "⚠️ " + fbMsg("sessionExpired");
             statusEl.className = "quiz-save-status warning";
         } else {
-            statusEl.textContent = "⚠️ Could not save this result. You can retake the quiz to try again.";
+            statusEl.textContent = "⚠️ " + fbMsg("quizSaveFailed");
             statusEl.className = "quiz-save-status warning";
         }
     } catch (e) {
-        statusEl.textContent = "⚠️ Could not save this result. You can retake the quiz to try again.";
+        statusEl.textContent = "⚠️ " + fbMsg("quizSaveFailed");
         statusEl.className = "quiz-save-status warning";
     }
 }

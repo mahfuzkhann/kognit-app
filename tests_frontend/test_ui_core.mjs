@@ -80,12 +80,16 @@ async function buildDom({ width = 1280 } = {}) {
     });
 
     // Minimal stand-ins for the app.js globals ui-core.js delegates to.
-    const calls = { handleLogout: 0, closeQuizModal: 0, closeAuthModal: 0 };
+    const calls = { handleLogout: 0, closeQuizModal: 0, closeAuthModal: 0, requestCloseQuiz: 0 };
     window.handleLogout = () => { calls.handleLogout++; };
     window.closeAuthModal = () => { calls.closeAuthModal++; window.document.getElementById("auth-modal").classList.add("hidden"); };
     window.closeProfileModal = () => window.document.getElementById("profile-modal").classList.add("hidden");
     window.closeStudentProfilePanel = () => window.document.getElementById("student-profile-modal").classList.add("hidden");
     window.closeQuizModal = () => { calls.closeQuizModal++; window.document.getElementById("quiz-modal").classList.add("hidden"); };
+    // The quiz now closes through ONE progress-aware entry point (app.js requestCloseQuiz). Here it is
+    // only counted: whether it confirms or closes is tested against the real app.js in
+    // test_uiux_improvements.mjs.
+    window.requestCloseQuiz = () => { calls.requestCloseQuiz++; };
 
     const uiCore = fs.readFileSync(path.join(ROOT, "static", "js", "ui-core.js"), "utf8");
     const script = window.document.createElement("script");
@@ -249,20 +253,21 @@ const main = async () => {
         const { window, doc, calls } = await buildDom();
         const quiz = doc.getElementById("quiz-modal");
 
-        check("Escape does NOT discard an in-progress quiz", () => {
+        check("Escape on an in-progress quiz goes through the progress-aware close (it never hides the quiz directly)", () => {
             quiz.classList.remove("hidden");
             doc.getElementById("quiz-setup-view").classList.add("hidden");
             doc.getElementById("quiz-active-view").classList.remove("hidden");
             press(window, "Escape");
-            assert(!quiz.classList.contains("hidden"), "an active quiz must not be dismissible by Escape");
-            assertEqual(calls.closeQuizModal, 0, "closeQuizModal should not have been called");
+            assertEqual(calls.requestCloseQuiz, 1, "Escape must call requestCloseQuiz exactly once");
+            assertEqual(calls.closeQuizModal, 0, "the quiz must not be hidden behind the confirmation's back");
+            assert(!quiz.classList.contains("hidden"), "still open until the student decides");
         });
 
-        check("Escape DOES close the quiz modal while still in setup", () => {
+        check("Escape in the quiz setup view follows the same single rule (requestCloseQuiz decides)", () => {
             doc.getElementById("quiz-active-view").classList.add("hidden");
             doc.getElementById("quiz-setup-view").classList.remove("hidden");
             press(window, "Escape");
-            assert(quiz.classList.contains("hidden"), "setup view should be dismissible");
+            assertEqual(calls.requestCloseQuiz, 2, "same entry point for every close route");
         });
     }
 

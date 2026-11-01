@@ -39,6 +39,7 @@ const MARKED_SRC = fs.readFileSync(path.join(NODE_MODULES, "marked", "lib", "mar
 const PURIFY_SRC = fs.readFileSync(path.join(ROOT, "static/js/vendor/purify.min.js"), "utf8");
 const STREAM_SRC = fs.readFileSync(path.join(ROOT, "static/js/stream-render.js"), "utf8");
 const APP_SRC = fs.readFileSync(path.join(ROOT, "static/js/app.js"), "utf8");
+const FEEDBACK_SRC = fs.readFileSync(path.join(ROOT, "static/js/feedback.js"), "utf8");
 const TEMPLATE = fs.readFileSync(path.join(ROOT, "templates/index.html"), "utf8");
 
 /* ------------------------------------------------------------
@@ -91,6 +92,7 @@ async function boot(opts = {}) {
     const add = (src) => { const s = w.document.createElement("script"); s.textContent = src; w.document.body.appendChild(s); };
     add(STREAM_SRC);
     if (!opts.noPurify) add(PURIFY_SRC);
+    add(FEEDBACK_SRC);
     add(APP_SRC);
     w.document.dispatchEvent(new w.Event("DOMContentLoaded"));
     await sleep(60);

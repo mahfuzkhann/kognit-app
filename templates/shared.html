@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<!--
+  PUBLIC SHARED-CHAT PAGE  (route: GET /s/{token}, see backend/main.py)
+
+  This is a static shell: it contains NO chat content. static/js/shared-view.js
+  fetches /api/shared/{token}, which returns only the title and each message's
+  role + text from the frozen snapshot the owner chose to share. Nothing here
+  can reach the owner's real chat, project or account.
+
+  Deliberate differences from the main app page:
+    - no Supabase client, no sign-in, no app.js: a recipient never needs an account;
+    - no third-party stylesheet or font request; the only external script is MathJax
+      (pinned) for equations, and if it fails the equations simply stay as text;
+    - noindex + Referrer-Policy: no-referrer + no-store (set by the route as HTTP
+      headers) so the link is not indexed or leaked through the Referer header;
+    - images are never rendered (the snapshot can not contain any, and the
+      sanitizer allows no <img>), so opening a link can not trigger a remote load.
+-->
+<html lang="bn">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="robots" content="noindex, nofollow, noarchive">
+    <meta name="referrer" content="no-referrer">
+    <title>শেয়ার করা চ্যাট · Kloriz</title>
+
+    <link rel="icon" href="/static/img/favicon.svg" type="image/svg+xml">
+    <link rel="icon" href="/static/img/favicon.ico" sizes="16x16 32x32 48x48">
+    <link rel="icon" href="/static/img/favicon-32x32.png" type="image/png" sizes="32x32">
+    <link rel="apple-touch-icon" href="/static/img/apple-touch-icon.png">
+
+    <script>
+    (function () {
+        // Same decision as the main page (saved choice, else the OS preference),
+        // inlined so the page never flashes the wrong theme.
+        var theme = "dark";
+        try {
+            var saved = window.localStorage.getItem("kognit-theme");
+            if (saved === "light" || saved === "dark") theme = saved;
+            else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches) theme = "light";
+        } catch (e) { /* storage unavailable: keep the default */ }
+        document.documentElement.setAttribute("data-theme", theme);
+    })();
+    </script>
+
+    <link rel="stylesheet" href="/static/css/tokens.css">
+    <link rel="stylesheet" href="/static/css/shared.css">
+
+    <script>
+        // Same MathJax configuration - including the macros that neutralise \href /
+        // \class / \style / \cssId / \bbox - as templates/index.html. The content on
+        // this page is written by someone else, so those macros matter even more here.
+        window.MathJax = {
+            tex: {
+                inlineMath: [['$', '$'], ['\\(', '\\)']],
+                displayMath: [['$$', '$$'], ['\\[', '\\]']],
+                processEscapes: true,
+                processEnvironments: true,
+                mtextInheritFont: true,
+                macros: {
+                    href: ['#2', 2],
+                    class: ['#2', 2],
+                    style: ['#2', 2],
+                    cssId: ['#2', 2],
+                    bbox: ['#2', 2, '']
+                }
+            },
+            options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'] },
+            svg: { fontCache: 'none' },
+            startup: { typeset: false }
+        };
+    </script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg.js"></script>
+</head>
+<body>
+    <main class="shared-page">
+        <header class="shared-header">
+            <a class="shared-brand" href="/" aria-label="Kloriz">
+                <span class="brand-mark shared-brand-mark" aria-hidden="true"></span>
+                <span class="shared-brand-name">Kloriz</span>
+            </a>
+        </header>
+
+        <section class="shared-card" aria-live="polite" aria-busy="true" id="shared-root">
+            <p class="shared-status" id="shared-status">লোড হচ্ছে…</p>
+            <noscript><p class="shared-status">চ্যাটটি দেখতে ব্রাউজারে JavaScript চালু করুন।</p></noscript>
+        </section>
+
+        <footer class="shared-footer">
+            <p>এটি একজন Kloriz ব্যবহারকারীর শেয়ার করা চ্যাটের একটি কপি (শুধু পড়ার জন্য)। Kloriz এটি যাচাই করেনি এবং AI-র উত্তরে ভুল থাকতে পারে।</p>
+            <a class="shared-cta" href="/">Kloriz দেখুন</a>
+        </footer>
+    </main>
+
+    <script src="/static/js/vendor/purify.min.js"></script>
+    <script src="/static/js/vendor/marked.umd.js"></script>
+    <script src="/static/js/feedback.js"></script>
+    <script src="/static/js/shared-view.js"></script>
+</body>
+</html>

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 import os
 import threading
 import time
@@ -40,8 +41,14 @@ from backend.database import (
     update_pocket_note,
     delete_pocket_note,
     DatabaseError,
+    SharingUnavailableError,
+    ShareLimitError,
+    create_shared_chat,
+    get_active_shared_chat,
+    delete_shared_chat,
+    get_public_shared_chat,
 )
-from backend import notes_engine, notes_ai
+from backend import notes_engine, notes_ai, share_engine
 from backend import state_limits, quota_service, usage_telemetry
 from backend import database as _database_module
 from backend.quota_service import KIND_CHAT, KIND_QUIZ, KIND_NOTES_AI
@@ -373,6 +380,9 @@ RATE_LIMIT_CONFIG = {
     # spam - far above real use (a student saves a handful of answers a
     # minute at most).
     "notes_write": (30, 60),
+    # CHAT SHARING: creating / revoking a share is a cheap RLS-scoped write (no
+    # AI). The cap only stops snapshot spam; real use is a handful per hour.
+    "share_write": (10, 60),
     # POCKET NOTES: topic suggestions, flashcards and mini-quizzes each cost
     # one provider call. Same order of magnitude as quiz_generation. Applied
     # ONLY when a call is actually about to be made - returning an already
@@ -2632,14 +2642,19 @@ async def _rate_limited_notes_write(
     return user_and_token
 
 
-async def _read_json_body(request: Request, *, allow_empty: bool = False) -> dict:
+async def _read_json_body(
+    request: Request, *, allow_empty: bool = False, max_bytes: Optional[int] = None
+) -> dict:
     """Reads a bounded JSON object body. 413 if too large, 400 if it is not a
-    JSON object. Never echoes the body back in an error."""
+    JSON object. Never echoes the body back in an error. `max_bytes` lets a
+    caller with a legitimately larger payload (chat sharing) raise the cap; the
+    default is the Pocket Notes limit, so every existing caller is unchanged."""
+    limit = max_bytes if max_bytes is not None else notes_engine.MAX_REQUEST_BODY_BYTES
     declared = request.headers.get("content-length")
-    if declared and declared.isdigit() and int(declared) > notes_engine.MAX_REQUEST_BODY_BYTES:
+    if declared and declared.isdigit() and int(declared) > limit:
         raise HTTPException(status_code=413, detail="That request is too large.")
     raw = await request.body()
-    if len(raw) > notes_engine.MAX_REQUEST_BODY_BYTES:
+    if len(raw) > limit:
         raise HTTPException(status_code=413, detail="That request is too large.")
     if not raw.strip():
         if allow_empty:
@@ -2936,6 +2951,229 @@ async def generate_note_mini_quiz_endpoint(
         column="mini_quiz", generator=notes_ai.generate_mini_quiz,
         op="generate_note_mini_quiz_endpoint",
     )
+
+
+# ---------------------------------------------------------------------------
+# CHAT SHARING (opt-in snapshot links)
+#
+# A share is a frozen COPY of one chat that the student chose to publish after
+# previewing it. The public link (/s/<token>) reads only that copy through the
+# database function get_shared_chat(); it has no path to the student's real
+# chat, project, profile or any other table. See
+# supabase/migrations/0013_shared_chats.sql and backend/share_engine.py.
+#
+#   POST   /api/share            create (idempotent per chat)      - signed in
+#   GET    /api/share            is this chat shared? -> token     - signed in
+#   DELETE /api/share            stop sharing (deletes the copy)   - signed in
+#   GET    /api/shared/{token}   public JSON of one snapshot       - anyone
+#   GET    /s/{token}            public page that renders it       - anyone
+#
+# PRIVACY: nothing here ever logs a share token or any chat text. Every
+# response that can contain a token or a snapshot is `Cache-Control: no-store`
+# (the service worker also ignores /s/ and /api/), and the public page is
+# `noindex` with `Referrer-Policy: no-referrer` so the link does not leak
+# through search engines or the Referer header.
+# A revoked link, an unknown link and a malformed link all answer the same
+# 404 SHARE_NOT_FOUND - a probe learns nothing.
+# ---------------------------------------------------------------------------
+
+# The share token is the ONLY credential for a shared chat, and it travels in the URL
+# (/s/<token>, /api/shared/<token>). Web-server access logs print the request path, so
+# anyone who can read those logs could open every shared chat. This filter rewrites the
+# token to "<redacted>" in uvicorn's access log lines. (Application logs never contain
+# it in the first place - see database.py.) Installed once at import.
+_SHARE_PATH_TOKEN_RE = re.compile(r"(/(?:s|api/shared)/)[0-9a-fA-F]{40}")
+
+
+class _RedactShareTokensFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            if isinstance(record.args, tuple):
+                record.args = tuple(
+                    _SHARE_PATH_TOKEN_RE.sub(r"\1<redacted>", a) if isinstance(a, str) else a
+                    for a in record.args
+                )
+            if isinstance(record.msg, str):
+                record.msg = _SHARE_PATH_TOKEN_RE.sub(r"\1<redacted>", record.msg)
+        except Exception:  # a logging filter must never break logging
+            pass
+        return True
+
+
+for _access_logger_name in ("uvicorn.access",):
+    _al = logging.getLogger(_access_logger_name)
+    if not any(isinstance(f, _RedactShareTokensFilter) for f in _al.filters):
+        _al.addFilter(_RedactShareTokensFilter())
+
+_SHARE_NO_STORE = {"Cache-Control": "no-store"}
+_SHARE_MAX_BODY_BYTES = 1024 * 1024  # 300k chars of Bangla is ~900 KB of UTF-8 JSON, plus framing
+_SHARE_PUBLIC_HEADERS = {
+    "Cache-Control": "no-store",
+    "X-Robots-Tag": "noindex, nofollow, noarchive",
+    "Referrer-Policy": "no-referrer",
+}
+_SHARE_PAGE_CSP = "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'none'"
+
+
+def _share_error(status_code: int, code: str, message: str) -> HTTPException:
+    return HTTPException(status_code=status_code, detail={"code": code, "message": message})
+
+
+def _share_json(content: dict, status_code: int = 200) -> JSONResponse:
+    return JSONResponse(content=content, status_code=status_code, headers=_SHARE_NO_STORE)
+
+
+def _share_db_error(exc: Exception, op: str, user_id: str) -> HTTPException:
+    if isinstance(exc, SharingUnavailableError):
+        return _share_error(503, "SHARING_UNAVAILABLE", "Sharing is not available yet.")
+    if isinstance(exc, ShareLimitError):
+        return _share_error(
+            409, "SHARE_LIMIT", f"You can have at most {share_engine.MAX_SHARES_PER_USER} shared chats."
+        )
+    logger.error("%s: database failure (user_id=%s)", op, user_id)
+    return _share_error(502, "SHARE_FAILED", "Could not reach sharing right now. Please try again.")
+
+
+async def _rate_limited_share_write(
+    user_and_token: Tuple[str, str] = Depends(get_current_user_and_token)
+) -> Tuple[str, str]:
+    user_id, _token = user_and_token
+    _check_rate_limit(user_id, "share_write")
+    return user_and_token
+
+
+def _require_chat_ref(chat_id: Optional[str]) -> str:
+    if not share_engine.is_valid_chat_ref(chat_id):
+        raise _share_error(400, "INVALID_CHAT", "Invalid chat.")
+    return chat_id  # type: ignore[return-value]
+
+
+def _share_owner_response(row: Optional[dict]) -> Optional[dict]:
+    view = share_engine.owner_view(row)
+    if view is None:
+        return None
+    return {**view, "path": f"/s/{view['token']}"}
+
+
+@app.post("/api/share")
+async def create_share_endpoint(
+    request: Request,
+    user_and_token: Tuple[str, str] = Depends(_rate_limited_share_write),
+):
+    """
+    Creates the snapshot the student just previewed. Idempotent per chat: if the
+    chat already has an active share, that share is returned (created=false) and
+    NOTHING is overwritten - to publish newer content the student first stops
+    sharing, then creates a new link. The client sends {chat_id, title, messages};
+    only each message's role and text are ever read (share_engine.build_snapshot).
+    """
+    user_id, user_token = user_and_token
+    body = await _read_json_body(request, max_bytes=_SHARE_MAX_BODY_BYTES)
+    try:
+        record = share_engine.build_snapshot(body.get("chat_id"), body.get("title"), body.get("messages"))
+    except share_engine.ShareValidationError as exc:
+        status = 413 if exc.code == "TOO_LONG" else 400
+        raise _share_error(status, f"SHARE_{exc.code}", exc.message)
+
+    try:
+        existing = await get_active_shared_chat(user_token, user_id, record["chat_ref"])
+        if existing is not None:
+            return _share_json({"share": _share_owner_response(existing), "created": False})
+        row = await create_shared_chat(user_token, user_id, record)
+        if row is None:  # lost a race with an identical concurrent create
+            row = await get_active_shared_chat(user_token, user_id, record["chat_ref"])
+            if row is None:
+                raise DatabaseError("share vanished after duplicate-insert conflict")
+            return _share_json({"share": _share_owner_response(row), "created": False})
+    except DatabaseError as exc:
+        raise _share_db_error(exc, "create_share_endpoint", user_id)
+
+    share = _share_owner_response(row)
+    if share is None:
+        logger.error("create_share_endpoint: unexpected row shape (user_id=%s)", user_id)
+        raise _share_error(502, "SHARE_FAILED", "Could not create the link. Please try again.")
+    return _share_json({"share": share, "created": True}, status_code=201)
+
+
+@app.get("/api/share")
+async def get_share_status_endpoint(
+    chat_id: Optional[str] = None,
+    user_and_token: Tuple[str, str] = Depends(get_current_user_and_token),
+):
+    """Whether THIS signed-in student currently shares the given chat (and the link)."""
+    user_id, user_token = user_and_token
+    chat_ref = _require_chat_ref(chat_id)
+    try:
+        row = await get_active_shared_chat(user_token, user_id, chat_ref)
+    except DatabaseError as exc:
+        raise _share_db_error(exc, "get_share_status_endpoint", user_id)
+    return _share_json({"share": _share_owner_response(row)})
+
+
+@app.delete("/api/share")
+async def revoke_share_endpoint(
+    chat_id: Optional[str] = None,
+    user_and_token: Tuple[str, str] = Depends(_rate_limited_share_write),
+):
+    """Stops sharing: deletes the snapshot, so the link stops working immediately."""
+    user_id, user_token = user_and_token
+    chat_ref = _require_chat_ref(chat_id)
+    try:
+        removed = await delete_shared_chat(user_token, user_id, chat_ref)
+    except DatabaseError as exc:
+        raise _share_db_error(exc, "revoke_share_endpoint", user_id)
+    return _share_json({"revoked": bool(removed)})
+
+
+async def _load_public_share(token: str) -> dict:
+    """Shared by the JSON endpoint: one uniform 404 for malformed / unknown / revoked."""
+    not_found = _share_error(404, "SHARE_NOT_FOUND", "This shared chat is not available.")
+    if not share_engine.is_valid_token(token):
+        raise not_found
+    try:
+        result = await get_public_shared_chat(token)
+    except SharingUnavailableError:
+        raise _share_error(503, "SHARING_UNAVAILABLE", "Sharing is not available yet.")
+    except DatabaseError:
+        logger.error("public share lookup failed")
+        raise _share_error(502, "SHARE_FAILED", "Could not load this chat right now.")
+    payload = share_engine.public_payload(result)
+    if payload is None:
+        raise not_found
+    return payload
+
+
+@app.get("/api/shared/{token}")
+async def public_shared_chat_endpoint(token: str):
+    """Public (no sign-in) read of one snapshot. Returns only title, role+text of
+    each message, a count and the creation time - nothing about the owner."""
+    payload = await _load_public_share(token)
+    return JSONResponse(content=payload, headers=_SHARE_PUBLIC_HEADERS)
+
+
+@app.get("/s/{token}", response_class=HTMLResponse)
+async def public_shared_chat_page(request: Request, token: str):
+    """
+    The public page. It is the same static shell for every well-formed token (the
+    content arrives from /api/shared/{token}), so this route never touches the
+    database. A malformed token answers 404 so crawlers and link checkers see an
+    honest status; the page itself renders the "not available" state either way.
+    """
+    status_code = 200 if share_engine.is_valid_token(token) else 404
+    response = templates.TemplateResponse(request=request, name="shared.html", status_code=status_code)
+    for name, value in _SHARE_PUBLIC_HEADERS.items():
+        response.headers[name] = value
+    response.headers["Content-Security-Policy"] = _SHARE_PAGE_CSP
+    return response
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon_ico():
+    """Browsers ask for /favicon.ico regardless of <link rel=icon>; serve the same asset."""
+    path = "static/img/favicon.ico"
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Not found.")
+    return FileResponse(path, media_type="image/x-icon", headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/sw.js", include_in_schema=False)

@@ -125,22 +125,25 @@ await check("the chat and regenerate sends tell the server a PDF is expected", a
     assert(hits.length === 2, `expected 2 send paths, found ${hits.length}`);
 });
 
-await check("the stream path handles every structured status before the generic 429 branch", async () => {
-    const i = APP.indexOf("PRE-PHASE 10: plan quota / quota backend / expired PDF");
-    const j = APP.indexOf("PHASE 4: a 429 here means the backend rate limiter");
-    assert(i > 0 && j > i, "structured handling must come first");
-    const seg = APP.slice(i, j);
-    for (const code of ["429", "503", "403", "409"]) assert(seg.includes(`response.status === ${code}`), code);
-    assert(seg.includes("PDF_CONTEXT_EXPIRED") && seg.includes("markPDFExpiredForChat"));
-    assert(/return;\s*\}\s*\}/.test(seg), "must return before touching chat state");
+await check("the stream path explains EVERY non-OK status (quota, rate limit, expired PDF, server) before touching chat state", async () => {
+    const i = APP.indexOf("EVERY non-OK answer (plan limit, short-term rate limit, expired PDF,");
+    assert(i > 0, "the unified non-OK branch must exist");
+    const seg = APP.slice(i, i + 1500);
+    assert(seg.includes("response.status >= 400") && seg.includes("failureFromResponse(response)"));
+    assert(seg.includes('"PDF_EXPIRED"') && seg.includes("markPDFExpiredForChat"), "expired PDF still marks the chat");
+    assert(/return;\s*\}/.test(seg), "must return before saving anything into the chat");
+    // the helper that reads the body must still cover the four structured statuses
+    const h = APP.indexOf("async function failureFromResponse");
+    const hs = APP.slice(h, h + 700);
+    for (const code of ["429", "503", "403", "409"]) assert(hs.includes(`response.status === ${code}`), code);
 });
 
-await check("quiz generation shows the structured message and keeps the old fast-click message", async () => {
+await check("quiz generation reports plan limit / rate limit / server errors in Bangla (toast with the real action)", async () => {
     const i = APP.indexOf("PRE-PHASE 10: weekly quiz quota");
     assert(i > 0);
-    const seg = APP.slice(i, i + 900);
-    assert(seg.includes("readStructuredError(res)") && seg.includes("alert(describeStructuredError(structured))"));
-    assert(seg.includes("You're generating quizzes too quickly"), "ordinary 429 message must remain");
+    const seg = APP.slice(i, i + 1300);
+    assert(seg.includes("failureFromResponse(res)") && seg.includes("reportFailureToast("), "quiz failures go through the Bangla classifier + toast");
+    assert(!/alert\(/.test(seg), "no native alert() in the quiz failure path any more");
 });
 
 console.log(`\n  ${passed} passed, ${failed} failed`);

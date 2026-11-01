@@ -24,7 +24,7 @@ from pg_policies
 where schemaname = 'public'
   and tablename in ('user_projects', 'quiz_attempts', 'quiz_answers', 'learning_evidence',
                     'conversation_index', 'student_profiles', 'pocket_notes',
-                    'payments', 'subscriptions', 'ai_usage_events')
+                    'payments', 'subscriptions', 'ai_usage_events', 'shared_chats')
   and (
         (coalesce(qual, '') not ilike '%auth.uid()%' and coalesce(with_check, '') not ilike '%auth.uid()%')
      or roles::text ilike '%anon%'

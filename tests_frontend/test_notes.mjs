@@ -57,6 +57,7 @@ const MARKED_SRC = fs.readFileSync(path.join(HERE, "node_modules", "marked", "li
 const SRC = {
     stream: read("static/js/stream-render.js"),
     purify: read("static/js/vendor/purify.min.js"),
+    feedback: read("static/js/feedback.js"),   // loaded before app.js on the real page
     app: read("static/js/app.js"),
     store: read("static/js/notes-store.js"),
     notes: read("static/js/notes.js"),
@@ -184,7 +185,7 @@ async function boot(opts = {}) {
     });
     if (opts.beforeScripts) opts.beforeScripts(w);
     const add = (src) => { const s = w.document.createElement("script"); s.textContent = src; w.document.body.appendChild(s); };
-    add(SRC.stream); add(SRC.purify); add(SRC.app);
+    add(SRC.stream); add(SRC.purify); add(SRC.feedback); add(SRC.app);
     w.openAuthModal = () => { env.authModalOpened++; };
     add(SRC.store);
     if (opts.noMarked) delete w.marked;

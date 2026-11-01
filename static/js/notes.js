@@ -890,7 +890,7 @@
             saveTags(note, (note.tags || []).concat([{ label: label, kind: "topic", origin: "student" }]));
         };
         add.addEventListener("click", submit);
-        input.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); submit(); } });
+        input.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); submit(); } });
         form.appendChild(input);
         form.appendChild(add);
 

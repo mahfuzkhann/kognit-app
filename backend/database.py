@@ -1541,3 +1541,186 @@ async def delete_pocket_note(user_token: str, user_id: str, note_id: str) -> boo
     )
     rows = _rows_from(resp, op="delete_pocket_note", user_id=user_id)
     return len(rows) > 0
+
+
+# ===========================================================================
+# CHAT SHARING (snapshot model) - additive section
+# ===========================================================================
+# Storage and RLS: supabase/migrations/0013_shared_chats.sql. Domain rules:
+# backend/share_engine.py. Owner operations use the STUDENT'S OWN token (RLS is
+# the real boundary; every query is also filtered by user_id). The ONLY
+# unauthenticated read is the get_shared_chat() function, called with the public
+# key - it can not list, enumerate or reach any other table.
+#
+# The share token is a credential. It is NEVER logged here: logs carry the
+# operation name, status code and user_id only - never the token, never any
+# chat text.
+
+SHARED_CHAT_COLUMNS = "share_token,chat_ref,title,message_count,created_at"
+
+
+class SharingUnavailableError(DatabaseError):
+    """The shared_chats table / function is not there (migration 0013 not applied)."""
+
+
+class ShareLimitError(DatabaseError):
+    """The student already has the maximum number of active shares."""
+
+
+def _is_missing_relation(resp) -> bool:
+    """PostgREST answers 404 (PGRST205/PGRST202) or 42P01/42883 when the table or
+    function does not exist - i.e. the migration has not been applied yet."""
+    if resp.status_code not in (400, 404):
+        return False
+    body = resp.text[:600]
+    return any(code in body for code in ("PGRST205", "PGRST202", "42P01", "42883"))
+
+
+async def _shared_chats_request(
+    method: str,
+    *,
+    user_token: str,
+    user_id: str,
+    op: str,
+    params: dict,
+    json_body=None,
+    prefer: Optional[str] = None,
+    ok_statuses=(200,),
+    tolerated_statuses=(),
+):
+    """Single place the owner-side share operations talk to PostgREST. Returns the
+    response for ok_statuses / tolerated_statuses, otherwise raises (never
+    returning server text upward)."""
+    _require_supabase_configured()
+    headers = _rest_headers(user_token)
+    if prefer:
+        headers["Prefer"] = prefer
+    try:
+        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+            resp = await client.request(
+                method,
+                f"{SUPABASE_URL}/rest/v1/shared_chats",
+                headers=headers,
+                params=params,
+                json=json_body,
+            )
+    except httpx.RequestError:
+        logger.exception("%s: network error talking to shared_chats (user_id=%s)", op, user_id)
+        raise DatabaseError(f"network error during {op}")
+
+    if resp.status_code in ok_statuses or resp.status_code in tolerated_statuses:
+        return resp
+
+    if _is_missing_relation(resp):
+        logger.error("%s: shared_chats is missing - apply migration 0013 (user_id=%s)", op, user_id)
+        raise SharingUnavailableError("shared_chats is not available")
+    if resp.status_code == 400 and "53400" in resp.text[:600]:
+        raise ShareLimitError("share limit reached")
+
+    # Truncated body only; it never contains the snapshot (PostgREST error text).
+    logger.error("%s: shared_chats request failed status=%d (user_id=%s)", op, resp.status_code, user_id)
+    raise DatabaseError(f"{op} failed with status {resp.status_code}")
+
+
+async def create_shared_chat(user_token: str, user_id: str, record: dict) -> Optional[dict]:
+    """
+    Inserts a snapshot. The database trigger generates the token and enforces
+    the per-user cap. Returns the stored row, or None when this chat already has
+    an active share (unique (user_id, chat_ref)) - the caller then reads it.
+    `record` is the dict from share_engine.build_snapshot; user_id is added HERE
+    from the verified identity, never taken from the request.
+    """
+    payload = {
+        "user_id": user_id,
+        "chat_ref": record["chat_ref"],
+        "title": record["title"],
+        "snapshot": record["snapshot"],
+        "message_count": record["message_count"],
+        # Placeholder only: the BEFORE INSERT trigger always overwrites it.
+        "share_token": "0" * 40,
+    }
+    resp = await _shared_chats_request(
+        "POST",
+        user_token=user_token,
+        user_id=user_id,
+        op="create_shared_chat",
+        params={"select": SHARED_CHAT_COLUMNS},
+        json_body=payload,
+        prefer="return=representation",
+        ok_statuses=(200, 201),
+        tolerated_statuses=(409,),
+    )
+    if resp.status_code == 409:
+        return None
+    rows = _rows_from(resp, op="create_shared_chat", user_id=user_id)
+    return rows[0] if rows else None
+
+
+async def get_active_shared_chat(user_token: str, user_id: str, chat_ref: str) -> Optional[dict]:
+    resp = await _shared_chats_request(
+        "GET",
+        user_token=user_token,
+        user_id=user_id,
+        op="get_active_shared_chat",
+        params={
+            "select": SHARED_CHAT_COLUMNS,
+            "user_id": f"eq.{user_id}",
+            "chat_ref": f"eq.{chat_ref}",
+            "limit": "1",
+        },
+    )
+    rows = _rows_from(resp, op="get_active_shared_chat", user_id=user_id)
+    return rows[0] if rows else None
+
+
+async def delete_shared_chat(user_token: str, user_id: str, chat_ref: str) -> bool:
+    """Revokes a share by deleting it (content gone at once). True if a row was removed."""
+    resp = await _shared_chats_request(
+        "DELETE",
+        user_token=user_token,
+        user_id=user_id,
+        op="delete_shared_chat",
+        params={"user_id": f"eq.{user_id}", "chat_ref": f"eq.{chat_ref}", "select": "chat_ref"},
+        prefer="return=representation",
+    )
+    rows = _rows_from(resp, op="delete_shared_chat", user_id=user_id)
+    return len(rows) > 0
+
+
+async def get_public_shared_chat(token: str) -> Optional[dict]:
+    """
+    Public read of one snapshot by token via the get_shared_chat() function.
+    Returns the function's JSON, or None for an unknown/revoked/malformed token.
+    Raises SharingUnavailableError if the function does not exist yet, and
+    DatabaseError for any other failure. The token is never logged.
+    """
+    _require_supabase_configured()
+    # New-style publishable keys are not JWTs and must travel only in `apikey`;
+    # legacy anon keys are JWTs and are accepted in both headers.
+    headers = {"apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json"}
+    if SUPABASE_ANON_KEY.startswith("eyJ"):
+        headers["Authorization"] = f"Bearer {SUPABASE_ANON_KEY}"
+    try:
+        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+            resp = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/get_shared_chat",
+                headers=headers,
+                json={"p_token": token},
+            )
+    except httpx.RequestError:
+        logger.exception("get_public_shared_chat: network error")
+        raise DatabaseError("network error during get_public_shared_chat")
+
+    if resp.status_code != 200:
+        if _is_missing_relation(resp):
+            logger.error("get_public_shared_chat: get_shared_chat() is missing - apply migration 0013")
+            raise SharingUnavailableError("get_shared_chat is not available")
+        logger.error("get_public_shared_chat: request failed status=%d", resp.status_code)
+        raise DatabaseError(f"get_public_shared_chat failed with status {resp.status_code}")
+    if not resp.content.strip() or resp.content.strip() == b"null":
+        return None  # the function returned NULL: unknown / revoked / malformed token
+    try:
+        return resp.json()
+    except ValueError:
+        logger.error("get_public_shared_chat: unexpected response shape")
+        raise DatabaseError("unexpected response shape from get_public_shared_chat")

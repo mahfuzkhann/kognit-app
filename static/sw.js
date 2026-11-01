@@ -47,7 +47,7 @@
    ============================================================ */
 "use strict";
 
-const SW_VERSION = "2026-10-22.1";
+const SW_VERSION = "2026-10-28.1";
 const SHELL_CACHE = "kognit-shell-" + SW_VERSION;
 const CDN_CACHE = "kognit-cdn-" + SW_VERSION;
 const CACHE_PREFIX = "kognit-";
@@ -62,16 +62,23 @@ const CORE_URLS = [
     "/static/css/shell.css",
     "/static/css/notes.css",
     "/static/css/profile-menu.css",
+    "/static/css/uiux.css",
     "/static/img/kognit-logo.svg",
+    "/static/img/favicon.svg",
+    "/static/img/favicon.ico",
+    "/static/img/favicon-32x32.png",
+    "/static/img/apple-touch-icon.png",
     "/static/js/theme.js",
     "/static/js/stream-render.js",
     "/static/js/vendor/purify.min.js",
+    "/static/js/feedback.js",
     "/static/js/app.js",
     "/static/js/notes-store.js",
     "/static/js/notes.js",
     "/static/js/nav-views.js",
     "/static/js/ui-core.js",
     "/static/js/shell.js",
+    "/static/js/share.js",
     "/static/js/i18n.js",
     "/static/js/profile-menu.js",
 ];

@@ -293,7 +293,8 @@ await check("a FAILED save is reported as not saved and does not refresh Your To
     for (let i = 0; i < 5; i++) await nextQuestion(app.page);
     await sleep(900);
     const status = await app.page.$eval("#quiz-save-status", (e) => e.textContent);
-    assert(!status.includes("Result saved") && status.includes("Could not save"), status);
+    // The failure message is now Bangla (feedback.js "quizSaveFailed"); it must still say "not saved".
+    assert(!status.includes("Result saved") && status.includes("সংরক্ষণ করা যায়নি"), status);
     eq(app.counts.snapshot, before);
     await app.close();
 });

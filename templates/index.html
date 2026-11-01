@@ -38,6 +38,14 @@
          on a small phone rely on it. -->
     <title>Kloriz - AI Academic Assistant</title>
 
+    <!-- FAVICON: derived from the official Kloriz mark (static/img/kognit-logo.svg).
+         The SVG follows the browser theme; the ICO / PNG fallbacks are the mark on
+         a white tile so they stay legible on any tab colour. -->
+    <link rel="icon" href="/static/img/favicon.svg" type="image/svg+xml">
+    <link rel="icon" href="/static/img/favicon.ico" sizes="16x16 32x32 48x48">
+    <link rel="icon" href="/static/img/favicon-32x32.png" type="image/png" sizes="32x32">
+    <link rel="apple-touch-icon" href="/static/img/apple-touch-icon.png">
+
     <!-- CSS -->
     <!-- PHASE 8B: design tokens must load BEFORE style.css, which now
          references them via var(). Loading order is the only
@@ -51,6 +59,10 @@
     <link rel="stylesheet" href="/static/css/notes.css">
     <!-- ACCOUNT MENU: dropdown + Settings/Help/Plan/Learn-more dialog. New selectors only. -->
     <link rel="stylesheet" href="/static/css/profile-menu.css">
+    <!-- UI/UX POLISH: toast, in-chat failure bubble, scroll-to-latest pill, rebuilt
+         sign-in dialog, quiz-discard confirmation and the share dialog. New selectors
+         only; loaded last so it never fights the files above. -->
+    <link rel="stylesheet" href="/static/css/uiux.css">
 
     <!-- Noto Sans Bengali: proper Bengali script shaping (conjuncts, matras).
          The previous font stack (-apple-system/Segoe UI/Roboto) has no
@@ -271,7 +283,7 @@
             <div class="sidebar-search-container hidden" id="sidebar-search-container">
                 <div class="search-input-wrapper">
                     <span class="search-input-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg></span>
-                    <input type="text" id="sidebar-search-input" placeholder="Search notebooks or chats..." aria-label="Search notebooks or chats" onkeyup="handleSidebarSearch(event)">
+                    <input type="text" id="sidebar-search-input" placeholder="Search notebooks or chats..." aria-label="Search notebooks or chats" onkeyup="handleSidebarSearch(event)" oninput="handleSidebarSearch(event)">
                 </div>
             </div>
 
@@ -430,7 +442,7 @@
                             <span class="floating-menu-value" id="chat-menu-class-value">Set up profile</span>
                         </button>
                         <button type="button" class="floating-menu-item" role="menuitem" data-chat-menu="share">
-                            <span>Share chat link</span>
+                            <span>Share chat</span>
                         </button>
                         <button type="button" class="floating-menu-item" role="menuitem" data-chat-menu="new-chat">
                             <span>New chat</span>
@@ -438,7 +450,7 @@
                     </div>
                 </div>
 
-                <button type="button" class="navbar-icon-btn share-btn navbar-desktop-only" onclick="shareChatLink()" title="Share link" aria-label="Share chat link">
+                <button type="button" class="navbar-icon-btn share-btn navbar-desktop-only" onclick="shareChatLink()" title="Share chat" aria-label="Share chat">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.6" y1="10.5" x2="15.4" y2="6.5"></line><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"></line></svg>
                 </button>
 
@@ -469,6 +481,10 @@
         </div>
 
         <!-- PREVIEW / STATUS BARS -->
+        <button type="button" id="scroll-latest-btn" class="scroll-latest-btn hidden" onclick="scrollChatToLatest()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg>
+            <span id="scroll-latest-label">নিচে যান</span>
+        </button>
         <div id="pdf-status-bar" class="image-preview-bar hidden">
             <span class="pdf-status-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg></span>
             <span id="pdf-status-text">PDF Active</span>
@@ -638,44 +654,65 @@
     </main>
 </div>
 
-<!-- AUTH MODAL -->
-<div id="auth-modal" class="modal-overlay hidden">
-    <div class="modal-card auth-card">
-        <div class="modal-header">
-            <h2 id="auth-modal-title"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path></svg><span id="auth-modal-title-text">Sign In to Kloriz</span></h2>
-            <button class="close-modal-btn" onclick="closeAuthModal()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
+<!-- AUTH MODAL (login / sign up)
+     One real <form>: Enter in either field submits it, the browser/password
+     manager sees proper field types and autocomplete hints, and every <label>
+     is bound to its input. app.js (handleEmailAuth / toggleAuthMode) keeps the
+     SAME Supabase calls and session handling as before - only the markup, the
+     pending/error states and the feedback channel changed. The card plays a
+     short entrance animation each time the dialog OPENS (CSS, uiux.css); mode
+     switches and errors never replay it. -->
+<div id="auth-modal" class="modal-overlay auth-overlay hidden">
+    <div class="modal-card auth-card" role="dialog" aria-modal="true" aria-labelledby="auth-modal-title" aria-describedby="auth-modal-desc" data-auth-mode="login">
+        <button type="button" class="close-modal-btn auth-close-btn" onclick="closeAuthModal()" aria-label="Close"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
+
+        <div class="auth-heading">
+            <span class="brand-mark auth-brand" aria-hidden="true"></span>
+            <h2 id="auth-modal-title"><span id="auth-modal-title-text">Sign in to Kloriz</span></h2>
+            <p id="auth-modal-desc" class="auth-subtitle">Pick up your studies where you left off.</p>
         </div>
 
-        <div id="auth-error-msg" class="auth-error-msg hidden"></div>
-
-        <button class="btn-google-auth" onclick="handleGoogleSignIn()">
-            <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google">
-            Continue with Google
+        <button type="button" id="auth-google-btn" class="btn-google-auth" onclick="handleGoogleSignIn()">
+            <svg class="auth-google-icon" width="18" height="18" viewBox="0 0 48 48" aria-hidden="true" focusable="false"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>
+            <span>Continue with Google</span>
         </button>
 
-        <div class="auth-divider"><span>OR</span></div>
+        <div class="auth-divider" role="separator"><span>or</span></div>
 
-        <div class="form-group">
-            <label>Email Address</label>
-            <input type="email" id="auth-email-input" placeholder="you@example.com">
-        </div>
+        <form id="auth-form" class="auth-form" novalidate>
+            <div class="form-group">
+                <label for="auth-email-input">Email</label>
+                <input type="email" id="auth-email-input" name="email" autocomplete="email" inputmode="email"
+                       autocapitalize="none" autocorrect="off" spellcheck="false"
+                       placeholder="you@example.com" required aria-describedby="auth-error-msg">
+            </div>
 
-        <div class="form-group">
-            <label>Password</label>
-            <input type="password" id="auth-password-input" placeholder="••••••••">
-        </div>
+            <div class="form-group">
+                <label for="auth-password-input">Password</label>
+                <div class="auth-password-wrap">
+                    <input type="password" id="auth-password-input" name="password" autocomplete="current-password"
+                           autocapitalize="none" autocorrect="off" spellcheck="false"
+                           placeholder="Your password" required aria-describedby="auth-error-msg">
+                    <button type="button" id="auth-password-toggle" class="auth-password-toggle"
+                            aria-label="Show password" aria-pressed="false" aria-controls="auth-password-input"><svg class="auth-eye-show" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"></path><circle cx="12" cy="12" r="3"></circle></svg><svg class="auth-eye-hide" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M17.94 17.94A10.5 10.5 0 0 1 12 19c-6.4 0-10-7-10-7a18 18 0 0 1 5.06-5.94"></path><path d="M9.9 5.24A9.7 9.7 0 0 1 12 5c6.4 0 10 7 10 7a18 18 0 0 1-2.16 3.19"></path><path d="M1 1l22 22"></path></svg></button>
+                </div>
+            </div>
 
-        <div class="auth-action-btns">
-            <button id="auth-submit-btn" class="btn-primary" onclick="handleEmailAuth('login')">Sign In</button>
-        </div>
+            <p id="auth-error-msg" class="auth-error-msg hidden" role="alert"></p>
+            <p id="auth-notice-msg" class="auth-notice-msg hidden" role="status"></p>
 
-        <div class="auth-toggle-text">
+            <button type="submit" id="auth-submit-btn" class="btn-primary auth-submit">
+                <span class="auth-submit-label">Sign In</span>
+                <span class="auth-spinner" aria-hidden="true"></span>
+            </button>
+        </form>
+
+        <p class="auth-toggle-text">
             <span id="auth-toggle-desc">Don't have an account?</span>
-            <a href="javascript:void(0)" id="auth-toggle-link" onclick="toggleAuthMode()">Sign Up</a>
-        </div>
+            <button type="button" id="auth-toggle-link" class="auth-switch-link" onclick="toggleAuthMode()">Sign Up</button>
+        </p>
     </div>
 </div>
-
 <!-- PROFILE MODAL (Phase 6A, redesigned) -->
 <!-- Single compact interaction used for BOTH first-time onboarding
      (auto-opened by checkAndLoadProfile() in app.js when GET /api/profile
@@ -880,10 +917,10 @@
 
 <!-- QUIZ MODAL -->
 <div id="quiz-modal" class="modal-overlay hidden">
-    <div class="modal-card">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="quiz-modal-title">
         <div class="modal-header">
-            <h2><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><circle cx="12" cy="12" r="5"></circle><circle cx="12" cy="12" r="1"></circle></svg><span>Generate AI Practice Test</span></h2>
-            <button class="close-modal-btn" onclick="closeQuizModal()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
+            <h2 id="quiz-modal-title"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><circle cx="12" cy="12" r="5"></circle><circle cx="12" cy="12" r="1"></circle></svg><span>Generate AI Practice Test</span></h2>
+            <button type="button" class="close-modal-btn" onclick="requestCloseQuiz()" aria-label="Close"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
         </div>
 
         <!-- QUIZ SETUP VIEW -->
@@ -891,17 +928,17 @@
             <p class="modal-desc">Test your understanding based on your curriculum.</p>
 
             <div class="form-group">
-                <label>Subject</label>
+                <label for="quiz-subject-select">Subject</label>
                 <select id="quiz-subject-select"></select>
             </div>
 
             <div class="form-group">
-                <label>Topic / Chapter Name</label>
+                <label for="quiz-topic-input">Topic / Chapter Name</label>
                 <input type="text" id="quiz-topic-input" placeholder="e.g., Force & Motion, Cell Structure">
             </div>
 
             <div class="form-group">
-                <label>Number of Questions</label>
+                <label for="quiz-count-select">Number of Questions</label>
                 <select id="quiz-count-select">
                     <option value="5">5 Questions (Quick Test)</option>
                     <option value="10" selected>10 Questions (Standard)</option>
@@ -914,7 +951,7 @@
 
         <!-- QUIZ ACTIVE VIEW -->
         <div id="quiz-active-view" class="modal-body hidden">
-            <div class="quiz-progress-bar" id="quiz-progress-text">Question 1 of 5</div>
+            <div class="quiz-progress-bar" id="quiz-progress-text" role="status" aria-live="polite">Question 1 of 5</div>
             <div id="quiz-question-container"></div>
             <button id="quiz-next-btn" class="start-quiz-btn" onclick="nextQuizQuestion()">Next Question</button>
         </div>
@@ -936,6 +973,38 @@
             <div id="result-details-list" class="result-details-list"></div>
             <button class="start-quiz-btn" onclick="resetQuizModal()">Try Another Test</button>
         </div>
+    </div>
+</div>
+
+<!-- QUIZ DISCARD CONFIRMATION
+     Shown only when the student has real progress (an answer chosen, or past
+     question 1) and tries to close the quiz by ANY route: the X button, Escape
+     or a click outside. It sits AFTER #quiz-modal in the DOM so ui-core.js treats
+     it as the top-most dialog: Escape / outside click here means "keep going".
+     Copy is Bangla by request; it matches the messages in feedback.js. -->
+<div id="quiz-discard-modal" class="modal-overlay hidden">
+    <div class="modal-card confirm-card" role="alertdialog" aria-modal="true" aria-labelledby="quiz-discard-title" aria-describedby="quiz-discard-desc">
+        <h2 id="quiz-discard-title" class="confirm-title">কুইজ বন্ধ করবেন?</h2>
+        <p id="quiz-discard-desc" class="confirm-desc">এখন বন্ধ করলে এই কুইজে দেওয়া উত্তরগুলো মুছে যাবে।</p>
+        <div class="confirm-actions">
+            <button type="button" class="btn-confirm-cancel" data-autofocus onclick="closeQuizDiscardConfirm()">কুইজ চালিয়ে যান</button>
+            <button type="button" class="btn-confirm-danger" onclick="confirmQuizDiscard()">বাদ দিন</button>
+        </div>
+    </div>
+</div>
+
+<!-- SHARE DIALOG (static/js/share.js renders the body)
+     Sharing is an explicit, opt-in snapshot: the dialog first PREVIEWS exactly what
+     would be shared, says who will be able to open the link, and only then creates
+     it. After that it offers copy / WhatsApp / Facebook / the device share sheet
+     and a "Stop sharing" button that revokes the link. -->
+<div id="share-modal" class="modal-overlay hidden">
+    <div class="modal-card share-card" role="dialog" aria-modal="true" aria-labelledby="share-modal-title">
+        <div class="modal-header">
+            <h2 id="share-modal-title">Share this chat</h2>
+            <button type="button" class="close-modal-btn" onclick="closeShareModal()" aria-label="Close"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
+        </div>
+        <div id="share-body" class="share-body" aria-live="polite"></div>
     </div>
 </div>
 
@@ -1019,6 +1088,9 @@
      Must load BEFORE app.js. If it ever fails to load, app.js fails closed
      (model output is shown as escaped text, never inserted raw). -->
 <script src="/static/js/vendor/purify.min.js"></script>
+<!-- Bangla failure messages, the toast and failure classification. No dependencies;
+     must load BEFORE app.js, which calls window.KlorizFeedback. -->
+<script src="/static/js/feedback.js"></script>
 <!-- PHASE 9B: top-level nav rail (Chat/Quizzes/Projects) and the
      Quizzes/Projects view content. Loaded AFTER app.js (see script
      order below) since it depends on the accessor functions app.js
@@ -1032,6 +1104,8 @@
      mobile chat menu, search toggle, composer autosize). Observes app.js
      state from the outside, like ui-core.js. Loaded last. -->
 <script src="/static/js/shell.js"></script>
+<!-- Share dialog (opt-in snapshot sharing). Uses app.js's getShareableChat() accessor. -->
+<script src="/static/js/share.js"></script>
 <!-- ACCOUNT MENU: i18n.js (English/Bangla dictionary + language state) must load
      before profile-menu.js (the dropdown and its dialogs), which reads it. Both
      look up app.js functions lazily, so they depend on nothing else. -->

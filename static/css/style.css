@@ -1488,6 +1488,73 @@ body {
     color: var(--color-text-primary);
 }
 
+/* ---- UI/UX polish: ONE icon size / stroke / height for every action ----
+   Measured in a real browser before this change, the buttons were 22px (Edit,
+   12px icon), 24px (most, 14px icon) and 26px (Save, 16px icon at a lighter
+   stroke) tall. The dominant 14px icon is now enforced in CSS for the whole
+   toolbar - same size, same 2px-in-24 stroke, same round caps - so the three
+   heights collapse to one (24px) with no change to the overall toolbar size,
+   spacing, wording or behaviour. The SVG markup and the shared UI_ICONS set
+   (also used in the sidebar) are untouched. */
+.toolbar-btn {
+    position: relative;
+    min-height: 24px;
+    box-sizing: border-box;
+    justify-content: center;
+}
+
+.toolbar-btn svg {
+    flex: 0 0 14px;
+    width: 14px;
+    height: 14px;
+    display: block;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+/* Restrained pressed state; the hover state above is unchanged. */
+.toolbar-btn:active:not(:disabled) {
+    transform: scale(0.97);
+}
+
+/* Light theme: the dark theme's translucent-WHITE fill and border vanish on a
+   white page, leaving unframed text. Same shape, theme tokens instead. */
+:root[data-theme="light"] .toolbar-btn {
+    background: var(--color-surface-hover);
+    border-color: var(--color-border-strong);
+}
+:root[data-theme="light"] .toolbar-btn:hover:not(:disabled) {
+    background: var(--color-border);
+}
+:root[data-theme="light"] .toolbar-btn.active-like {
+    background: color-mix(in srgb, var(--color-success) 12%, transparent);
+}
+:root[data-theme="light"] .toolbar-btn.active-dislike {
+    background: color-mix(in srgb, var(--color-error) 10%, transparent);
+}
+
+/* Touch screens: keep the visual button exactly as it is, but extend the
+   tappable area to ~40px tall (24px + 8px above and below) with an invisible
+   pseudo-element. Nothing moves or grows; a thumb simply misses less. The
+   toolbar's 6px gap keeps neighbouring areas from overlapping horizontally
+   because the extension is vertical only. */
+@media (pointer: coarse) {
+    .toolbar-btn::after {
+        content: "";
+        position: absolute;
+        top: -8px;
+        bottom: -8px;
+        left: 0;
+        right: 0;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .toolbar-btn { transition: none; }
+    .toolbar-btn:active:not(:disabled) { transform: none; }
+}
+
 .toolbar-btn:disabled {
     cursor: default;
     opacity: 0.4;

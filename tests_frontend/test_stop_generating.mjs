@@ -43,6 +43,7 @@ const MARKED_SRC = fs.readFileSync(path.join(HERE, "node_modules", "marked", "li
 const SRC = {
     stream: read("static/js/stream-render.js"),
     purify: read("static/js/vendor/purify.min.js"),
+    feedback: read("static/js/feedback.js"),   // loaded before app.js on the real page
     app: read("static/js/app.js"),
     store: read("static/js/notes-store.js"),
     notes: read("static/js/notes.js"),
@@ -150,7 +151,7 @@ async function boot() {
     w.MathJax = Object.assign(w.MathJax || {}, { typesetPromise: async () => {}, typesetClear: () => {}, startup: { promise: Promise.resolve() } });
 
     const add = (src) => { const s = w.document.createElement("script"); s.textContent = src; w.document.body.appendChild(s); };
-    add(SRC.stream); add(SRC.purify); add(SRC.app);
+    add(SRC.stream); add(SRC.purify); add(SRC.feedback); add(SRC.app);
     w.openAuthModal = () => { env.loginPrompts++; };
     add(SRC.store); add(SRC.notes); add(SRC.nav);
     w.document.dispatchEvent(new w.Event("DOMContentLoaded"));
@@ -549,11 +550,16 @@ await check("a terminal event that already arrived wins over a late Stop: 'done'
 /* ---- genuine failures keep their existing behaviour ---- */
 console.log("\nD. Genuine failures are NOT treated as 'stopped' (regression)");
 
-await check("network failure before any response still shows the existing error and restores Send", async () => {
+await check("network failure before any response shows a Bangla network message with a real retry, and restores Send", async () => {
     const h = await boot(); h.seed();
     h.w.fetch = () => Promise.reject(new h.w.TypeError("Failed to fetch"));
     await h.send("Hello");
-    assert(/Error connecting to Kloriz Engine\./.test(h.chatBox.textContent));
+    const bubble = h.chatBox.querySelector(".chat-failure");
+    assert(bubble, "an in-chat failure bubble is shown");
+    eq(bubble.getAttribute("role"), "alert", "announced to screen readers");
+    assert(/ইন্টারনেট সংযোগে সমস্যা/.test(bubble.textContent), "Bangla network wording");
+    assert(!/Failed to fetch|TypeError/.test(h.chatBox.textContent), "no raw exception text reaches the student");
+    assert(bubble.querySelector("button.chat-failure-action"), "a retry action is offered");
     eq(JSON.stringify(h.state()), JSON.stringify({ send: true, stop: false }));
 });
 
@@ -563,7 +569,7 @@ await check("a stream that errors mid-read (no Stop pressed) still shows the exi
     await h.stream(h.session(), "partial");
     h.session().fail(new h.w.TypeError("network error"));
     await sleep(60);
-    assert(/Error connecting to Kloriz Engine\./.test(h.chatBox.textContent), "genuine errors are still surfaced");
+    assert(/ইন্টারনেট সংযোগে সমস্যা|কিছু একটা সমস্যা/.test(h.chatBox.textContent) || /মাঝপথে থেমে/.test(h.chatBox.textContent), "genuine errors are still surfaced (in Bangla)");
     eq(JSON.stringify(h.state()), JSON.stringify({ send: true, stop: false }));
     eq(h.session().aborted, false);
 });
@@ -574,17 +580,19 @@ await check("a dropped connection with partial text keeps its EXISTING 'interrup
     await h.stream(h.session(), "partial text");
     h.session().close();                               // closes with no terminal event
     await sleep(60);
-    assert(/This answer was interrupted before it finished generating\./.test(h.chatBox.textContent));
+    assert(/উত্তরটি মাঝপথে থেমে গেছে/.test(h.chatBox.textContent), "Bangla interrupted notice");
+    assert(h.chatBox.querySelector(".answer-interrupted-retry"), "a real 'generate again' action is offered");
     assert(!/Generation stopped/.test(h.chatBox.textContent));
     eq(JSON.stringify(h.state()), JSON.stringify({ send: true, stop: false }));
 });
 
-await check("a server 'error' terminal shows its message and restores Send", async () => {
+await check("a server 'error' terminal is shown as the Bangla message for its CODE (not the server's English) and restores Send", async () => {
     const h = await boot(); h.seed();
     await h.send("Hello");
     h.session().push({ type: "error", reply: "Kognit is busy right now.", code: "PROVIDER_UNAVAILABLE" });
     h.session().close(); await sleep(60);
-    assert(h.chatBox.textContent.includes("Kognit is busy right now."));
+    assert(h.chatBox.textContent.includes("সাময়িকভাবে ব্যস্ত"), "Bangla busy message");
+    assert(!h.chatBox.textContent.includes("Kognit is busy right now."), "server English is not shown");
     eq(JSON.stringify(h.state()), JSON.stringify({ send: true, stop: false }));
 });
 
@@ -599,7 +607,7 @@ await check("401 and 429 responses keep their existing handling and always relea
     h.backend.nextOptions.push({ status: 429 });
     await h.send("Hello again");
     await sleep(40);
-    assert(/sending messages too quickly/.test(h.chatBox.textContent), "429 message");
+    assert(/অনেক অনুরোধ হয়ে গেছে/.test(h.chatBox.textContent), "429 message (Bangla rate-limit wording)");
     eq(JSON.stringify(h.state()), JSON.stringify({ send: true, stop: false }), "after 429");
 });
 

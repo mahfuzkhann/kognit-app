@@ -263,6 +263,10 @@ def exceeded_http_exception(decision: QuotaDecision) -> HTTPException:
         "limit": decision.limit,
         "used": decision.used,
         "resets_at": decision.resets_at,
+        # Lets the UI tell "your plan allowance is used up" (quota_exceeded) from the
+        # short-term ledger cap (rate_limited) without parsing the English message.
+        # Display only: the server remains the sole authority on both.
+        "reason": decision.reason,
         "message": message,
     }
     return HTTPException(status_code=429, detail=detail, headers=headers or None)
