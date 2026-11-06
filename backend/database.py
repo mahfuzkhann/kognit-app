@@ -29,6 +29,8 @@ from typing import Optional
 
 import httpx
 
+from backend import http_client
+
 from backend.mastery_engine import EvidenceEvent, compute_topic_status
 from backend.learning_memory import (
     CONFIDENCE_KNOWN,
@@ -236,7 +238,7 @@ async def save_quiz_attempt(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+        async with http_client.client(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
             attempt_resp = await client.post(
                 f"{SUPABASE_URL}/rest/v1/quiz_attempts",
                 headers={**_rest_headers(user_token), "Prefer": "return=representation"},
@@ -269,7 +271,7 @@ async def save_quiz_attempt(
         row["attempt_id"] = attempt_id
 
     try:
-        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+        async with http_client.client(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
             answers_resp = await client.post(
                 f"{SUPABASE_URL}/rest/v1/quiz_answers",
                 headers=_rest_headers(user_token),
@@ -307,7 +309,7 @@ async def _rollback_attempt(user_token: str, attempt_id: str) -> None:
     regardless of whether this succeeds.
     """
     try:
-        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+        async with http_client.client(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
             resp = await client.delete(
                 f"{SUPABASE_URL}/rest/v1/quiz_attempts",
                 headers=_rest_headers(user_token),
@@ -372,7 +374,7 @@ async def get_user_topic_profile(user_token: str, user_id: str) -> list:
         )
 
     try:
-        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+        async with http_client.client(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
             resp = await client.get(
                 f"{SUPABASE_URL}/rest/v1/quiz_attempts",
                 headers=_rest_headers(user_token),
@@ -562,7 +564,7 @@ async def get_user_topic_mistakes(user_token: str, user_id: str) -> list:
         )
 
     try:
-        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+        async with http_client.client(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
             resp = await client.get(
                 f"{SUPABASE_URL}/rest/v1/quiz_attempts",
                 headers=_rest_headers(user_token),
@@ -785,7 +787,7 @@ async def save_chat_learning_evidence(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+        async with http_client.client(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
             resp = await client.post(
                 f"{SUPABASE_URL}/rest/v1/learning_evidence",
                 headers=_rest_headers(user_token),
@@ -851,7 +853,7 @@ async def save_conversation_index_entry(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+        async with http_client.client(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
             resp = await client.post(
                 f"{SUPABASE_URL}/rest/v1/conversation_index",
                 headers=_rest_headers(user_token),
@@ -926,7 +928,7 @@ async def get_learning_history(
     bounded_limit = max(1, min(limit, MAX_LEARNING_HISTORY_LIMIT))
 
     try:
-        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+        async with http_client.client(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
             conv_resp = await client.get(
                 f"{SUPABASE_URL}/rest/v1/conversation_index",
                 headers=_rest_headers(user_token),
@@ -999,7 +1001,7 @@ async def get_learning_history(
 # responses.
 # ---------------------------------------------------------------------------
 
-_STUDENT_PROFILE_SELECT = "user_id,name,user_class,stream,created_at,updated_at"
+_STUDENT_PROFILE_SELECT = "user_id,name,user_class,stream,curriculum,created_at,updated_at"
 
 
 async def get_student_profile(user_token: str, user_id: str) -> Optional[dict]:
@@ -1027,7 +1029,7 @@ async def get_student_profile(user_token: str, user_id: str) -> Optional[dict]:
         )
 
     try:
-        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+        async with http_client.client(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
             resp = await client.get(
                 f"{SUPABASE_URL}/rest/v1/student_profiles",
                 headers=_rest_headers(user_token),
@@ -1070,6 +1072,7 @@ async def upsert_student_profile(
     name: str,
     user_class: str,
     stream: Optional[str],
+    curriculum: Optional[str] = None,
 ) -> dict:
     """
     Creates the authenticated student's profile if none exists yet, or
@@ -1120,9 +1123,13 @@ async def upsert_student_profile(
         "user_class": user_class,
         "stream": stream,
     }
+    if curriculum is not None:
+        # AI Engine 2.0 (D-7): added ONLY when supplied, so a save that does not mention it
+        # (and every pre-existing caller) leaves a previously chosen medium untouched.
+        payload["curriculum"] = curriculum
 
     try:
-        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+        async with http_client.client(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
             resp = await client.post(
                 f"{SUPABASE_URL}/rest/v1/student_profiles",
                 headers={
@@ -1198,7 +1205,7 @@ async def get_learning_insights(user_token: str, user_id: str) -> list:
         )
 
     try:
-        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+        async with http_client.client(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
             resp = await client.get(
                 f"{SUPABASE_URL}/rest/v1/learning_evidence",
                 headers=_rest_headers(user_token),
@@ -1365,7 +1372,7 @@ async def _pocket_notes_request(
         headers.update(extra_headers)
 
     try:
-        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+        async with http_client.client(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
             resp = await client.request(
                 method,
                 f"{SUPABASE_URL}/rest/v1/pocket_notes",
@@ -1596,7 +1603,7 @@ async def _shared_chats_request(
     if prefer:
         headers["Prefer"] = prefer
     try:
-        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+        async with http_client.client(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
             resp = await client.request(
                 method,
                 f"{SUPABASE_URL}/rest/v1/shared_chats",
@@ -1701,7 +1708,7 @@ async def get_public_shared_chat(token: str) -> Optional[dict]:
     if SUPABASE_ANON_KEY.startswith("eyJ"):
         headers["Authorization"] = f"Bearer {SUPABASE_ANON_KEY}"
     try:
-        async with httpx.AsyncClient(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+        async with http_client.client(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
             resp = await client.post(
                 f"{SUPABASE_URL}/rest/v1/rpc/get_shared_chat",
                 headers=headers,

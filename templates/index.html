@@ -783,6 +783,21 @@
             </div>
         </div>
 
+        <div class="profile-section" id="profile-curriculum-group">
+            <span id="profile-curriculum-label" class="profile-section-label">Curriculum</span>
+            <span id="profile-curriculum-hint" class="profile-section-hint">Which NCTB medium do you study in?</span>
+            <div class="profile-choice-grid" id="profile-curriculum-pills" role="radiogroup" aria-labelledby="profile-curriculum-label" aria-describedby="profile-curriculum-hint">
+                <label class="profile-choice">
+                    <input type="radio" class="profile-choice-input" name="profile-curriculum" value="nctb_bangla" onchange="selectProfileCurriculum(this)">
+                    <span class="profile-choice-box"><span class="profile-choice-text">NCTB Bangla Medium</span><svg class="profile-choice-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
+                </label>
+                <label class="profile-choice">
+                    <input type="radio" class="profile-choice-input" name="profile-curriculum" value="nctb_english" onchange="selectProfileCurriculum(this)">
+                    <span class="profile-choice-box"><span class="profile-choice-text">NCTB English Version</span><svg class="profile-choice-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
+                </label>
+            </div>
+        </div>
+
         <div class="profile-section" id="profile-stream-group">
             <span id="profile-stream-label" class="profile-section-label">Stream</span>
             <span id="profile-stream-hint" class="profile-section-hint">Select your stream (only for Class 9&ndash;12)</span>

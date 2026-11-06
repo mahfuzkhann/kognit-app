@@ -47,8 +47,9 @@ from typing import Any, Optional
 
 logger = logging.getLogger("kognit.usage")
 
-OPERATIONS = ("chat", "stream", "quiz", "title", "notes")
+OPERATIONS = ("chat", "stream", "quiz", "title", "notes", "verify")
 STATUSES = ("success", "error", "interrupted")
+ATTEMPT_KINDS = ("primary", "retry", "recovery", "fallback", "verify")
 MAX_RECORDS_PER_REQUEST = 20
 DEFAULT_PROVIDER = "gemini"
 
@@ -61,6 +62,14 @@ def slug(value, max_len: int = 64) -> Optional[str]:
         return None
     cleaned = _SLUG_RE.sub("_", str(value))[:max_len]
     return cleaned or None
+
+
+def _cost(value) -> Optional[float]:
+    """A finite, non-negative USD amount or None (never a fabricated 0)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return round(value, 6) if 0.0 <= value <= 1000.0 and value == value else None
 
 
 def _non_negative_int(value) -> Optional[int]:
@@ -198,6 +207,13 @@ def record_ai_call(
     retry_count: Optional[int] = None,
     recovery_used: bool = False,
     provider: str = DEFAULT_PROVIDER,
+    attempt_kind: Optional[str] = None,
+    task_category: Optional[str] = None,
+    route_reason: Optional[str] = None,
+    route_policy_version: Optional[str] = None,
+    fallback_from: Optional[str] = None,
+    estimated_cost_usd: Optional[float] = None,
+    pricing_version: Optional[str] = None,
 ) -> None:
     """Appends one usage record to the active collector. NEVER raises and does
     nothing when no collection is active. `usage` is the provider-neutral
@@ -226,6 +242,15 @@ def record_ai_call(
                 "error_code": slug(error_code, 64),
                 "retry_count": _non_negative_int(retry_count),
                 "recovery_used": bool(recovery_used),
+                # AI Engine 2.0 (migration 0014). Allow-listed labels / numbers only.
+                "cached_tokens": _non_negative_int(getattr(usage, "cached_tokens", None)),
+                "attempt_kind": attempt_kind if attempt_kind in ATTEMPT_KINDS else None,
+                "task_category": slug(task_category, 32),
+                "route_reason": slug(route_reason, 64),
+                "route_policy_version": slug(route_policy_version, 32),
+                "fallback_from": slug(fallback_from, 64),
+                "estimated_cost_usd": _cost(estimated_cost_usd),
+                "pricing_version": slug(pricing_version, 64),
             }
         )
     except Exception:  # noqa: BLE001 - telemetry must never affect an answer

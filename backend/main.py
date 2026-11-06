@@ -19,6 +19,7 @@ from backend.ai_engine import (
     stream_ai_response, GENERIC_CHAT_ERROR, generate_ai_response, generate_quiz_questions,
     generate_chat_title, MODEL_NAME, new_request_id, ERROR_INTERNAL, ERROR_STREAM_INTERRUPTED,
     MAX_PDF_CONTEXT_CHARS, QUIZ_MIN_QUESTIONS, QUIZ_MAX_QUESTIONS, sanitize_student_name,
+    ERROR_PROVIDER_UNAVAILABLE, PROVIDER_UNAVAILABLE_ERROR,
 )
 from backend.research_decision import decide_research
 from backend.research_models import normalize_grounding_metadata, research_result_to_dict
@@ -50,6 +51,9 @@ from backend.database import (
 )
 from backend import notes_engine, notes_ai, share_engine
 from backend import state_limits, quota_service, usage_telemetry
+from backend import entitlements, http_client
+from backend.ai import config as ai_config, gateway as ai_gateway, prompts as ai_prompts, verify as ai_verify
+from backend.ai import router as ai_router
 from backend import database as _database_module
 from backend.quota_service import KIND_CHAT, KIND_QUIZ, KIND_NOTES_AI
 from backend.learning_memory import detect_learning_signals, is_meaningful_signal_set, resolve_academic_context
@@ -235,7 +239,7 @@ async def _verify_supabase_token(authorization: Optional[str]) -> Tuple[str, str
         raise HTTPException(status_code=500, detail="Authentication is not configured on the server.")
 
     try:
-        async with httpx.AsyncClient(timeout=SUPABASE_AUTH_TIMEOUT_SECONDS) as client:
+        async with http_client.client(timeout=SUPABASE_AUTH_TIMEOUT_SECONDS) as client:
             resp = await client.get(
                 f"{SUPABASE_URL}/auth/v1/user",
                 headers={
@@ -628,6 +632,14 @@ async def _read_capped_image(image: UploadFile) -> bytes:
 # cheap but not free (stack memory), and Gemini's own quota is the real limit -
 # size this from staging measurements, not from hope. Capped at 1000.
 THREADPOOL_MAX_THREADS = min(state_limits._env_int("THREADPOOL_MAX_THREADS", 0, minimum=0), 1000)
+
+
+@app.on_event("shutdown")
+async def _close_pooled_http_clients() -> None:
+    """AI Engine 2.0 (D-9): pooled Supabase HTTP clients are closed on shutdown."""
+    closed = await http_client.aclose_all()
+    if closed:
+        logger.info("closed %d pooled http client(s)", closed)
 
 
 @app.on_event("startup")
@@ -1410,9 +1422,10 @@ async def chat_stream_endpoint(
     # the refund decision is made right now by settle_on_exception (it still
     # honours "never refund after text delivery" - none can have been sent yet).
     async with usage_telemetry.settle_on_exception(usage):
-        (user_class, stream_value), student_name = await asyncio.gather(
+        (user_class, stream_value), student_name, curriculum = await asyncio.gather(
             _get_academic_context(user_token=user_token, user_id=user_id),
             _get_student_display_name(user_token=user_token, user_id=user_id),
+            _get_curriculum(user_token, user_id),
         )
 
         research_decision = decide_research(prompt)
@@ -1449,6 +1462,22 @@ async def chat_stream_endpoint(
         grounding = None
         terminal_sent = False
 
+        # AI Engine 2.0: bounded concurrent generations + bounded queue. Over the limit the
+        # student gets the same calm "busy, try again" message as a provider overload, and
+        # because no text was produced the chat unit is given back (force_refund).
+        admitted = False
+        try:
+            await ai_gateway.admission.acquire()
+            admitted = True
+        except ai_gateway.Overloaded:
+            logger.warning("request_id=%s generation admission refused (in-flight=%d queued=%d)",
+                           request_id, ai_gateway.admission.inflight, ai_gateway.admission.queued)
+            terminal_sent = True
+            usage.force_refund = True
+            usage.mark_stream_finished()
+            yield _line({"type": "error", "reply": PROVIDER_UNAVAILABLE_ERROR, "code": ERROR_PROVIDER_UNAVAILABLE})
+            return
+
         try:
             # stream_ai_response is a synchronous generator wrapping a blocking
             # SDK call. iterate_in_threadpool keeps it off the event loop, the
@@ -1468,6 +1497,8 @@ async def chat_stream_endpoint(
                 enable_research=enable_research,
                 request_id=request_id,
                 student_name=student_name,
+                plan=quota_decision.plan,
+                curriculum=curriculum,
             )
 
             async for chunk in iterate_in_threadpool(gen):
@@ -1574,6 +1605,18 @@ async def chat_stream_endpoint(
 
             terminal_sent = True
             usage.mark_stream_finished()
+            # AI Engine 2.0 SHADOW verification (D-8): scheduled as an independent task AFTER the
+            # answer is final. It cannot delay or change what the student receives; its verdict
+            # only goes to the usage table. A no-op unless AI_VERIFY_MODE=shadow.
+            try:
+                ai_verify.schedule_shadow(
+                    question=prompt, answer=final_text, request_id=request_id,
+                    task_category=ai_router.classify_task(prompt, user_class, stream_value),
+                    user_id=user_id, user_token=user_token,
+                    saver=usage_telemetry.save_ai_usage_events,
+                )
+            except Exception:  # noqa: BLE001 - verification must never affect the answer
+                logger.warning("request_id=%s shadow verification scheduling failed", request_id)
             yield _line({"type": "done", "reply": final_text, "research": research_payload})
 
         except Exception:
@@ -1592,6 +1635,9 @@ async def chat_stream_endpoint(
                 else:
                     usage.force_refund = True  # failed with no usable text: give the chat back
                     yield _line({"type": "error", "reply": GENERIC_CHAT_ERROR, "code": ERROR_INTERNAL})
+        finally:
+            if admitted:
+                ai_gateway.admission.release()
 
     return StreamingResponse(
         event_stream(),
@@ -1692,7 +1738,26 @@ async def chat_title_endpoint(
     return {"title": title}
 
 
-async def _enforce_notes_ai_quota(usage, user_id: str, user_token: str) -> None:
+async def _plan_for_gating(user_token: str) -> str:
+    """The caller's plan from the database (never from the client). Fails closed
+    with the same safe 503 as the quota layer when it cannot be determined."""
+    try:
+        return await quota_service.get_plan(user_token)
+    except quota_service.QuotaUnavailable:
+        logger.error("plan lookup unavailable - feature gating failing closed")
+        raise quota_service.unavailable_http_exception()
+
+
+async def _require_plan_feature(user_token: str, feature: str) -> str:
+    """Server-side Pro gate. PLAN_GATING=off is the documented rollback."""
+    if ai_config.plan_gating_mode() == "off":
+        return "unmetered"
+    plan = await _plan_for_gating(user_token)
+    entitlements.require_feature(plan, feature)
+    return plan
+
+
+async def _enforce_notes_ai_quota(usage, user_id: str, user_token: str, kind: str = KIND_NOTES_AI) -> None:
     """Counts ONE AI operation against the separate Notes/title meter (kind
     "notes_ai") in the database BEFORE any provider call, and attaches the
     secret refund ticket to this request's collector. Raises the same stable
@@ -1702,7 +1767,7 @@ async def _enforce_notes_ai_quota(usage, user_id: str, user_token: str) -> None:
     usage.bind(user_id, user_token)
     ledger_id = quota_service.new_ledger_request_id()
     usage.request_id = ledger_id
-    decision, usage.refund_ticket = await quota_service.enforce_quota(user_token, KIND_NOTES_AI, ledger_id)
+    decision, usage.refund_ticket = await quota_service.enforce_quota(user_token, kind, ledger_id)
     usage.plan = decision.plan
 
 
@@ -2120,11 +2185,37 @@ async def get_profile_endpoint(
     return {"profile": profile}
 
 
+def _validate_profile_curriculum(value: str):
+    """AI Engine 2.0 (D-7): only the two approved NCTB mediums. Empty means
+    'not provided' (an existing value is kept); anything else is rejected -
+    Cambridge/Edexcel are deliberately not selectable yet."""
+    cleaned = (value or "").strip()
+    if not cleaned:
+        return None
+    if cleaned not in ai_prompts.SUPPORTED_CURRICULA:
+        raise HTTPException(status_code=422, detail="Please choose NCTB Bangla Medium or NCTB English Version.")
+    return cleaned
+
+
+async def _get_curriculum(user_token: str, user_id: str):
+    """The student's saved curriculum medium, or None. Only read when the v2 context builder is on
+    (one extra profile read, which is why it is flag-gated). Never guessed, never client-supplied."""
+    if ai_config.context_builder_mode() != "v2":
+        return None
+    try:
+        profile = await get_student_profile(user_token=user_token, user_id=user_id)
+    except DatabaseError:
+        logger.warning("curriculum lookup failed - the AI is told the medium is not recorded")
+        return None
+    return ai_prompts.normalize_curriculum((profile or {}).get("curriculum"))
+
+
 @app.put("/api/profile")
 async def update_profile_endpoint(
     name: str = Form(...),
     user_class: str = Form(...),
     stream: str = Form(""),
+    curriculum: str = Form(""),
     user_and_token: Tuple[str, str] = Depends(get_current_user_and_token),
 ):
     """
@@ -2154,7 +2245,7 @@ async def update_profile_endpoint(
     clean_name = _validate_profile_name(name)
     clean_class = _validate_profile_class(user_class)
     clean_stream = _validate_profile_stream(clean_class, stream)
-
+    clean_curriculum = _validate_profile_curriculum(curriculum)
     try:
         profile = await upsert_student_profile(
             user_token=user_token,
@@ -2162,6 +2253,7 @@ async def update_profile_endpoint(
             name=clean_name,
             user_class=clean_class,
             stream=clean_stream,
+            **({"curriculum": clean_curriculum} if clean_curriculum else {}),
         )
     except DatabaseError:
         logger.exception(
@@ -2205,6 +2297,8 @@ async def profile_topics_endpoint(
     cheap, RLS-scoped database read, unlike /api/chat, /api/chat/title,
     and /api/quiz/generate (see the rate-limiting module comment above).
     """
+    _gate_user_id, _gate_token = user_and_token
+    await _require_plan_feature(_gate_token, entitlements.LEARNING_MATRIX)
     user_id, user_token = user_and_token
 
     try:
@@ -2379,6 +2473,8 @@ async def profile_insights_endpoint(
     No Gemini call, no rate limiting needed here - same reasoning as
     profile_topics_endpoint: a simple, cheap, RLS-scoped database read.
     """
+    _gate_user_id, _gate_token = user_and_token
+    await _require_plan_feature(_gate_token, entitlements.LEARNING_INSIGHTS)
     user_id, user_token = user_and_token
 
     try:
@@ -2436,6 +2532,8 @@ async def profile_snapshot_endpoint(
     profile_topics_endpoint/profile_insights_endpoint: two simple, cheap,
     RLS-scoped database reads plus a pure in-process combination.
     """
+    _gate_user_id, _gate_token = user_and_token
+    await _require_plan_feature(_gate_token, entitlements.LEARNING_SNAPSHOT)
     user_id, user_token = user_and_token
 
     try:
@@ -2505,6 +2603,8 @@ async def profile_mistakes_endpoint(
     every other /api/profile/* endpoint: a bounded, cheap, RLS-scoped
     database read plus a pure in-process computation.
     """
+    _gate_user_id, _gate_token = user_and_token
+    await _require_plan_feature(_gate_token, entitlements.LEARNING_MISTAKES)
     user_id, user_token = user_and_token
 
     try:
@@ -2563,6 +2663,8 @@ async def profile_next_steps_endpoint(
     RLS-scoped database reads (already paid for elsewhere in the profile
     surface) plus a pure in-process computation.
     """
+    _gate_user_id, _gate_token = user_and_token
+    await _require_plan_feature(_gate_token, entitlements.LEARNING_NEXT_STEPS)
     user_id, user_token = user_and_token
 
     try:
@@ -2896,8 +2998,18 @@ async def _generate_study_material(
     if note.get(column) and not regenerate:
         return _notes_json({column: note[column], "note": note, "regenerated": False})
 
+    # AI Engine 2.0 (D-4): study material from notes is a Pro feature. Checked AFTER the
+    # stored-material shortcut above (already-generated material stays readable) and BEFORE any
+    # rate-limit/quota unit or provider call is spent. A note-generated quiz spends the same
+    # QUIZ allowance as an ordinary quiz; flashcards spend the notes_ai meter.
+    # Tag suggestion (column None) is NOT gated: Free students keep basic note tooling.
+    feature = {"mini_quiz": entitlements.NOTE_QUIZ, "flashcards": entitlements.NOTE_FLASHCARDS}.get(column)
+    meter = KIND_NOTES_AI
+    if feature is not None:
+        gate_plan = await _require_plan_feature(user_token, feature)
+        meter = entitlements.quota_kind_for(feature, gate_plan)
     _check_rate_limit(user_id, "notes_ai")
-    await _enforce_notes_ai_quota(usage, user_id, user_token)  # Q-05: DB meter, before the provider
+    await _enforce_notes_ai_quota(usage, user_id, user_token, kind=meter)  # Q-05: DB meter, before the provider
     async with usage_telemetry.settle_on_exception(usage):
         try:
             material = await run_in_threadpool(generator, note["content_md"], note.get("question_md"))

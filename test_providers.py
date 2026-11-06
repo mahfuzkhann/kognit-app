@@ -703,10 +703,12 @@ class TestPolicyStreamingOverMock:
         assert mock.call_count == ai_engine.MAX_ATTEMPTS and sleeps == []
         assert t.error_code == ai_engine.ERROR_PROVIDER_TIMEOUT and t.text == ai_engine.GENERIC_CHAT_ERROR
 
-    def test_unknown_and_unwrapped_errors_are_retried_with_backoff(self, use_mock, sleeps):
+    def test_unknown_and_unwrapped_errors_are_retried_once_with_backoff(self, use_mock, sleeps):
+        # AI Engine 2.0: an unclassified error is retried ONCE (2 attempts total); the
+        # AI_GATEWAY=legacy rollback keeps the earlier 3 (see test_provider_resilience.py).
         mock = use_mock(raising_attempt(RuntimeError("bug")))
         t = _terminal(_stream())
-        assert mock.call_count == 3 and len(sleeps) == 2 and t.error_code == ai_engine.ERROR_INTERNAL
+        assert mock.call_count == 2 and len(sleeps) == 1 and t.error_code == ai_engine.ERROR_INTERNAL
 
     def test_safety_block_and_max_tokens_and_empty(self, use_mock, sleeps):
         use_mock(safety_block_attempt())

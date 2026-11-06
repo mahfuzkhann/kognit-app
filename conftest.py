@@ -40,6 +40,22 @@ def _no_real_backoff_sleep(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_ai_engine_state():
+    """AI Engine 2.0 keeps two pieces of PROCESS-WIDE state on purpose (the retry
+    budget and the model health tracker). Production wants them to persist across
+    requests; tests must not leak them into each other, or one test's simulated
+    outage would starve the next test's retries."""
+    try:
+        from backend.ai import gateway, health
+    except Exception:
+        yield
+        return
+    gateway.retry_budget.reset()
+    health.tracker.reset()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def usage_writes(monkeypatch):
     """Keeps quotas off and captures (never sends) usage rows for every test.
     Returns the list the fake writer appends to."""

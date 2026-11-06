@@ -50,7 +50,7 @@ ROW = {
     "duration_ms": 100, "ttft_ms": 20, "status": "success", "error_code": None, "retry_count": 0,
     "recovery_used": False,
     # things that must never be sent to the database:
-    "user_id": "someone-else", "estimated_cost_usd": 99, "pricing_version": "forged", "created_at": "2000-01-01",
+    "user_id": "someone-else", "created_at": "2000-01-01",
     "prompt": "SECRET STUDENT PROMPT",
 }
 
@@ -67,9 +67,22 @@ class TestBackendWriter:
         monkeypatch.setenv("USAGE_WRITE_KEY", KEY)
         run(real_writer.save_ai_usage_events("student-token", "user-1", [dict(ROW)]))
         sent = rpc_log[0]["params"]["p_events"][0]
-        for forbidden in ("user_id", "plan", "estimated_cost_usd", "pricing_version", "created_at", "prompt"):
+        for forbidden in ("user_id", "plan", "created_at", "prompt"):
             assert forbidden not in sent
         assert sent["input_tokens"] == 10 and sent["operation"] == "stream"
+        # AI Engine 2.0 (migration 0014): cost is allowed on the wire because verified prices
+        # now exist, but a row that carries no cost must never get one invented for it.
+        assert sent.get("estimated_cost_usd") is None and sent.get("pricing_version") is None
+
+    def test_cost_fields_pass_through_only_when_the_row_has_them(self, real_writer, rpc_log, monkeypatch):
+        monkeypatch.setenv("USAGE_WRITE_KEY", KEY)
+        row = dict(ROW, estimated_cost_usd=0.0012, pricing_version="gemini-paid-standard-2026-11-03",
+                   attempt_kind="recovery", task_category="mathematics")
+        run(real_writer.save_ai_usage_events("student-token", "user-1", [row]))
+        sent = rpc_log[0]["params"]["p_events"][0]
+        assert sent["estimated_cost_usd"] == 0.0012
+        assert sent["pricing_version"] == "gemini-paid-standard-2026-11-03"
+        assert sent["attempt_kind"] == "recovery" and sent["task_category"] == "mathematics"
 
     def test_without_a_key_nothing_is_sent_and_chat_is_unaffected(self, real_writer, rpc_log, monkeypatch, caplog):
         monkeypatch.delenv("USAGE_WRITE_KEY", raising=False)

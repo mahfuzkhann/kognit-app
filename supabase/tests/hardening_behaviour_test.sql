@@ -159,8 +159,10 @@ do $$ declare n int; begin
     jsonb_build_object('request_id','req-legit-1','provider','gemini','model','gemini-test','operation','stream','status','success',
         'attempt',1,'input_tokens',120,'output_tokens',45,'thinking_tokens',10,'total_tokens',175,'duration_ms',900,'ttft_ms',200,
         'retry_count',0,'recovery_used',false,
-        -- attempts to forge server-derived values are IGNORED, not honoured:
-        'plan','pro','user_id','00000000-0000-0000-0000-0000000000f1','estimated_cost_usd',99,'pricing_version','forged','created_at','2000-01-01')
+        -- attempts to forge server-derived identity/plan/time values are IGNORED, not honoured.
+        -- (Cost fields were also NULL-only until 0014; since verified prices exist they are accepted
+        -- from the write-key holder, bounded and typed - see engine2_behaviour_test.sql.)
+        'plan','pro','user_id','00000000-0000-0000-0000-0000000000f1','estimated_cost_usd',0.0125,'pricing_version','gemini-paid-standard-2026-11-03','created_at','2000-01-01')
   ));
   perform pg_temp.check(n = 1, 'legit write inserted one row');
 end $$;
@@ -169,7 +171,7 @@ do $$ declare r record; begin
   select * into r from public.ai_usage_events where request_id = 'req-legit-1';
   perform pg_temp.check(r.user_id = '00000000-0000-0000-0000-0000000000e1', 'user_id is the JWT user, not the payload');
   perform pg_temp.check(r.plan = 'free', 'plan derived server-side (payload said pro)');
-  perform pg_temp.check(r.estimated_cost_usd is null and r.pricing_version is null, 'cost columns cannot be supplied');
+  perform pg_temp.check(r.estimated_cost_usd = 0.0125 and r.pricing_version = 'gemini-paid-standard-2026-11-03', 'cost fields are stored as supplied by the authorised writer (0014)');
   perform pg_temp.check(r.created_at > now() - interval '1 minute', 'created_at is server time');
   perform pg_temp.check(r.input_tokens = 120 and r.model = 'gemini-test', 'valid fields stored');
 end $$;

@@ -75,6 +75,7 @@ async function boot({ profile = { name: "Rahman Khan", user_class: "Class 10", s
     const json = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
     backend.putHandler = putHandler || ((entries) => json(200, { profile: {
         user_id: "user-1", name: entries.name, user_class: entries.user_class, stream: entries.stream || null,
+        curriculum: entries.curriculum || null,
     } }));
 
     w.fetch = (url, opts = {}) => {
@@ -129,7 +130,15 @@ async function boot({ profile = { name: "Rahman Khan", user_class: "Class 10", s
         pick: (group, value) => { const r = api.radios(group).find((x) => x.value === value); if (!r) throw new Error(`no ${value} in ${group}`); r.click(); },
         pickClass: (v) => api.pick("profile-class-group", v),
         pickStream: (v) => api.pick("profile-stream-pills", v),
-        open: async (opts) => { w.openProfileModal(opts); await sleep(70); },
+        pickCurriculum: (v) => api.pick("profile-curriculum-pills", v),
+        // AI Engine 2.0: the curriculum medium is now a REQUIRED choice. Every pre-existing flow in this
+        // file is about class/stream/name behaviour, so open() selects a medium for them (as a student
+        // with a saved medium would have); section G opens with { keepCurriculum: true } to test the
+        // required-choice behaviour itself.
+        open: async (opts) => {
+            w.openProfileModal(opts); await sleep(70);
+            if (!(opts && opts.keepCurriculum) && !api.checked("profile-curriculum-pills")) api.pickCurriculum("nctb_bangla");
+        },
         save: async () => { const p = w.saveProfile(); await sleep(20); return p; },
         settle: () => sleep(40),
     };
@@ -185,7 +194,7 @@ console.log("\nA. Template contract");
     });
     await check("every option is a <label> wrapping a native radio, with a checkmark icon", () => {
         const choices = [...modal.querySelectorAll(".profile-choice")];
-        eq(choices.length, 10);
+        eq(choices.length, 12);          // 7 classes + 3 streams + 2 curriculum mediums (AI Engine 2.0)
         for (const c of choices) {
             eq(c.tagName, "LABEL");
             assert(c.querySelector('input[type="radio"]'), "native radio");
@@ -583,9 +592,9 @@ await check("onboarding save creates the profile with the exact class and stream
     const t = await boot({ profile: null });
     await t.settle();
     t.name.value = "Karim Uddin";
-    t.pickClass("Class 11"); t.pickStream("Commerce (ব্যবসায় শিক্ষা)");
+    t.pickClass("Class 11"); t.pickStream("Commerce (ব্যবসায় শিক্ষা)"); t.pickCurriculum("nctb_english");
     await t.save(); await t.settle();
-    eq(t.backend.puts[0].entries, { name: "Karim Uddin", user_class: "Class 11", stream: "Commerce (ব্যবসায় শিক্ষা)" });
+    eq(t.backend.puts[0].entries, { name: "Karim Uddin", user_class: "Class 11", stream: "Commerce (ব্যবসায় শিক্ষা)", curriculum: "nctb_english" });
 });
 await check("editing mode: title/subtitle/button revert to the profile wording", async () => {
     const t = await boot();
@@ -650,6 +659,77 @@ await check("touch targets are at least 44px tall", () => {
 await check("the Save button is full width with disabled styling (btn-primary base)", () => {
     assert(/\.profile-save-btn:disabled\s*\{[^}]*cursor:\s*not-allowed/s.test(PROFILE_CSS));
     assert(/\.btn-primary\s*\{[^}]*width:\s*100%/s.test(CSS), "base .btn-primary is already full width");
+});
+
+/* =============================================================
+   G. Curriculum medium (AI Engine 2.0, CEO decision D-7)
+   ============================================================= */
+console.log("\nG. Curriculum medium");
+await check("exactly the two approved NCTB mediums are offered - no Cambridge/Edexcel", async () => {
+    const t = await boot(); await t.open({ keepCurriculum: true });
+    eq(t.radios("profile-curriculum-pills").map((r) => r.value), ["nctb_bangla", "nctb_english"]);
+    eq([...t.doc.querySelectorAll("#profile-curriculum-pills .profile-choice-text")].map((e) => e.textContent),
+       ["NCTB Bangla Medium", "NCTB English Version"]);
+});
+await check("the group is an accessible radiogroup with a label and hint", async () => {
+    const t = await boot(); await t.open({ keepCurriculum: true });
+    const g = t.$("profile-curriculum-pills");
+    eq(g.getAttribute("role"), "radiogroup");
+    eq(g.getAttribute("aria-labelledby"), "profile-curriculum-label");
+    eq(g.getAttribute("aria-describedby"), "profile-curriculum-hint");
+    eq(new Set(t.radios("profile-curriculum-pills").map((r) => r.name)).size, 1, "one native radio group");
+});
+await check("a new student has NO medium selected (it is never defaulted)", async () => {
+    const t = await boot({ profile: null }); await t.settle();
+    eq(t.checked("profile-curriculum-pills"), null);
+});
+await check("saving without choosing a medium is refused with a message and sends nothing", async () => {
+    const t = await boot(); await t.open({ keepCurriculum: true });
+    t.name.value = "Rahim"; t.pickClass("Class 7");
+    t.radios("profile-curriculum-pills").forEach((r) => { r.checked = false; });
+    await t.save(); await t.settle();
+    eq(t.backend.puts.length, 0, "no PUT");
+    assert(!t.isHidden(t.error) && /curriculum/i.test(t.error.textContent), "visible curriculum error: " + t.error.textContent);
+});
+for (const medium of ["nctb_bangla", "nctb_english"]) {
+    await check(`${medium} is sent in the PUT body`, async () => {
+        const t = await boot(); await t.open({ keepCurriculum: true });
+        t.name.value = "Rahim"; t.pickClass("Class 7"); t.pickCurriculum(medium);
+        await t.save(); await t.settle();
+        eq(t.backend.puts.length, 1); eq(t.backend.puts[0].entries.curriculum, medium);
+    });
+}
+await check("choosing a medium clears the error", async () => {
+    const t = await boot(); await t.open({ keepCurriculum: true });
+    t.name.value = "Rahim"; t.pickClass("Class 7");
+    t.radios("profile-curriculum-pills").forEach((r) => { r.checked = false; });
+    await t.save();
+    assert(!t.isHidden(t.error));
+    t.pickCurriculum("nctb_english");
+    assert(t.isHidden(t.error), "error hidden after choosing");
+});
+await check("an existing profile's saved medium is pre-selected when the form opens", async () => {
+    const t = await boot({ profile: { name: "Rahim", user_class: "Class 9", stream: "Science (বিজ্ঞান)", curriculum: "nctb_english" } });
+    await t.open({ keepCurriculum: true });
+    eq(t.checked("profile-curriculum-pills"), "nctb_english");
+});
+await check("an existing profile with no (or an unsupported) medium shows none selected", async () => {
+    for (const stored of [undefined, null, "cambridge"]) {
+        const t = await boot({ profile: { name: "Rahim", user_class: "Class 9", stream: "Science (বিজ্ঞান)", curriculum: stored } });
+        await t.open({ keepCurriculum: true });
+        eq(t.checked("profile-curriculum-pills"), null, `stored=${stored}`);
+    }
+});
+await check("changing class or stream never changes the chosen medium", async () => {
+    const t = await boot(); await t.open({ keepCurriculum: true });
+    t.pickCurriculum("nctb_english"); t.pickClass("Class 10"); t.pickStream("Arts (মানবিক)"); t.pickClass("Class 6");
+    eq(t.checked("profile-curriculum-pills"), "nctb_english");
+});
+await check("after a successful save the form shows the medium the server stored", async () => {
+    const t = await boot({ profile: null }); await t.settle();
+    t.name.value = "Rahim"; t.pickClass("Class 8"); t.pickCurriculum("nctb_bangla");
+    await t.save(); await t.settle();
+    eq(t.checked("profile-curriculum-pills"), "nctb_bangla");
 });
 
 /* ============================================================ */

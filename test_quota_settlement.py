@@ -40,7 +40,13 @@ from test_pre_phase10_endpoints import _app_state, client, events, post_stream  
 class LedgerQuota:
     """In-memory model of the quota database functions, with a real ledger."""
 
-    def __init__(self, limits=None, fail_consume=False, lose_consume_response=False, fail_refund=False):
+    def __init__(self, limits=None, fail_consume=False, lose_consume_response=False, fail_refund=False,
+                 plan="pro", fail_plan=False):
+        # `plan` is what public.get_my_plan() answers (AI Engine 2.0). It defaults to an entitled
+        # student so the pre-existing notes-generation tests keep exercising the METER semantics;
+        # test_engine2_entitlements.py uses plan="free" to prove the Pro gate.
+        self.plan = plan
+        self.fail_plan = fail_plan
         self.limits = {"chat": 1, "quiz": 3, "notes_ai": 6}
         self.limits.update(limits or {})
         self.fail_consume = fail_consume
@@ -58,6 +64,10 @@ class LedgerQuota:
 
     async def rpc(self, user_token, function, params):
         self.calls.append({"function": function, "params": dict(params), "token": user_token})
+        if function == "get_my_plan":
+            if self.fail_plan:
+                raise quota_service.QuotaUnavailable("plan lookup down")
+            return self.plan
         if function == "consume_quota":
             if self.fail_consume:
                 raise quota_service.QuotaUnavailable("down before any record exists")

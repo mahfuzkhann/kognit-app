@@ -1143,9 +1143,14 @@ function updateProfileStreamVisibility(selectedClass) {
 
 // Reflects a profile-shaped object in the form. Used to open the form and,
 // after a successful save, to show exactly what the server stored.
-function _applyProfileSelection(userClass, stream) {
+const PROFILE_CURRICULA = new Set(["nctb_bangla", "nctb_english"]);
+
+function _applyProfileSelection(userClass, stream, curriculum) {
     const exact = PROFILE_EXACT_CLASSES.has(userClass);
     _setProfileRadio("profile-class-group", exact ? userClass : null);
+    // AI Engine 2.0: the medium is never defaulted. An unrecorded (or unsupported) value
+    // leaves both options unselected so the student must choose.
+    _setProfileRadio("profile-curriculum-pills", PROFILE_CURRICULA.has(curriculum) ? curriculum : null);
     _setProfileRadio("profile-stream-pills", stream || null);
     updateProfileStreamVisibility(exact ? userClass : null);
     document.getElementById("profile-class-hint").textContent =
@@ -1158,6 +1163,10 @@ window.selectProfileClass = function(radio) {
 };
 
 window.selectProfileStream = function() {
+    _hideProfileError();
+};
+
+window.selectProfileCurriculum = function() {
     _hideProfileError();
 };
 
@@ -1205,7 +1214,7 @@ window.openProfileModal = function(opts = {}) {
 
     if (currentProfile) {
         nameInput.value = currentProfile.name;
-        _applyProfileSelection(currentProfile.user_class, currentProfile.stream);
+        _applyProfileSelection(currentProfile.user_class, currentProfile.stream, currentProfile.curriculum);
     } else {
         // GOOGLE SIGN-IN NAME PREFILL: Supabase's Google OAuth provider
         // populates user_metadata.full_name (and usually .name) - prefill
@@ -1217,7 +1226,7 @@ window.openProfileModal = function(opts = {}) {
         nameInput.value = meta.full_name || meta.name || "";
         // With seven exact classes there is no sensible default to
         // pre-select, so a new student chooses one deliberately.
-        _applyProfileSelection(null, null);
+        _applyProfileSelection(null, null, null);
     }
 
     setTimeout(() => nameInput.focus(), 50);
@@ -1252,6 +1261,12 @@ window.saveProfile = async function() {
         return;
     }
 
+    const selectedCurriculum = _getSelectedProfileValue("profile-curriculum-pills");
+    if (!selectedCurriculum) {
+        _showProfileError("Please select your curriculum (NCTB Bangla Medium or English Version).", _profileRadios("profile-curriculum-pills")[0]);
+        return;
+    }
+
     // Only Classes 9-12 have a stream; for 6-8 send an empty value rather
     // than a stream the curriculum doesn't have. Every Class 9-12 requires one.
     const needsStream = PROFILE_STREAM_CLASSES.has(selectedClass);
@@ -1271,6 +1286,7 @@ window.saveProfile = async function() {
     formData.append("name", name);
     formData.append("user_class", selectedClass);
     formData.append("stream", selectedStream);
+    formData.append("curriculum", selectedCurriculum);
 
     _profileSaveInFlight = true;
     saveBtn.disabled = true;
@@ -1302,7 +1318,7 @@ window.saveProfile = async function() {
         renderProfileTrigger();
 
         if (!document.getElementById("profile-modal").classList.contains("hidden")) {
-            _applyProfileSelection(data.profile.user_class, data.profile.stream);
+            _applyProfileSelection(data.profile.user_class, data.profile.stream, data.profile.curriculum);
             nameInput.value = data.profile.name;
             _setProfileStatus("Profile saved.");
             confirmationShowing = true;

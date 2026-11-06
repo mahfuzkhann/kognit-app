@@ -61,6 +61,9 @@ _EVENT_FIELDS = (
     "request_id", "provider", "model", "operation", "attempt", "input_tokens",
     "output_tokens", "thinking_tokens", "total_tokens", "duration_ms", "ttft_ms",
     "status", "error_code", "retry_count", "recovery_used",
+    # AI Engine 2.0 (migration 0014)
+    "cached_tokens", "attempt_kind", "task_category", "route_reason", "route_policy_version",
+    "fallback_from", "verification_status", "estimated_cost_usd", "pricing_version",
 )
 
 _warned_missing_key = False

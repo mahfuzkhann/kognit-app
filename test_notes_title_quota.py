@@ -103,14 +103,17 @@ class TestEachRouteUsesTheNotesMeter:
         assert resp.status_code == 200 and resp.json()["regenerated"] is True
         assert kinds(ledger) == ["notes_ai"] and ledger.live("chat") == 0
 
-    def test_mini_quiz_consumes_notes_ai_only(self, client, db, monkeypatch):
+    def test_mini_quiz_consumes_the_quiz_allowance_not_notes_ai(self, client, db, monkeypatch):
+        # AI Engine 2.0 (CEO decision D-4): "Note-generated quizzes count toward the same
+        # 15-quiz daily allowance". This replaces the earlier rule that a note quiz spent
+        # the notes_ai meter; the isolation guarantee (chat untouched) is kept.
         ledger = use_ledger(monkeypatch)
         as_user(ALICE)
         note = save(client)
         with provider_text(json.dumps(QUIZ)):
             resp = client.post(f"/api/notes/{note['id']}/mini-quiz", json={})
         assert resp.status_code == 200
-        assert kinds(ledger) == ["notes_ai"] and ledger.live("quiz") == 0
+        assert kinds(ledger) == ["quiz"] and ledger.live("notes_ai") == 0 and ledger.live("chat") == 0
 
     def test_the_main_chat_meter_is_not_affected_by_notes_use(self, client, db, monkeypatch):
         ledger = use_ledger(monkeypatch, limits={"chat": 1, "notes_ai": 6})
@@ -142,14 +145,16 @@ class TestExhaustionPreventsProviderCalls:
         ("suggest-tags", None), ("flashcards", {}), ("mini-quiz", {}),
     ])
     def test_notes_routes_over_quota_never_call_the_provider(self, client, db, monkeypatch, path, payload):
-        use_ledger(monkeypatch, limits={"notes_ai": 0})
+        # A note-generated quiz spends the QUIZ allowance (AI Engine 2.0); the other routes spend notes_ai.
+        meter = "quiz" if path == "mini-quiz" else "notes_ai"
+        use_ledger(monkeypatch, limits={meter: 0})
         as_user(ALICE)
         note = save(client)
         generate = MagicMock(return_value=MagicMock(text="[]"))
         with stub_ai(generate=generate):
             resp = client.post(f"/api/notes/{note['id']}/{path}", **({"json": payload} if payload is not None else {}))
         assert resp.status_code == 429 and resp.json()["detail"]["code"] == "QUOTA_EXCEEDED"
-        assert resp.json()["detail"]["kind"] == "notes_ai"
+        assert resp.json()["detail"]["kind"] == meter
         generate.assert_not_called()
 
     def test_the_limit_is_exhausted_after_exactly_n_successes(self, client, db, monkeypatch):

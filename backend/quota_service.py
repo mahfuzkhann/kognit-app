@@ -148,7 +148,7 @@ async def _rpc(user_token: str, function: str, params: dict):
     if not database.SUPABASE_URL or not database.SUPABASE_ANON_KEY:
         raise QuotaUnavailable("supabase not configured")
     try:
-        async with httpx.AsyncClient(timeout=database.DB_REQUEST_TIMEOUT_SECONDS) as client:
+        async with http_client.client(timeout=database.DB_REQUEST_TIMEOUT_SECONDS) as client:
             resp = await client.post(
                 f"{database.SUPABASE_URL}/rest/v1/rpc/{function}",
                 headers=database._rest_headers(user_token),
@@ -165,6 +165,20 @@ async def _rpc(user_token: str, function: str, params: dict):
         return resp.json()
     except ValueError as exc:
         raise QuotaUnavailable("non-json response") from exc
+
+
+async def get_plan(user_token: str) -> str:
+    """The caller's current plan ('free' | 'pro') from public.get_my_plan()
+    (migration 0014), which reads public.subscriptions for the verified JWT
+    identity. QUOTA_MODE=off -> 'unmetered' (feature gating is skipped).
+    Fails CLOSED: if the answer is not clearly 'free'/'pro' this raises
+    QuotaUnavailable, which callers map to the same safe 503 as quota."""
+    if quota_mode() == "off":
+        return PLAN_UNMETERED
+    payload = await _rpc(user_token, "get_my_plan", {})
+    if payload in ("free", "pro"):
+        return payload
+    raise QuotaUnavailable("unexpected plan response")
 
 
 def parse_decision(kind: str, payload) -> QuotaDecision:

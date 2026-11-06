@@ -12,6 +12,12 @@ from typing import Optional
 from PIL import Image
 from dotenv import load_dotenv
 from backend import usage_collector
+from backend.ai import config as _ai_config
+from backend.ai import cost as _cost
+from backend.ai import gateway as _gateway
+from backend.ai import prompts as _prompts
+from backend.ai import registry as _registry
+from backend.ai import router as _router
 
 load_dotenv()
 
@@ -481,6 +487,10 @@ MAX_ATTEMPTS_BUCKET_A = 2
 # outage window rather than isolated transient errors, which a bounded
 # retry count cannot fix.
 MAX_ATTEMPTS_BUCKET_B = 3
+# AI ENGINE 2.0 (audit F-08): an UNCLASSIFIED error (anything the provider layer could not
+# map to a known kind - possibly a programming error) is retried at most ONCE. Timeouts and
+# connect failures keep the full MAX_ATTEMPTS.
+MAX_ATTEMPTS_UNKNOWN = 2
 
 # Kept as the overall per-request loop bound (must be >= the largest of the
 # two bucket-specific ceilings above so bucket B can actually use its full
@@ -803,6 +813,54 @@ class _ChatRequestBuildError(Exception):
 
 
 @dataclass
+class _Engine2State:
+    """Per-request AI Engine 2.0 state: the routing decision, the model actually
+    used (which an in-provider fallback may change), and the governor."""
+    route: Optional["_router.RouteDecision"]
+    router_mode: str
+    model_id: str
+    thinking_level: Optional[str]
+    governor: "_gateway.AttemptGovernor"
+    needs_inputs: tuple
+
+
+def _thinking_for_model(model_id: str, route) -> Optional[str]:
+    """The thinking level to send for a (possibly fallback) model. Only levels
+    the registry knows the model accepts are ever sent."""
+    spec = _registry.model_for_id(model_id)
+    if spec is None:
+        return CHAT_THINKING_LEVEL            # legacy / operator-set model: unchanged behaviour
+    wanted = None
+    if spec.role == _registry.ROLE_ADVANCED:
+        wanted = _router._ADVANCED_THINKING.get(route.task_category if route else _router.CAT_GENERAL, "low")
+    return _registry.thinking_level_for(spec, wanted)
+
+
+def _engine2_start(*, prompt, user_class, stream, plan, has_image, has_pdf, request_id,
+                   operation: str = None) -> "_Engine2State":
+    """Decide the route and build the governor.
+    static -> legacy model, route not computed (no behaviour change at all)
+    shadow -> route computed and logged, legacy model still used
+    policy -> the routed model and thinking level are used"""
+    mode = _ai_config.router_mode()
+    route = None
+    model_id, thinking = MODEL_NAME, CHAT_THINKING_LEVEL
+    if mode in ("shadow", "policy"):
+        route = _router.route(_router.RouteInput(
+            operation=operation or _router.OP_CHAT, plan=plan or "free", user_class=user_class,
+            stream=stream, prompt=prompt or "", has_image=has_image, has_document=has_pdf,
+            request_id=request_id or "",
+        ))
+        if mode == "policy":
+            model_id, thinking = route.model_id, route.thinking_level
+    role = _registry.role_for_model_id(model_id) or _registry.ROLE_GENERAL
+    governor = _gateway.AttemptGovernor(request_id or "", model_id=model_id, role=role)
+    needs = tuple(n for n, present in (("image", has_image), ("pdf", has_pdf)) if present)
+    return _Engine2State(route=route, router_mode=mode, model_id=model_id, thinking_level=thinking,
+                         governor=governor, needs_inputs=needs)
+
+
+@dataclass
 class _ChatRequest:
     """Everything needed to issue one chat call, streaming or not, in
     provider-neutral form (see backend.providers.ProviderRequest)."""
@@ -888,6 +946,8 @@ def _build_chat_request(
     pdf_context: str,
     history: Optional[list],
     student_name: Optional[str] = None,
+    curriculum: Optional[str] = None,
+    task_category: Optional[str] = None,
 ) -> "_ChatRequest":
     """Build the system instruction, contents and history for a chat call.
 
@@ -910,8 +970,15 @@ def _build_chat_request(
     else:
         academic_clause = "at the secondary/higher-secondary level"
 
+    # AI ENGINE 2.0 context builder v2 (flag AI_CONTEXT_BUILDER=v2): curriculum comes from the
+    # student's verified profile, layered prompt blocks replace the one-line Socratic suffix,
+    # and an uploaded document is passed as delimited UNTRUSTED USER content - never inside
+    # the system instruction. In the default 'legacy' mode nothing below changes.
+    _v2 = _ai_config.context_builder_mode() == "v2"
+    board_label = _prompts.curriculum_label(curriculum) if _v2 else board
+    doc_block = None
     system_instruction = (
-        f"You are Kloriz, an expert academic AI tutor for students in {board}, {academic_clause}.\n"
+        f"You are Kloriz, an expert academic AI tutor for students in {board_label}, {academic_clause}.\n"
         + CHAT_SYSTEM_INSTRUCTION_RULES
     )
 
@@ -920,7 +987,7 @@ def _build_chat_request(
     # valid name.
     system_instruction += _build_student_profile_block(student_name)
 
-    if pdf_context:
+    if pdf_context and not _v2:
         pdf_total_chars = len(pdf_context)
         pdf_context_used = pdf_context[:MAX_PDF_CONTEXT_CHARS]
         pdf_was_truncated = pdf_total_chars > MAX_PDF_CONTEXT_CHARS
@@ -971,7 +1038,19 @@ def _build_chat_request(
                 "that part.]"
             )
 
-    if mode == "socratic":
+    if pdf_context and _v2:
+        doc_block, _doc_used, _doc_total, _doc_truncated = _prompts.build_document_block(pdf_context)
+        if _doc_truncated:
+            logger.warning(
+                "context_builder_v2: document truncated total_chars=%d used_chars=%d (mode=%s)",
+                _doc_total, _doc_used, mode,
+            )
+    if _v2:
+        system_instruction += _prompts.build_layers(
+            curriculum=curriculum, user_class=user_class, task_category=task_category or _router.CAT_GENERAL,
+            mode=mode, has_document=bool(pdf_context),
+        )
+    elif mode == "socratic":
         system_instruction += " DO NOT give direct answers immediately. Guide the student step-by-step using helpful questions!"
 
     # Image decoding: unaffected by the SDK migration. PIL Images are
@@ -1012,6 +1091,8 @@ def _build_chat_request(
         user_parts.append(img)
     logger.info("generate_ai_response timing: image_decode=%.3fs", time.perf_counter() - t_stage_start)
 
+    if doc_block:
+        user_parts.append(doc_block)
     user_parts.append(prompt if prompt else "Please analyze this request based on the context.")
 
     # CHAT-04: history is built once - identical on every retry attempt below.
@@ -1707,6 +1788,8 @@ def stream_ai_response(
     enable_research: bool = False,
     request_id: Optional[str] = None,
     student_name: Optional[str] = None,
+    plan: str = "free",
+    curriculum: Optional[str] = None,
 ):
     """Streaming counterpart of generate_ai_response().
 
@@ -1788,21 +1871,42 @@ def stream_ai_response(
     retries_granted = 0
     usage = None  # last provider-reported usage; read by _telemetry below
 
+    # AI ENGINE 2.0: routing decision + per-request governor. In the default
+    # 'static' router mode the model is exactly the legacy MODEL_NAME and the
+    # route is only computed for telemetry (shadow) - see backend/ai/*.
+    st = _engine2_start(
+        prompt=prompt, user_class=user_class, stream=stream, plan=plan,
+        has_image=bool(image_bytes), has_pdf=bool(pdf_context), request_id=request_id,
+    )
+    governor = st.governor
+    attempt_kind_now = "primary"
+    fallback_marked = False
+
     def _telemetry(outcome, attempt, *, finish_reason=None, exc=None, http_status=None,
                    error_code=None, complete=False):
         # One place that adds request_id/error_code to the per-request
         # summary line. Reads the live loop state at call time.
-        if outcome != "recovery_triggered":  # non-terminal: the recovery attempt records its own outcome
-            usage_collector.record_ai_call(
-                operation="stream",
-                status=("success" if outcome == "success"
-                        else "interrupted" if outcome.startswith("interrupted") else "error"),
-                model=MODEL_NAME, usage=usage,
-                duration_seconds=time.perf_counter() - t_stream_start,
-                ttft_seconds=ttft_seconds, attempt=attempt, retry_count=retries_granted,
-                recovery_used=recovery_used,
-                error_code=error_code or (_exception_type_name(exc) if exc is not None else None),
-            )
+        # AI ENGINE 2.0 (audit F-02): EVERY provider attempt is recorded, including the
+        # partial attempt discarded by a recovery - it consumed provider tokens and
+        # time even though its text was thrown away. Its row is marked 'interrupted'.
+        _est = _cost.estimate(st.model_id, usage)
+        usage_collector.record_ai_call(
+            operation="stream",
+            status=("success" if outcome == "success"
+                    else "interrupted" if (outcome.startswith("interrupted") or outcome == "recovery_triggered")
+                    else "error"),
+            model=st.model_id, usage=usage,
+            duration_seconds=time.perf_counter() - t_stream_start,
+            ttft_seconds=ttft_seconds, attempt=attempt, retry_count=retries_granted,
+            recovery_used=recovery_used,
+            error_code=error_code or (_exception_type_name(exc) if exc is not None else None),
+            attempt_kind=attempt_kind_now,
+            task_category=st.route.task_category if st.route else None,
+            route_reason=st.route.reason if st.route else None,
+            route_policy_version=st.route.policy_version if st.route else None,
+            fallback_from=governor.fell_back_from,
+            estimated_cost_usd=_est.usd, pricing_version=_est.pricing_version,
+        )
         _log_stream_telemetry(
             outcome=outcome, mode=mode, attempt=attempt,
             ttft_seconds=ttft_seconds, chunk_count=chunk_count,
@@ -1818,9 +1922,11 @@ def stream_ai_response(
     logger.info(
         "request_id=%s stream_ai_response start model=%s mode=%s has_image=%s has_pdf=%s "
         "history_len=%d research=%s",
-        request_id, MODEL_NAME, mode, bool(image_bytes), bool(pdf_context),
+        request_id, st.model_id, mode, bool(image_bytes), bool(pdf_context),
         len(history or []), enable_research,
     )
+    if st.route is not None:
+        logger.info("request_id=%s router_mode=%s %s", request_id, st.router_mode, st.route.log_fields())
 
     try:
         req = _build_chat_request(
@@ -1833,6 +1939,8 @@ def stream_ai_response(
             pdf_context=pdf_context,
             history=history,
             student_name=student_name,
+            curriculum=curriculum,
+            task_category=st.route.task_category if st.route else None,
         )
     except _ChatRequestBuildError as exc:
         logger.warning(
@@ -1856,6 +1964,27 @@ def stream_ai_response(
             AI_REQUEST_TIMEOUT_SECONDS if (attempt == 1 or is_recovery_attempt)
             else RETRY_REQUEST_TIMEOUT_SECONDS
         )
+        # AI ENGINE 2.0: the per-attempt timeout can never exceed what is left of the
+        # overall request deadline (per-phase SDK timeouts alone cannot bound it).
+        capped = governor.attempt_timeout(attempt_timeout)
+        if capped is None:
+            logger.warning("request_id=%s request deadline reached before attempt %d", request_id, attempt)
+            usage_collector.record_ai_call(
+                operation="stream", status="error", model=st.model_id,
+                error_code=ERROR_PROVIDER_TIMEOUT, attempt=attempt, retry_count=retries_granted,
+                recovery_used=recovery_used, attempt_kind=attempt_kind_now,
+            )
+            yield StreamChunk(kind="error", text=GENERIC_CHAT_ERROR, error_code=ERROR_PROVIDER_TIMEOUT)
+            return
+        attempt_timeout = capped
+        if is_recovery_attempt:
+            attempt_kind_now = "recovery"
+        elif attempt > 1:
+            if governor.fell_back_from and not fallback_marked:
+                attempt_kind_now, fallback_marked = "fallback", True
+            else:
+                attempt_kind_now = "retry"
+        t_provider_call = time.perf_counter()
 
         # Built fresh each attempt (cheap, local) so the per-attempt timeout
         # is always the one in effect. The SAME frozen `req` content goes into
@@ -1864,9 +1993,9 @@ def stream_ai_response(
             system_instruction=req.system_instruction,
             user_parts=req.user_parts,
             history=req.history,
-            model=MODEL_NAME,
+            model=st.model_id,
             timeout_seconds=attempt_timeout,
-            reasoning_effort=CHAT_THINKING_LEVEL,
+            reasoning_effort=st.thinking_level,
             enable_web_search=enable_research,
             request_id=request_id,
         )
@@ -1881,7 +2010,7 @@ def stream_ai_response(
 
         logger.info(
             "request_id=%s provider attempt=%d/%d model=%s timeout=%ds recovery_attempt=%s",
-            request_id, attempt, MAX_ATTEMPTS, MODEL_NAME, attempt_timeout, is_recovery_attempt,
+            request_id, attempt, MAX_ATTEMPTS, st.model_id, attempt_timeout, is_recovery_attempt,
         )
 
         try:
@@ -1899,9 +2028,15 @@ def stream_ai_response(
                 if piece:
                     if not produced_any_text:
                         ttft_seconds = time.perf_counter() - t_stream_start
+                        governor.mark_first_token()
                     produced_any_text = True
                     collected.append(piece)
                     yield StreamChunk(kind="text", text=piece)
+                # AI ENGINE 2.0: whole-answer wall-clock deadline, checked between events.
+                # Treated exactly like a client timeout after text (-> 'interrupted'), and
+                # the provider iterator is closed by leaving the loop via the exception.
+                if governor.expired():
+                    raise ProviderError(ProviderErrorKind.TIMEOUT)
 
                 # Grounding typically arrives on a later chunk; keep the most
                 # recent non-None one. (The adapter only produces it when web
@@ -1940,6 +2075,7 @@ def stream_ai_response(
 
             if _is_successful_finish(last_finish_reason):
                 _log_usage(usage, attempt, elapsed, mode, bool(image_bytes), bool(pdf_context))
+                governor.record_success(time.perf_counter() - t_provider_call)
                 _telemetry("success", attempt, finish_reason=last_raw_finish_reason, complete=True)
                 yield StreamChunk(
                     kind="done",
@@ -1983,6 +2119,7 @@ def stream_ai_response(
             status_code = getattr(e, "http_status", None)
             status_label = getattr(e, "status", None)
             exc_name = _exception_type_name(e)
+            governor.record_failure(kind.value, time.perf_counter() - t_provider_call)
 
             if kind == ProviderErrorKind.UNAVAILABLE:
                 # BUG 3 PHASE 2 - the confirmed-transient recovery path.
@@ -1997,7 +2134,7 @@ def stream_ai_response(
                     # run it (granting it on the final attempt would emit a
                     # "retry" event and then fall out of the loop into a
                     # generic error, discarding the partial for nothing).
-                    if not recovery_used and attempt < MAX_ATTEMPTS:
+                    if not recovery_used and attempt < MAX_ATTEMPTS and governor.allow_retry("recovery_after_partial"):
                         # Grant the ONE bounded recovery generation. The
                         # partial text collected so far is discarded
                         # completely, never concatenated - continuing this
@@ -2010,6 +2147,9 @@ def stream_ai_response(
                         recovery_used = True
                         pending_recovery = True
                         retries_granted += 1
+                        _alt = governor.maybe_switch_model(kind.value, needs_inputs=st.needs_inputs) if governor.breaker_open_for_current() else None
+                        if _alt:
+                            st.model_id, st.thinking_level = _alt, _thinking_for_model(_alt, st.route)
                         logger.warning(
                             "request_id=%s stream_ai_response transient server error AFTER first output - "
                             "triggering ONE bounded recovery generation, discarding partial "
@@ -2050,7 +2190,10 @@ def stream_ai_response(
                 # protection (same MAX_ATTEMPTS_BUCKET_B ceiling as before),
                 # with a bounded backoff between attempts. Not the recovery
                 # grant; does not set recovery_used.
-                if attempt < MAX_ATTEMPTS_BUCKET_B:
+                if attempt < MAX_ATTEMPTS_BUCKET_B and governor.allow_retry("server_error"):
+                    _alt = governor.maybe_switch_model(kind.value, needs_inputs=st.needs_inputs) if governor.breaker_open_for_current() else None
+                    if _alt:
+                        st.model_id, st.thinking_level = _alt, _thinking_for_model(_alt, st.route)
                     logger.warning(
                         "request_id=%s stream_ai_response server error attempt=%d/%d elapsed=%.3fs "
                         "http_status=%s status=%s (mode=%s) - will retry after backoff",
@@ -2098,6 +2241,15 @@ def stream_ai_response(
                 return
 
             if kind == ProviderErrorKind.RATE_LIMITED:
+                # AI ENGINE 2.0: per-model quotas are separate, so ONE attempt on the OTHER approved
+                # Gemini model is legitimate when fallback is enabled; the same model is never retried.
+                if attempt < MAX_ATTEMPTS and governor.fallback_allowed:
+                    _alt = governor.maybe_switch_model(kind.value, needs_inputs=st.needs_inputs)
+                    if _alt and governor.allow_retry("rate_limited_alternate_model"):
+                        st.model_id, st.thinking_level = _alt, _thinking_for_model(_alt, st.route)
+                        retries_granted += 1
+                        logger.warning("request_id=%s 429 on primary model - one attempt on alternate approved model", request_id)
+                        continue
                 # Known condition (quota) - a warning, not a traceback. Never retried.
                 logger.warning(
                     "request_id=%s stream_ai_response quota exhausted attempt=%d elapsed=%.3fs "
@@ -2113,7 +2265,7 @@ def stream_ai_response(
             if kind == ProviderErrorKind.CONFLICT:
                 # Bucket B (409 Aborted-equivalent) - the only non-5xx class
                 # that is retried, same as the non-streaming path.
-                if attempt < MAX_ATTEMPTS_BUCKET_B:
+                if attempt < MAX_ATTEMPTS_BUCKET_B and governor.allow_retry("conflict"):
                     logger.warning(
                         "request_id=%s stream_ai_response transient conflict http_status=%s "
                         "attempt=%d/%d elapsed=%.3fs (mode=%s) - will retry after backoff",
@@ -2153,7 +2305,8 @@ def stream_ai_response(
             # retry, up to MAX_ATTEMPTS.
             is_timeout = kind == ProviderErrorKind.TIMEOUT
             code = _error_code_for_kind(kind)
-            if attempt >= MAX_ATTEMPTS:
+            _max_for_kind = MAX_ATTEMPTS if (is_timeout or not governor.enabled) else MAX_ATTEMPTS_UNKNOWN
+            if attempt >= _max_for_kind or not governor.allow_retry("timeout" if is_timeout else "unclassified"):
                 # Final failure: the one place an unexpected exception gets
                 # its full traceback (earlier attempts log a one-line warning).
                 logger.exception(
@@ -2170,6 +2323,9 @@ def stream_ai_response(
                 request_id, attempt, MAX_ATTEMPTS, elapsed, exc_name, code, mode
             )
             retries_granted += 1
+            _alt = governor.maybe_switch_model(kind.value, needs_inputs=st.needs_inputs) if governor.breaker_open_for_current() else None
+            if _alt:
+                st.model_id, st.thinking_level = _alt, _thinking_for_model(_alt, st.route)
             if is_timeout:
                 # Our own client deadline already consumed the wait; adding a
                 # backoff on top would only lengthen the student's wait.

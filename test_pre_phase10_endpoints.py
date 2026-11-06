@@ -396,7 +396,10 @@ class TestPendingQuizBounds:
 # ===========================================================================
 
 ALLOWED_KEYS = {"request_id", "plan", "provider", "model", "operation", "attempt", "input_tokens", "output_tokens",
-                "thinking_tokens", "total_tokens", "duration_ms", "ttft_ms", "status", "error_code", "retry_count", "recovery_used"}
+                "thinking_tokens", "total_tokens", "duration_ms", "ttft_ms", "status", "error_code", "retry_count", "recovery_used",
+                # AI Engine 2.0 (migration 0014): still labels/numbers only - never prompt, answer or document text.
+                "cached_tokens", "attempt_kind", "task_category", "route_reason", "route_policy_version",
+                "fallback_from", "estimated_cost_usd", "pricing_version"}
 
 
 class TestUsageRecords:

@@ -214,13 +214,23 @@ class TestStreamBackoff:
         assert state["n"] == 3 and len(sleeps) == 2
         assert out[-1].kind == "error" and out[-1].error_code == ai_engine.ERROR_PROVIDER_UNAVAILABLE
 
-    def test_unknown_error_before_first_token_keeps_existing_retry_and_now_backs_off(self, monkeypatch, sleeps):
+    def test_unknown_error_before_first_token_is_retried_once_with_backoff(self, monkeypatch, sleeps):
+        # AI Engine 2.0 (audit F-08, CEO directive "do not retry programming errors"): an
+        # UNCLASSIFIED error gets ONE retry (MAX_ATTEMPTS_UNKNOWN total attempts), not three.
+        state = _install_sequence(monkeypatch, [([], 0, RuntimeError("boom"))])
+        out = _run()
+        assert state["n"] == ai_engine.MAX_ATTEMPTS_UNKNOWN == 2
+        assert len(sleeps) == ai_engine.MAX_ATTEMPTS_UNKNOWN - 1
+        assert out[-1].kind == "error" and out[-1].error_code == ai_engine.ERROR_INTERNAL
+        assert out[-1].text == ai_engine.GENERIC_CHAT_ERROR
+
+    def test_gateway_legacy_flag_restores_the_pre_2_0_three_attempts(self, monkeypatch, sleeps):
+        monkeypatch.setenv("AI_GATEWAY", "legacy")
         state = _install_sequence(monkeypatch, [([], 0, RuntimeError("boom"))])
         out = _run()
         assert state["n"] == ai_engine.MAX_ATTEMPTS
         assert len(sleeps) == ai_engine.MAX_ATTEMPTS - 1
-        assert out[-1].kind == "error" and out[-1].error_code == ai_engine.ERROR_INTERNAL
-        assert out[-1].text == ai_engine.GENERIC_CHAT_ERROR
+        assert out[-1].error_code == ai_engine.ERROR_INTERNAL
 
     def test_client_timeout_is_retried_without_stacking_a_backoff_on_the_wait_already_spent(self, monkeypatch, sleeps):
         state = _install_sequence(monkeypatch, [([], 0, httpx.ReadTimeout("deadline"))])

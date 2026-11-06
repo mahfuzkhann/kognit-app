@@ -1,0 +1,5 @@
+# Development / CI tooling. NOT installed in production (see requirements.txt for runtime pins).
+-r requirements.txt
+pytest>=8,<10
+pytest-asyncio>=0.23
+pip-audit>=2.7
