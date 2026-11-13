@@ -125,6 +125,8 @@
         login: "নতুন করে লগইন করুন",
         regenerate: "উত্তরটি আবার তৈরি করুন",
         viewPlans: "প্ল্যান দেখুন",
+        planRequired: "এটি Pro প্ল্যানের ফিচার।",
+        upgradeToPro: "Upgrade to Pro",
         goToLatest: "নিচে যান",
         newAnswerBelow: "নতুন উত্তর দেখুন"
     };
@@ -205,6 +207,7 @@
             return { code: "QUOTA_EXHAUSTED", text: text, action: ACTION_PLANS, actionLabel: msg("viewPlans") };
         }
         if (st && st.code === "QUOTA_UNAVAILABLE") return out("QUOTA_UNAVAILABLE", "quotaUnavailable", ACTION_RETRY, msg("retry"));
+        if (st && st.code === "PLAN_REQUIRED") return out("PLAN_REQUIRED", "planRequired", ACTION_PLANS, msg("upgradeToPro"));
         if (st && st.code === "PLAN_NOT_CONFIGURED") return out("PLAN_NOT_CONFIGURED", "planNotConfigured");
         if (st && st.code === "PDF_CONTEXT_EXPIRED") return out("PDF_EXPIRED", "pdfExpired");
 
@@ -232,8 +235,8 @@
     function openPlans() {
         try {
             if (window.KlorizProfileMenu && typeof window.KlorizProfileMenu.openAccount === "function") {
-                window.KlorizProfileMenu.openAccount("plan");
-                return true;
+                // An explicit `false` from the destination means "could not open"; anything else is success.
+                return window.KlorizProfileMenu.openAccount("plan") !== false;
             }
         } catch (e) { /* fall through */ }
         return false;
@@ -325,6 +328,223 @@
         });
     }
 
+    /* ---------------- Pro-only features: explanation + value + "Upgrade to Pro" ----------------
+
+       The backend refuses a Free student's request for a Pro feature with a structured
+       403 { detail: { code: "PLAN_REQUIRED", feature, message, required_plan } } (backend/entitlements.py).
+       This block turns that into a card that explains WHAT is locked, WHY Pro is worth it, and offers
+       the one upgrade destination that really exists: the account's Plan screen.
+
+       HONESTY RULES (CEO decision, final):
+         - There is no checkout. The "Upgrade to Pro" button only opens the Plan screen; it never
+           charges, subscribes, unlocks or shows any "success" state.
+         - If the Plan screen cannot be opened, the button is shown DISABLED with a plain next step
+           ("open your account menu, then Plan") - never a dead or fake button.
+         - The product says "Unlimited flashcards". The internal daily abuse guard is not mentioned.
+       The list below is asserted equal to backend/entitlements.PRO_FEATURE_LIST by a test. */
+
+    var PRO_FEATURE_LIST = [
+        "20 AI chats every day",
+        "15 quizzes every day",
+        "Unlimited flashcards",
+        "Quizzes from your saved notes",
+        "Learning insights and your learning matrix",
+        "Personalised next steps and mistake analysis"
+    ];
+
+    var UPGRADE_COPY = {
+        note_flashcards: {
+            title: "Flashcards are a Pro feature",
+            explanation: "Creating flashcards from your notes is part of the Pro plan. You can still save notes, and any flashcards you already made stay available.",
+            value: "With Pro you get unlimited flashcards, so every note can become a revision deck."
+        },
+        note_quiz: {
+            title: "Quizzes from notes are a Pro feature",
+            explanation: "Turning a saved note into a practice quiz is part of the Pro plan. Your general practice quizzes still work on the Free plan.",
+            value: "With Pro you can test yourself on exactly what you wrote down."
+        },
+        learning_snapshot: {
+            title: "Your learning overview is a Pro feature",
+            explanation: "Your strengths, topics to practise and recent progress are part of Pro's learning intelligence.",
+            value: "Pro shows where you are strong, what to practise next, and how you are improving."
+        },
+        learning_mistakes: {
+            title: "Mistake analysis is a Pro feature",
+            explanation: "Finding the mistakes you keep repeating is part of Pro's learning intelligence.",
+            value: "Pro spots the patterns behind your wrong answers so you can fix them for good."
+        },
+        learning_next_steps: {
+            title: "Personalised next steps are a Pro feature",
+            explanation: "Recommendations for what to study next are part of Pro's learning intelligence.",
+            value: "Pro tells you the most useful topic to practise next, based on your own results."
+        },
+        learning_insights: {
+            title: "Learning insights are a Pro feature",
+            explanation: "Insights built from your quiz and chat history are part of Pro's learning intelligence.",
+            value: "Pro turns your history into clear insights about how you learn."
+        },
+        learning_matrix: {
+            title: "Your learning matrix is a Pro feature",
+            explanation: "The topic-by-topic view of what you know is part of Pro's learning intelligence.",
+            value: "Pro maps your strong and weak topics so your revision is never guesswork."
+        }
+    };
+    var UPGRADE_FALLBACK = {
+        title: "This is a Pro feature",
+        explanation: "This feature is part of the Pro plan. Everything on the Free plan keeps working.",
+        value: "See below what Pro includes."
+    };
+
+    // Extracts the structured PLAN_REQUIRED body from whatever shape a caller has:
+    // the parsed JSON body ({detail:{...}}), the detail object itself, or null.
+    function planRequiredDetail(input) {
+        var d = input && typeof input === "object" ? input : null;
+        if (!d) return null;
+        if (d.detail && typeof d.detail === "object") d = d.detail;
+        return d && d.code === "PLAN_REQUIRED" ? d : null;
+    }
+
+    function isPlanRequired(input) { return planRequiredDetail(input) !== null; }
+
+    function planRequiredFeature(input) {
+        var d = planRequiredDetail(input);
+        return d && typeof d.feature === "string" ? d.feature : null;
+    }
+
+    function upgradeCopyFor(feature) {
+        return Object.prototype.hasOwnProperty.call(UPGRADE_COPY, feature) ? UPGRADE_COPY[feature] : UPGRADE_FALLBACK;
+    }
+
+    // The ONLY valid upgrade destination today is the Plan screen. Returns an opener or null.
+    function resolveUpgradeDestination() {
+        try {
+            if (window.KlorizProfileMenu && typeof window.KlorizProfileMenu.openAccount === "function") {
+                return function () { return openPlans(); };
+            }
+        } catch (e) { /* no destination */ }
+        return null;
+    }
+
+    function mk(tag, cls, text) {
+        var node = document.createElement(tag);
+        if (cls) node.className = cls;
+        if (text !== undefined && text !== null) node.textContent = text;   // textContent only: no HTML from any source
+        return node;
+    }
+
+    // Builds the card shared by the inline locked state and the modal. onNavigate runs after a
+    // successful hand-off to the Plan screen (the modal uses it to close itself).
+    function buildUpgradeCard(feature, onNavigate) {
+        var copy = upgradeCopyFor(feature);
+        var card = mk("section", "kloriz-upgrade");
+        // Only a KNOWN feature id is ever written to the DOM; anything else is labelled "unknown".
+        card.setAttribute("data-feature", Object.prototype.hasOwnProperty.call(UPGRADE_COPY, feature) ? feature : "unknown");
+        var heading = mk("h3", "kloriz-upgrade-title", copy.title);
+        card.appendChild(heading);
+        card.appendChild(mk("p", "kloriz-upgrade-explanation", copy.explanation));
+        card.appendChild(mk("p", "kloriz-upgrade-value", copy.value));
+        card.appendChild(mk("p", "kloriz-upgrade-includes-label", "Pro includes"));
+        var list = mk("ul", "kloriz-upgrade-list");
+        PRO_FEATURE_LIST.forEach(function (item) { list.appendChild(mk("li", null, item)); });
+        card.appendChild(list);
+
+        var actions = mk("div", "kloriz-upgrade-actions");
+        var cta = mk("button", "kloriz-upgrade-cta", msg("upgradeToPro"));
+        cta.type = "button";
+        cta.setAttribute("data-fk", "upgrade-cta");
+        var note = mk("p", "kloriz-upgrade-note");
+        note.hidden = true;
+        note.setAttribute("role", "status");
+        var destination = resolveUpgradeDestination();
+        if (destination) {
+            cta.addEventListener("click", function () {
+                var opened = false;
+                try { opened = destination() === true; } catch (e) { opened = false; }
+                if (opened) {
+                    if (typeof onNavigate === "function") onNavigate();
+                } else {
+                    note.textContent = "We couldn't open the Plan screen. Open your account menu and choose Plan to see Pro.";
+                    note.hidden = false;
+                }
+            });
+        } else {
+            cta.disabled = true;
+            cta.setAttribute("aria-disabled", "true");
+            note.textContent = "Open your account menu and choose Plan to see what Pro includes. Pro isn't available yet.";
+            note.hidden = false;
+        }
+        actions.appendChild(cta);
+        card.appendChild(actions);
+        card.appendChild(note);
+        return card;
+    }
+
+    // Replaces the content of `container` with the locked-feature card (used inline, no modal).
+    function renderLocked(container, feature) {
+        if (!container) return null;
+        while (container.firstChild) container.removeChild(container.firstChild);
+        var card = buildUpgradeCard(feature, null);
+        container.appendChild(card);
+        return card;
+    }
+
+    var upgradeModal = null;
+    var upgradeReturnFocus = null;
+
+    function closeUpgradePrompt() {
+        if (!upgradeModal) return;
+        document.removeEventListener("keydown", onUpgradeKey, true);
+        if (upgradeModal.parentNode) upgradeModal.parentNode.removeChild(upgradeModal);
+        upgradeModal = null;
+        var back = upgradeReturnFocus;
+        upgradeReturnFocus = null;
+        try { if (back && typeof back.focus === "function") back.focus(); } catch (e) { /* ignore */ }
+    }
+
+    function onUpgradeKey(ev) {
+        if (!upgradeModal) return;
+        if (ev.key === "Escape") { ev.preventDefault(); closeUpgradePrompt(); return; }
+        if (ev.key === "Tab") {
+            var f = upgradeModal.querySelectorAll("button:not([disabled])");
+            if (!f.length) { ev.preventDefault(); return; }
+            var first = f[0], last = f[f.length - 1];
+            if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+            else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+        }
+    }
+
+    // Modal version: one at a time; Esc / backdrop / "Not now" close it; focus returns to the trigger.
+    function openUpgradePrompt(feature) {
+        if (upgradeModal) closeUpgradePrompt();
+        upgradeReturnFocus = document.activeElement;
+        var overlay = mk("div", "kloriz-upgrade-overlay");
+        overlay.setAttribute("data-fk", "upgrade-overlay");
+        var dialog = mk("div", "kloriz-upgrade-dialog");
+        dialog.setAttribute("role", "dialog");
+        dialog.setAttribute("aria-modal", "true");
+        var card = buildUpgradeCard(feature, closeUpgradePrompt);
+        var titleEl = card.querySelector(".kloriz-upgrade-title");
+        if (titleEl) {
+            titleEl.id = "kloriz-upgrade-title";
+            dialog.setAttribute("aria-labelledby", "kloriz-upgrade-title");
+        }
+        var dismiss = mk("button", "kloriz-upgrade-dismiss", "Not now");
+        dismiss.type = "button";
+        dismiss.setAttribute("data-fk", "upgrade-dismiss");
+        dismiss.addEventListener("click", closeUpgradePrompt);
+        var actions = card.querySelector(".kloriz-upgrade-actions");
+        if (actions) actions.appendChild(dismiss);
+        dialog.appendChild(card);
+        overlay.appendChild(dialog);
+        overlay.addEventListener("click", function (ev) { if (ev.target === overlay) closeUpgradePrompt(); });
+        document.body.appendChild(overlay);
+        upgradeModal = overlay;
+        document.addEventListener("keydown", onUpgradeKey, true);
+        var cta = card.querySelector(".kloriz-upgrade-cta");
+        try { (cta && !cta.disabled ? cta : dismiss).focus(); } catch (e) { /* ignore */ }
+        return overlay;
+    }
+
     window.KlorizFeedback = {
         msg: msg,
         messages: MESSAGES,
@@ -335,6 +555,13 @@
         toast: toast,
         toastFailure: toastFailure,
         dismissToast: dismissToast,
+        isPlanRequired: isPlanRequired,
+        planRequiredFeature: planRequiredFeature,
+        renderLocked: renderLocked,
+        openUpgradePrompt: openUpgradePrompt,
+        closeUpgradePrompt: closeUpgradePrompt,
+        proFeatureList: PRO_FEATURE_LIST,
+        upgradeCopy: UPGRADE_COPY,
         ACTION_RETRY: ACTION_RETRY,
         ACTION_LOGIN: ACTION_LOGIN,
         ACTION_PLANS: ACTION_PLANS

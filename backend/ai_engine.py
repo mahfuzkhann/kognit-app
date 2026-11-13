@@ -1039,11 +1039,19 @@ def _build_chat_request(
             )
 
     if pdf_context and _v2:
-        doc_block, _doc_used, _doc_total, _doc_truncated = _prompts.build_document_block(pdf_context)
+        _other_chars = (
+            len(system_instruction) + 4_000          # + room for the layers appended below
+            + len(prompt or "")
+            + sum(len(str((m or {}).get("text") or (m or {}).get("content") or "")) for m in (history or []) if isinstance(m, dict))
+        )
+        doc_block, _doc_used, _doc_total, _doc_truncated = _prompts.build_document_block(pdf_context, other_chars=_other_chars)
         if _doc_truncated:
+            # OBSERVABLE: a WARNING with the numbers (never the content), and the model is told in-prompt.
             logger.warning(
-                "context_builder_v2: document truncated total_chars=%d used_chars=%d (mode=%s)",
-                _doc_total, _doc_used, mode,
+                "context_builder_v2: document truncated total_chars=%d used_chars=%d other_chars=%d "
+                "doc_budget=%d input_token_budget=%d (mode=%s)",
+                _doc_total, _doc_used, _other_chars, _prompts.doc_char_budget(None, _other_chars),
+                _prompts.max_input_tokens(), mode,
             )
     if _v2:
         system_instruction += _prompts.build_layers(

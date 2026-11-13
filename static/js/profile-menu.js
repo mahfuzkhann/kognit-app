@@ -558,6 +558,16 @@
         if (!PLAN_CONFIG.proAvailable) proHead.appendChild(el("span", "acct-badge", t("plan.notAvailable")));
         pro.appendChild(proHead);
         pro.appendChild(el("p", "acct-plan-body", t("plan.proBody")));
+        // What Pro includes (plan.pro.f1..f6). This is advertised product copy: "Unlimited flashcards".
+        // The internal flashcard abuse guard is deliberately NOT mentioned anywhere in the UI.
+        var proFeatures = el("ul", "acct-feature-list");
+        for (var pn = 1; pn <= 6; pn++) {
+            var pli = el("li");
+            pli.appendChild(icon("check", 16));
+            pli.appendChild(el("span", null, t("plan.pro.f" + pn)));
+            proFeatures.appendChild(pli);
+        }
+        pro.appendChild(proFeatures);
         var button = el("button", "acct-btn", t("plan.proButton"));
         button.type = "button";
         // There is no checkout, so this can never be enabled from here.

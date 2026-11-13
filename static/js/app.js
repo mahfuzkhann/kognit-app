@@ -3872,7 +3872,7 @@ window.handlePDFUpload = async function(event) {
 
     try {
         const response = await fetch("/api/pdf/upload", { method: "POST", headers: headers, body: formData });
-        await response.json();
+        const uploadInfo = await response.json();
         if (loadingMsg && chatBox.contains(loadingMsg)) chatBox.removeChild(loadingMsg);
 
         if (!response.ok) {
@@ -3913,7 +3913,13 @@ window.handlePDFUpload = async function(event) {
 
             const successDiv = document.createElement("div");
             successDiv.className = "bot-message";
-            successDiv.innerHTML = `✅ <b>PDF Loaded Successfully!</b> You can now ask questions directly from <i>${escapeUserText(file.name)}</i>.`;
+            // A very long PDF is read only up to the AI's limit. Say so plainly (numbers only - no backend
+            // text reaches innerHTML) instead of letting answers silently ignore the rest.
+            let truncationNote = "";
+            if (uploadInfo && uploadInfo.will_be_truncated === true && Number.isFinite(uploadInfo.max_context_chars)) {
+                truncationNote = ` <br><b>Note:</b> this PDF is very long, so only its first ${Number(uploadInfo.max_context_chars).toLocaleString("en-US")} characters can be used to answer. If your question is about a later part, tell Kloriz the page or chapter.`;
+            }
+            successDiv.innerHTML = `✅ <b>PDF Loaded Successfully!</b> You can now ask questions directly from <i>${escapeUserText(file.name)}</i>.${truncationNote}`;
             chatBox.appendChild(successDiv);
             scrollChatToBottom(true);
         }
@@ -5241,7 +5247,12 @@ async function _spAuthedGet(url, accessToken) {
     const headers = accessToken ? { "Authorization": `Bearer ${accessToken}` } : {};
     const resp = await fetch(url, { headers });
     if (!resp.ok) {
-        throw new Error(`request to ${url} failed with status ${resp.status}`);
+        const failure = new Error(`request to ${url} failed with status ${resp.status}`);
+        // Keep the status and the structured body so callers can tell "locked behind Pro" (403
+        // PLAN_REQUIRED) from "unavailable". Unreadable bodies are simply null.
+        failure.status = resp.status;
+        try { failure.body = await resp.json(); } catch (e) { failure.body = null; }
+        throw failure;
     }
     return resp.json();
 }
@@ -5365,6 +5376,11 @@ async function loadStudentProfilePanelData(myGeneration) {
     // could have advanced while these three requests were in flight.
     if (myGeneration !== _spGeneration) return;
 
+    if ([snapshotResult, mistakesResult, nextStepsResult].every((r) => r.status === "rejected" && _spIsPlanRequired(r.reason))) {
+        _spRenderLockedPanel();
+        return;
+    }
+
     renderLearningOverview(snapshotResult);
     renderStrengthsSection(snapshotResult);
     renderNeedsPracticeSection(snapshotResult);
@@ -5373,9 +5389,46 @@ async function loadStudentProfilePanelData(myGeneration) {
     renderNextStepsSection(nextStepsResult);
 }
 
-function _spUnavailable(containerId, label) {
+// Student Profile sections -> the Pro feature each one belongs to (copy lives in feedback.js).
+const _SP_LOCKED_FEATURE = {
+    "sp-overview-body": "learning_snapshot",
+    "sp-strengths-body": "learning_snapshot",
+    "sp-needs-practice-body": "learning_snapshot",
+    "sp-progress-body": "learning_snapshot",
+    "sp-mistakes-body": "learning_mistakes",
+    "sp-next-steps-body": "learning_next_steps",
+};
+
+function _spIsPlanRequired(reason) {
+    const fb = window.KlorizFeedback;
+    return !!(reason && reason.status === 403 && fb && typeof fb.isPlanRequired === "function" && fb.isPlanRequired(reason.body));
+}
+
+// Free student: every Student Profile request was refused with PLAN_REQUIRED. Show ONE explanation +
+// "Upgrade to Pro" card at the top and a short "Included with Pro" line in the other sections,
+// instead of six identical cards or six "unavailable" messages.
+function _spRenderLockedPanel() {
+    const ids = ["sp-overview-body", "sp-strengths-body", "sp-needs-practice-body",
+                 "sp-mistakes-body", "sp-progress-body", "sp-next-steps-body"];
+    ids.forEach((id, index) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        if (index === 0 && window.KlorizFeedback && typeof window.KlorizFeedback.renderLocked === "function") {
+            window.KlorizFeedback.renderLocked(el, "learning_snapshot");
+        } else {
+            el.innerHTML = `<div class="sp-empty-state">Included with Pro.</div>`;
+        }
+    });
+}
+
+function _spUnavailable(containerId, label, result) {
     const el = document.getElementById(containerId);
     if (!el) return;
+    if (result && _spIsPlanRequired(result.reason) && window.KlorizFeedback && typeof window.KlorizFeedback.renderLocked === "function") {
+        // Locked, not broken: explain it and offer the upgrade path.
+        window.KlorizFeedback.renderLocked(el, _SP_LOCKED_FEATURE[containerId] || null);
+        return;
+    }
     el.innerHTML = `<div class="sp-unavailable-state">${escapeHtmlForMath(label)} is unavailable right now. The rest of your profile is unaffected.</div>`;
 }
 
@@ -5386,7 +5439,7 @@ function renderLearningOverview(snapshotResult) {
     if (!container) return;
 
     if (snapshotResult.status !== "fulfilled") {
-        _spUnavailable("sp-overview-body", "Your learning overview");
+        _spUnavailable("sp-overview-body", "Your learning overview", snapshotResult);
         return;
     }
 
@@ -5488,7 +5541,7 @@ function renderStrengthsSection(snapshotResult) {
     if (!container) return;
 
     if (snapshotResult.status !== "fulfilled") {
-        _spUnavailable("sp-strengths-body", "Strengths");
+        _spUnavailable("sp-strengths-body", "Strengths", snapshotResult);
         return;
     }
 
@@ -5520,7 +5573,7 @@ function renderNeedsPracticeSection(snapshotResult) {
     if (!container) return;
 
     if (snapshotResult.status !== "fulfilled") {
-        _spUnavailable("sp-needs-practice-body", "Needs practice");
+        _spUnavailable("sp-needs-practice-body", "Needs practice", snapshotResult);
         return;
     }
 
@@ -5555,7 +5608,7 @@ function renderMistakesSection(mistakesResult) {
     if (!container) return;
 
     if (mistakesResult.status !== "fulfilled") {
-        _spUnavailable("sp-mistakes-body", "Recurring mistakes");
+        _spUnavailable("sp-mistakes-body", "Recurring mistakes", mistakesResult);
         return;
     }
 
@@ -5591,7 +5644,7 @@ function renderProgressSection(snapshotResult) {
     if (!container) return;
 
     if (snapshotResult.status !== "fulfilled") {
-        _spUnavailable("sp-progress-body", "Recent progress");
+        _spUnavailable("sp-progress-body", "Recent progress", snapshotResult);
         return;
     }
 
@@ -5628,7 +5681,7 @@ function renderNextStepsSection(nextStepsResult) {
     if (!container) return;
 
     if (nextStepsResult.status !== "fulfilled") {
-        _spUnavailable("sp-next-steps-body", "Recommendations");
+        _spUnavailable("sp-next-steps-body", "Recommendations", nextStepsResult);
         return;
     }
 

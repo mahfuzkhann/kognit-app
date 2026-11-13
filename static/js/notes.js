@@ -173,7 +173,11 @@
             }
             return fetch(path, options).then(function (resp) {
                 return resp.json().catch(function () { return null; }).then(function (data) {
-                    if (!resp.ok) throw makeError("http", resp.status, detailMessage(data));
+                    if (!resp.ok) {
+                        var failure = makeError("http", resp.status, detailMessage(data));
+                        failure.body = data;      // the structured body (e.g. PLAN_REQUIRED) is kept for the caller
+                        throw failure;
+                    }
                     return { status: resp.status, data: data };
                 });
             }, function () { throw makeError("network"); });
@@ -998,6 +1002,7 @@
         var path = "/api/notes/" + note.id + "/" + (kind === "flashcards" ? "flashcards" : "mini-quiz");
         state.busy = true;
         study.error = null;
+        study.locked = null;
         study.loadingKind = kind;
         render();
         request("POST", path, regenerate ? { regenerate: true } : {}).then(function (res) {
@@ -1006,7 +1011,15 @@
             if (kind === "flashcards") { study.cards = data[column]; study.index = 0; study.revealed = false; study.mode = "flashcards"; }
             else { study.questions = data[column]; study.answers = new Array(study.questions.length).fill(null); study.submitted = false; study.mode = "quiz"; }
         }).catch(function (err) {
-            study.error = friendlyError(err, "Couldn't create study material.");
+            // A Free student asking for Pro-only study material gets an explanation + upgrade card,
+            // never the generic failure line. The note and any stored material are untouched.
+            var fb = window.KlorizFeedback;
+            if (err && err.status === 403 && fb && typeof fb.isPlanRequired === "function" && fb.isPlanRequired(err.body)) {
+                study.locked = fb.planRequiredFeature(err.body) || (kind === "flashcards" ? "note_flashcards" : "note_quiz");
+                study.error = null;
+            } else {
+                study.error = friendlyError(err, "Couldn't create study material.");
+            }
         }).then(function () { study.loadingKind = null; state.busy = false; render(); });
     }
 
@@ -1066,6 +1079,14 @@
         section.appendChild(el("p", "notes-hint", "Study material is AI-generated from this note. It isn't independently verified, and quiz results are not added to your progress."));
 
         if (study && study.loadingKind) section.appendChild(el("div", "nav-view-loading", "Creating your " + (study.loadingKind === "flashcards" ? "flashcards" : "mini-quiz") + "\u2026"));
+        if (study && study.locked && window.KlorizFeedback && typeof window.KlorizFeedback.renderLocked === "function") {
+            var lockedHost = el("div", "notes-locked");
+            window.KlorizFeedback.renderLocked(lockedHost, study.locked);
+            section.appendChild(lockedHost);
+        } else if (study && study.locked) {
+            // feedback.js missing (should not happen): still no generic error, just the plain facts.
+            section.appendChild(el("div", "notes-hint", "This is a Pro feature. Open your account menu and choose Plan to see what Pro includes."));
+        }
         if (study && study.error) {
             var box = el("div", "notes-hint notes-hint-error", study.error);
             box.setAttribute("role", "alert");

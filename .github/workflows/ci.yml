@@ -57,8 +57,32 @@ jobs:
         working-directory: tests_frontend
         run: |
           npm ci
-          for t in test_*.mjs; do echo "== $t"; node "$t" || exit 1; done
-        # NOTE: the real-browser (puppeteer) suites are not part of CI; see docs/AI_ENGINE_2_0.md.
+          for t in $(ls test_*.mjs | grep -v _browser); do echo "== $t"; node "$t" || exit 1; done
+        # The real-browser suites (*_browser.mjs) run in the separate `browser` job below.
+
+  browser:
+    # Real Chrome + the real FastAPI server. Commands verified locally against Chromium 153; this job has
+    # NOT yet run on GitHub, so it is non-blocking until it has passed once there.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Real-browser suites
+        working-directory: tests_frontend
+        env:
+          CHROME_PATH: /usr/bin/google-chrome
+          CHROME_ARGS: --disable-gpu --no-sandbox
+          PYTHON: python
+        run: |
+          npm ci
+          for t in test_*_browser.mjs; do echo "== $t"; node "$t" || exit 1; done
 
   database:
     runs-on: ubuntu-latest

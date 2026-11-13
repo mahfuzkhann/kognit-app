@@ -56,9 +56,10 @@ class TestEntitlementPolicy:
         assert entitlements.normalize_plan(plan) == "free"
         assert not entitlements.is_allowed(plan, entitlements.NOTE_QUIZ)
 
-    def test_a_note_quiz_spends_the_quiz_allowance_and_flashcards_spend_notes_ai(self):
+    def test_a_note_quiz_spends_the_quiz_allowance_and_flashcards_their_own_meter(self):
         assert entitlements.quota_kind_for(entitlements.NOTE_QUIZ, "pro") == "quiz"
-        assert entitlements.quota_kind_for(entitlements.NOTE_FLASHCARDS, "pro") == "notes_ai"
+        assert entitlements.quota_kind_for(entitlements.NOTE_FLASHCARDS, "pro") == "flashcards"
+        assert entitlements.quota_kind_for("anything_else", "pro") == "notes_ai"
 
     def test_the_403_body_is_stable_and_names_the_required_plan(self):
         exc = entitlements.plan_required_exception(entitlements.NOTE_FLASHCARDS)
@@ -71,12 +72,14 @@ class TestEntitlementPolicy:
         assert free["chat"] == ("day", 1, 3) and free["quiz"] == ("week", 3, None)
         assert pro["chat"] == ("day", 20, None) and pro["quiz"] == ("day", 15, None)
         assert pro["notes_ai"][1] == entitlements.PRO_NOTES_AI_PER_DAY
+        assert pro["flashcards"] == ("day", 200, None) and "flashcards" not in free
 
     def test_the_migration_seeds_exactly_the_policy_written_in_code(self):
-        """Single source of truth: the Pro rows in migration 0014 must equal QUOTA_POLICY."""
+        """Single source of truth: the Pro rows seeded by migrations 0014 + 0015 must equal QUOTA_POLICY."""
         import pathlib
         import re
-        sql = (pathlib.Path(__file__).parent / "supabase/migrations/0014_ai_engine_2_plans_usage_curriculum.sql").read_text()
+        root = pathlib.Path(__file__).parent / "supabase/migrations"
+        sql = (root / "0014_ai_engine_2_plans_usage_curriculum.sql").read_text() + (root / "0015_flashcards_meter.sql").read_text()
         rows = re.findall(r"\('pro',\s*'(\w+)',\s*'(\w+)',\s*(\d+),\s*(null|\d+)\)", sql)
         seeded = {kind: (period, int(limit)) for kind, period, limit, _first in rows}
         expected = {k: (v[0], v[1]) for k, v in entitlements.QUOTA_POLICY["pro"].items()}
@@ -107,7 +110,7 @@ class TestNotesGeneration:
             resp = client.post(f"/api/notes/{note['id']}/suggest-tags")
         assert resp.status_code == 200 and consumed(ledger) == ["notes_ai"]
 
-    def test_pro_flashcards_spend_notes_ai_and_a_pro_note_quiz_spends_the_quiz_allowance(self, client, db, monkeypatch):
+    def test_pro_flashcards_spend_their_own_meter_and_a_pro_note_quiz_spends_the_quiz_allowance(self, client, db, monkeypatch):
         ledger = use_ledger(monkeypatch, plan="pro")
         as_user(ALICE)
         note = save(client)
@@ -115,8 +118,8 @@ class TestNotesGeneration:
             assert client.post(f"/api/notes/{note['id']}/flashcards", json={}).status_code == 200
         with provider_text(json.dumps(QUIZ)):
             assert client.post(f"/api/notes/{note['id']}/mini-quiz", json={}).status_code == 200
-        assert consumed(ledger) == ["notes_ai", "quiz"]
-        assert ledger.live("quiz") == 1 and ledger.live("chat") == 0
+        assert consumed(ledger) == ["flashcards", "quiz"]
+        assert ledger.live("quiz") == 1 and ledger.live("chat") == 0 and ledger.live("notes_ai") == 0
 
     def test_a_note_quiz_and_an_ordinary_quiz_draw_from_the_same_allowance(self, client, db, monkeypatch):
         ledger = use_ledger(monkeypatch, plan="pro", limits={"quiz": 1})

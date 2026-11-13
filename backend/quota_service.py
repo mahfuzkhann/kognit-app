@@ -83,8 +83,12 @@ logger = logging.getLogger("kognit.quota")
 
 KIND_CHAT = "chat"
 KIND_QUIZ = "quiz"
-KIND_NOTES_AI = "notes_ai"   # chat titles + Pocket Notes AI tools (migration 0011)
-VALID_KINDS = (KIND_CHAT, KIND_QUIZ, KIND_NOTES_AI)
+KIND_NOTES_AI = "notes_ai"   # chat titles + note tag suggestions (migration 0011)
+# Pro flashcards have their OWN meter (migration 0015) so a flashcards abuse guard can never throttle
+# titles or tag suggestions. Free has no row: the application refuses first (PLAN_REQUIRED) and the
+# database answers plan_not_configured if that check were ever bypassed.
+KIND_FLASHCARDS = "flashcards"
+VALID_KINDS = (KIND_CHAT, KIND_QUIZ, KIND_NOTES_AI, KIND_FLASHCARDS)
 
 PLAN_UNMETERED = "unmetered"  # reported when QUOTA_MODE=off
 
@@ -92,7 +96,7 @@ CODE_QUOTA_EXCEEDED = "QUOTA_EXCEEDED"
 CODE_QUOTA_UNAVAILABLE = "QUOTA_UNAVAILABLE"
 CODE_PLAN_NOT_CONFIGURED = "PLAN_NOT_CONFIGURED"
 
-_KIND_NOUN = {KIND_CHAT: "chats", KIND_QUIZ: "quizzes", KIND_NOTES_AI: "AI note tools"}
+_KIND_NOUN = {KIND_CHAT: "chats", KIND_QUIZ: "quizzes", KIND_NOTES_AI: "AI note tools", KIND_FLASHCARDS: "flashcards"}
 
 
 class QuotaUnavailable(Exception):
@@ -246,6 +250,9 @@ _EXCEEDED_MESSAGES = {
     KIND_CHAT: "You've used all of your chats for this period. Your chats reset at the time shown.",
     KIND_QUIZ: "You've used all of your quizzes for this period. Your quizzes reset at the time shown.",
     KIND_NOTES_AI: "You've used all of your AI note tools for this period. They reset at the time shown.",
+    # Deliberately does NOT quote the number: the product advertises "Unlimited flashcards"; this is the
+    # temporary abuse guard, configurable in public.plan_limits.
+    KIND_FLASHCARDS: "You've created a lot of flashcards today. Please try again after the time shown.",
 }
 
 

@@ -473,3 +473,79 @@
     .scroll-latest-btn { transform: translateX(-50%); }
     .auth-spinner { animation-duration: 1.6s; }
 }
+/* ------------------------------------------------------------
+   UPGRADE PROMPT / LOCKED FEATURE CARD  (feedback.js)
+   Shown instead of a generic error when a Free student reaches a Pro-only
+   feature. It explains what is locked, what Pro adds, and offers the one real
+   upgrade destination (the Plan screen). Uses semantic tokens only, so it
+   follows the light and dark themes.
+   ------------------------------------------------------------ */
+.kloriz-upgrade {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 16px 18px;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-lg, 12px);
+    background: var(--color-surface-raised);
+    color: var(--color-text-primary);
+    font-size: 14px;
+    line-height: 1.55;
+    text-align: left;
+}
+.kloriz-upgrade-title { margin: 0; font-size: 16px; font-weight: 600; }
+.kloriz-upgrade-explanation,
+.kloriz-upgrade-value { margin: 0; color: var(--color-text-secondary); }
+.kloriz-upgrade-value { color: var(--color-text-primary); }
+.kloriz-upgrade-includes-label {
+    margin: 4px 0 0;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+}
+.kloriz-upgrade-list { margin: 0; padding-left: 18px; color: var(--color-text-secondary); }
+.kloriz-upgrade-list li { margin: 2px 0; }
+.kloriz-upgrade-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.kloriz-upgrade-cta,
+.kloriz-upgrade-dismiss {
+    min-height: 44px;
+    padding: 0 18px;
+    border-radius: 10px;
+    font: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.kloriz-upgrade-cta {
+    border: none;
+    background: var(--color-text-primary);
+    color: var(--color-background);
+}
+.kloriz-upgrade-cta:disabled { opacity: 0.55; cursor: not-allowed; }
+.kloriz-upgrade-dismiss {
+    border: 1px solid var(--color-border-strong);
+    background: transparent;
+    color: var(--color-text-secondary);
+}
+.kloriz-upgrade-cta:focus-visible,
+.kloriz-upgrade-dismiss:focus-visible { outline: 2px solid var(--color-focus, currentColor); outline-offset: 2px; }
+.kloriz-upgrade-note { margin: 0; font-size: 13px; color: var(--color-text-muted); }
+
+.kloriz-upgrade-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-modal, 1200);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    background: rgba(0, 0, 0, 0.6);
+}
+.kloriz-upgrade-dialog { width: min(480px, 100%); max-height: calc(100vh - 32px); overflow-y: auto; }
+.notes-locked { margin-top: 12px; }
+
+@media (prefers-reduced-motion: reduce) {
+    .kloriz-upgrade-overlay, .kloriz-upgrade-dialog { animation: none; transition: none; }
+}

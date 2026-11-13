@@ -36,7 +36,7 @@ function load() {
     return { w: dom.window, FB: dom.window.KlorizFeedback, doc: dom.window.document };
 }
 const hasBangla = (s) => /[\u0980-\u09FF]/.test(s);
-const hasLatinWords = (s) => /[A-Za-z]{3,}/.test(s.replace(/\{[a-z]+\}/g, "").replace(/Kloriz|Google|PDF|AI/g, ""));   // {n}/{when} are substitution slots
+const hasLatinWords = (s) => /[A-Za-z]{3,}/.test(s.replace(/\{[a-z]+\}/g, "").replace(/Kloriz|Google|PDF|AI|Pro/g, ""));   // {n}/{when} are substitution slots
 
 console.log("\n1. Classification: each situation gets its own message and action");
 {
@@ -111,6 +111,9 @@ console.log("\n2. Wording rules");
     const { FB } = load();
     await check("every catalog message is Bangla (Latin words only for brand/format names)", () => {
         for (const [k, v] of Object.entries(FB.messages)) {
+            // "upgradeToPro" is the CEO-mandated English call-to-action label "Upgrade to Pro"; its exact
+            // value is asserted in test_upgrade_prompt.mjs. Every other message stays Bangla-only.
+            if (k === "upgradeToPro") continue;
             assert(hasBangla(v), `${k} has no Bangla: ${v}`);
             assert(!hasLatinWords(v), `${k} contains English words: ${v}`);
         }

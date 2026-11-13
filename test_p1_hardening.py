@@ -299,7 +299,11 @@ class TestPdfUploadEndpoint:
         r = _upload(client)
         assert r.status_code == 200
         body = r.json()
-        assert set(body) == {"status", "filename", "length"}
+        # The three original fields are unchanged; AI Engine 2.0 ADDS exactly two (truncation is never silent):
+        # max_context_chars and will_be_truncated. Existing clients ignore unknown keys.
+        assert set(body) == {"status", "filename", "length", "max_context_chars", "will_be_truncated"}
+        assert body["max_context_chars"] == main_module.MAX_PDF_CONTEXT_CHARS == 300_000
+        assert body["will_be_truncated"] is False
         assert body["status"] == "success" and body["filename"] == "chapter.pdf"
         stored = main_module.active_pdf_contexts["user-1"]["chat-1"]
         assert "Newton first law" in stored and body["length"] == len(stored)

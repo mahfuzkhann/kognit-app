@@ -148,22 +148,45 @@ DOC_END = "<<<END_UNTRUSTED_DOCUMENT>>>"
 # deliberately CONSERVATIVE HYPOTHESIS (over-estimates tokens) pending live
 # usage data. It is used only to keep requests inside a budget.
 CHARS_PER_TOKEN_ESTIMATE = 2.0
-DEFAULT_DOC_MAX_CHARS = 120_000
+# Restored to 300,000 characters (CEO decision) - the same figure as ai_engine.MAX_PDF_CONTEXT_CHARS that
+# the legacy builder has always used. 300,000 characters is NOT assumed safe to send on its own: the
+# input-token safeguard below shrinks the document whenever the whole request (instructions + history +
+# question + document) would exceed the configured input-token budget, and every truncation is logged
+# and announced to the model (and, at upload time, to the student).
+DEFAULT_DOC_MAX_CHARS = 300_000
+# Conservative ceiling for the WHOLE request, far below the 1,048,576-token window of both approved
+# models (verified 2026-11-03). The estimate uses CHARS_PER_TOKEN_ESTIMATE (a conservative HYPOTHESIS).
+DEFAULT_MAX_INPUT_TOKENS = 400_000
 
 
 def estimate_tokens(text: str) -> int:
     return int(len(text or "") / CHARS_PER_TOKEN_ESTIMATE) + 1
 
 
-def doc_char_budget(configured: Optional[int] = None) -> int:
+def max_input_tokens() -> int:
+    import os
+    try:
+        value = int((os.getenv("AI_CONTEXT_MAX_INPUT_TOKENS") or "").strip())
+    except ValueError:
+        return DEFAULT_MAX_INPUT_TOKENS
+    return value if 10_000 <= value <= 1_000_000 else DEFAULT_MAX_INPUT_TOKENS
+
+
+def doc_char_budget(configured: Optional[int] = None, other_chars: int = 0) -> int:
+    """Characters of the document that may be sent: the configured document budget, further capped so
+    the WHOLE request stays inside the input-token budget. `other_chars` = everything that is not the
+    document (instructions, history, the question)."""
     import os
     if configured is not None:
-        return max(0, configured)
-    try:
-        value = int((os.getenv("AI_CONTEXT_DOC_MAX_CHARS") or "").strip())
-    except ValueError:
-        return DEFAULT_DOC_MAX_CHARS
-    return value if 1_000 <= value <= 1_000_000 else DEFAULT_DOC_MAX_CHARS
+        base = max(0, configured)
+    else:
+        try:
+            value = int((os.getenv("AI_CONTEXT_DOC_MAX_CHARS") or "").strip())
+        except ValueError:
+            value = DEFAULT_DOC_MAX_CHARS
+        base = value if 1_000 <= value <= 1_000_000 else DEFAULT_DOC_MAX_CHARS
+    allowance = max(0, int(max_input_tokens() * CHARS_PER_TOKEN_ESTIMATE) - max(0, other_chars))
+    return min(base, allowance)
 
 
 def build_layers(*, curriculum: Optional[str], user_class: Optional[str], task_category: str,
@@ -182,12 +205,12 @@ def build_layers(*, curriculum: Optional[str], user_class: Optional[str], task_c
     return "\n\n[" + "CONTEXT LAYERS " + PROMPT_LAYERS_VERSION + "]\n" + "\n".join(parts)
 
 
-def build_document_block(pdf_text: str, *, max_chars: Optional[int] = None) -> tuple:
+def build_document_block(pdf_text: str, *, max_chars: Optional[int] = None, other_chars: int = 0) -> tuple:
     """Returns (block, used_chars, total_chars, truncated). The document is
     wrapped in delimiters; any delimiter text INSIDE the document is
     neutralised so a document cannot close its own sandbox early."""
     total = len(pdf_text)
-    budget = doc_char_budget(max_chars)
+    budget = doc_char_budget(max_chars, other_chars)
     body = pdf_text[:budget]
     used = len(body)
     truncated = total > budget

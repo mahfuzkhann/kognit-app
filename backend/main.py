@@ -766,7 +766,19 @@ async def upload_pdf(
     except state_limits.ContextCapacityError:
         logger.error("upload_pdf: document exceeds the configured context budget (user_id=%s)", user_id)
         raise HTTPException(status_code=413, detail="This PDF is too large to keep open. Please upload a smaller file.")
-    return {"status": "success", "filename": file.filename, "length": len(pdf_text)}
+    # Truncation is EXPLICIT and OBSERVABLE (never silent): the client is told whether this document is
+    # longer than the AI can read at once, a WARNING is logged (numbers only, never content), and the model
+    # itself is told in the prompt which part it cannot see. Additive fields: existing clients ignore them.
+    will_be_truncated = len(pdf_text) > MAX_PDF_CONTEXT_CHARS
+    if will_be_truncated:
+        logger.warning(
+            "upload_pdf: document longer than the AI context budget total_chars=%d budget=%d (user_id=%s)",
+            len(pdf_text), MAX_PDF_CONTEXT_CHARS, user_id,
+        )
+    return {
+        "status": "success", "filename": file.filename, "length": len(pdf_text),
+        "max_context_chars": MAX_PDF_CONTEXT_CHARS, "will_be_truncated": will_be_truncated,
+    }
 
 
 @app.post("/api/pdf/clear")

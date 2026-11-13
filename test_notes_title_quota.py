@@ -94,14 +94,16 @@ class TestEachRouteUsesTheNotesMeter:
         assert resp.status_code == 200 and resp.json()["suggestions"]
         assert kinds(ledger) == ["notes_ai"] and ledger.live("chat") == 0
 
-    def test_flashcards_consume_notes_ai_only(self, client, db, monkeypatch):
+    def test_flashcards_consume_only_their_own_meter(self, client, db, monkeypatch):
+        # Final CEO decision: Pro flashcards have a dedicated meter (migration 0015) so the temporary
+        # abuse guard can never throttle titles or tag suggestions, which stay on notes_ai.
         ledger = use_ledger(monkeypatch)
         as_user(ALICE)
         note = save(client)
         with provider_text(json.dumps(FLASH)):
             resp = client.post(f"/api/notes/{note['id']}/flashcards", json={})
         assert resp.status_code == 200 and resp.json()["regenerated"] is True
-        assert kinds(ledger) == ["notes_ai"] and ledger.live("chat") == 0
+        assert kinds(ledger) == ["flashcards"] and ledger.live("notes_ai") == 0 and ledger.live("chat") == 0
 
     def test_mini_quiz_consumes_the_quiz_allowance_not_notes_ai(self, client, db, monkeypatch):
         # AI Engine 2.0 (CEO decision D-4): "Note-generated quizzes count toward the same
@@ -146,7 +148,7 @@ class TestExhaustionPreventsProviderCalls:
     ])
     def test_notes_routes_over_quota_never_call_the_provider(self, client, db, monkeypatch, path, payload):
         # A note-generated quiz spends the QUIZ allowance (AI Engine 2.0); the other routes spend notes_ai.
-        meter = "quiz" if path == "mini-quiz" else "notes_ai"
+        meter = {"mini-quiz": "quiz", "flashcards": "flashcards"}.get(path, "notes_ai")
         use_ledger(monkeypatch, limits={meter: 0})
         as_user(ALICE)
         note = save(client)
@@ -213,7 +215,7 @@ class TestCannotBypassTheMeter:
             )
         params = ledger.named("consume_quota")[0]["params"]
         assert set(params) == {"p_kind", "p_request_id", "p_refund_token_hash"}
-        assert params["p_kind"] == "notes_ai"
+        assert params["p_kind"] == "flashcards"
 
     def test_repeated_requests_are_each_counted_with_distinct_ledger_ids(self, client, db, monkeypatch):
         ledger = use_ledger(monkeypatch, limits={"notes_ai": 6})
@@ -346,7 +348,7 @@ class TestRefundPolicy:
         with provider_text(json.dumps(FLASH)):
             resp = client.post(f"/api/notes/{note['id']}/flashcards", json={})
         assert resp.status_code == 404
-        assert ledger.live("notes_ai") == 1 and ledger.named("refund_quota") == []
+        assert ledger.live("flashcards") == 1 and ledger.named("refund_quota") == []
 
     def test_successful_generation_is_not_refunded(self, client, db, monkeypatch):
         ledger = use_ledger(monkeypatch)
@@ -354,7 +356,7 @@ class TestRefundPolicy:
         note = save(client)
         with provider_text(json.dumps(FLASH)):
             client.post(f"/api/notes/{note['id']}/flashcards", json={})
-        assert ledger.named("refund_quota") == [] and ledger.live("notes_ai") == 1
+        assert ledger.named("refund_quota") == [] and ledger.live("flashcards") == 1
 
 
 # ---------------------------------------------------------------------------

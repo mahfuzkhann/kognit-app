@@ -16,9 +16,13 @@ AMBIGUITIES (implemented configurable, flagged for the CEO):
   * Free quiz allowance: "3 general quiz generations" has no stated reset
     period. The existing, shipped policy is 3 per WEEK (Asia/Dhaka, weeks start
     Monday); it is kept and can be changed with one UPDATE of plan_limits.
-  * Pro flashcards "unlimited": quotas are integers, so the notes_ai meter is
-    given an abuse-guard ceiling (PRO_NOTES_AI_PER_DAY) that no student
-    reaches by studying; it is not a product limit.
+  * Pro flashcards are "Unlimited flashcards" in everything the student sees. Quotas are
+    integers, so the database holds a TEMPORARY, CONFIGURABLE abuse guard of
+    PRO_FLASHCARDS_PER_DAY (200) on a dedicated `flashcards` meter (migration 0015).
+    It is internal: never advertised, never quoted in a student-facing message. Change it
+    with: update public.plan_limits set limit_count = N where plan='pro' and kind='flashcards';
+  * Pro `notes_ai` (chat titles + tag suggestions) keeps a separate generic guard
+    (PRO_NOTES_AI_PER_DAY) so the two can never throttle each other.
   * Which existing endpoints are "advanced learning intelligence": the gated
     set is listed in PRO_FEATURES below.
 """
@@ -48,12 +52,26 @@ PRO_FEATURES = frozenset({
 PLAN_FEATURES = {PLAN_FREE: frozenset(), PLAN_PRO: PRO_FEATURES}
 
 # --- quota policy as data (mirrors supabase/migrations/0014...) ---------------
-PRO_NOTES_AI_PER_DAY = 200
+PRO_NOTES_AI_PER_DAY = 200       # titles + tag suggestions (generic abuse guard, not a product number)
+PRO_FLASHCARDS_PER_DAY = 200     # TEMPORARY internal abuse guard behind "Unlimited flashcards"
 QUOTA_POLICY = {
-    # plan: {kind: (period, limit, first_day_limit)}
+    # plan: {kind: (period, limit, first_day_limit)}; Free has NO flashcards row on purpose.
     PLAN_FREE: {"chat": ("day", 1, 3), "quiz": ("week", 3, None), "notes_ai": ("day", 6, None)},
-    PLAN_PRO: {"chat": ("day", 20, None), "quiz": ("day", 15, None), "notes_ai": ("day", PRO_NOTES_AI_PER_DAY, None)},
+    PLAN_PRO: {"chat": ("day", 20, None), "quiz": ("day", 15, None),
+               "notes_ai": ("day", PRO_NOTES_AI_PER_DAY, None),
+               "flashcards": ("day", PRO_FLASHCARDS_PER_DAY, None)},
 }
+
+# What the student is TOLD Pro includes: the single source for upgrade-UI copy, asserted by tests.
+# "Unlimited flashcards" is the advertised promise; the 200/day guard above is internal.
+PRO_FEATURE_LIST = (
+    "20 AI chats every day",
+    "15 quizzes every day",
+    "Unlimited flashcards",
+    "Quizzes from your saved notes",
+    "Learning insights and your learning matrix",
+    "Personalised next steps and mistake analysis",
+)
 
 CODE_PLAN_REQUIRED = "PLAN_REQUIRED"
 
@@ -79,10 +97,12 @@ def is_allowed(plan: Optional[str], feature: str) -> bool:
 
 def quota_kind_for(feature: str, plan: Optional[str]) -> str:
     """Which meter a feature spends. A note-generated quiz spends the QUIZ
-    allowance (same pool as ordinary quizzes); flashcards and other AI note
-    tools spend the notes_ai meter."""
+    allowance (same pool as ordinary quizzes); flashcards spend their own
+    `flashcards` meter; other AI note tools spend notes_ai."""
     if feature == NOTE_QUIZ:
         return "quiz"
+    if feature == NOTE_FLASHCARDS:
+        return "flashcards"
     return "notes_ai"
 
 

@@ -469,7 +469,8 @@ await check("no price, currency or payment claims are invented; the disabled but
     const { window, doc, click, openMenu, action, bodyText } = await boot();
     await openMenu();
     click(action("plan"));
-    assert(!/[\$\u09F3\u20B9]|BDT|USD|Tk\b|\/\s*month|per month|bKash|Nagad|card/i.test(bodyText()), "no price/payment text");
+    // NOTE: \bcards?\b is whole-word on purpose - "Unlimited flashcards" is a feature name, not a payment card.
+    assert(!/[\$\u09F3\u20B9]|BDT|USD|Tk\b|\/\s*month|per month|bKash|Nagad|\bcards?\b/i.test(bodyText()), "no price/payment text");
     assert(!/\d+\s*(?:৳|taka)/i.test(bodyText()));
     const before = doc.documentElement.outerHTML.length;
     doc.querySelector("#account-body .acct-btn").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));

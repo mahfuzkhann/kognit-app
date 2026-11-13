@@ -47,7 +47,9 @@ class LedgerQuota:
         # test_engine2_entitlements.py uses plan="free" to prove the Pro gate.
         self.plan = plan
         self.fail_plan = fail_plan
-        self.limits = {"chat": 1, "quiz": 3, "notes_ai": 6}
+        # "flashcards" is the dedicated Pro meter of migration 0015 (Free has no row in the database; the
+        # application refuses Free before any meter is touched, see test_engine2_entitlements.py).
+        self.limits = {"chat": 1, "quiz": 3, "notes_ai": 6, "flashcards": 200}
         self.limits.update(limits or {})
         self.fail_consume = fail_consume
         self.lose_consume_response = lose_consume_response

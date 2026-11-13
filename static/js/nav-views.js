@@ -302,6 +302,13 @@
         } catch (e) {
             if (myToken !== quizzesLoadToken) return;
             topicsEl.removeAttribute("aria-busy");
+            var fb = window.KlorizFeedback;
+            if (e && e.status === 403 && fb && typeof fb.isPlanRequired === "function" && fb.isPlanRequired(e.body) &&
+                typeof fb.renderLocked === "function") {
+                // Topic history from the learning snapshot is a Pro feature: explain it, don't call it an error.
+                fb.renderLocked(topicsEl, "learning_snapshot");
+                return;
+            }
             // A failed request is an error, never an empty history.
             showTopicsMessage(topicsEl, "Couldn\u2019t load your topics right now.", "Try again");
         }
