@@ -37,8 +37,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), "utf8");
 
 const FEEDBACK = read("static/js/feedback.js");
-const PRO_LIST = ["20 AI chats every day", "15 quizzes every day", "Unlimited flashcards",
-    "Quizzes from your saved notes", "Learning insights and your learning matrix",
+const PRO_LIST = ["20x more usage limit", "35x more quizzes than Free plan", "Unlimited flashcards",
+    "Quizzes and flashcards from your saved notes", "Learning insights and your learning matrix",
     "Personalised next steps and mistake analysis"];
 const ALL_FEATURES = ["note_flashcards", "note_quiz", "learning_snapshot", "learning_mistakes",
     "learning_next_steps", "learning_insights", "learning_matrix"];

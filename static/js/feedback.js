@@ -344,10 +344,10 @@
        The list below is asserted equal to backend/entitlements.PRO_FEATURE_LIST by a test. */
 
     var PRO_FEATURE_LIST = [
-        "20 AI chats every day",
-        "15 quizzes every day",
+        "20x more usage limit",
+        "35x more quizzes than Free plan",
         "Unlimited flashcards",
-        "Quizzes from your saved notes",
+        "Quizzes and flashcards from your saved notes",
         "Learning insights and your learning matrix",
         "Personalised next steps and mistake analysis"
     ];

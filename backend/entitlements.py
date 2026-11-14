@@ -65,10 +65,10 @@ QUOTA_POLICY = {
 # What the student is TOLD Pro includes: the single source for upgrade-UI copy, asserted by tests.
 # "Unlimited flashcards" is the advertised promise; the 200/day guard above is internal.
 PRO_FEATURE_LIST = (
-    "20 AI chats every day",
-    "15 quizzes every day",
+    "20x more usage limit",
+    "35x more quizzes than Free plan",
     "Unlimited flashcards",
-    "Quizzes from your saved notes",
+    "Quizzes and flashcards from your saved notes",
     "Learning insights and your learning matrix",
     "Personalised next steps and mistake analysis",
 )
