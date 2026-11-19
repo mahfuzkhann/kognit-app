@@ -27,6 +27,20 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _legacy_single_model_by_default(monkeypatch):
+    """The PRODUCTION defaults are AI_ROUTER_MODE=policy and AI_MODEL_FALLBACK=on
+    (backend/ai/config.py). The large body of older tests exercises the single-model
+    attempt loop (same model on retry, the one configured model on the request), so they run
+    with the router pinned to `static` and fallback `off`. Any test can set either variable
+    itself (a test-level setenv runs after this fixture), and
+    test_ai_engine_finalization.py::TestProductionDefaults deletes both to prove what a
+    deployment with no AI_* variables really does."""
+    monkeypatch.setenv("AI_ROUTER_MODE", "static")
+    monkeypatch.setenv("AI_MODEL_FALLBACK", "off")
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _no_real_backoff_sleep(monkeypatch):
     try:
         import backend.ai_engine as ai_engine

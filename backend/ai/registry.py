@@ -8,15 +8,20 @@ from a model's name. Where the documentation does not state something
 (e.g. the thinking levels `gemini-3.1-flash-lite` accepts) the registry says
 so and the safe behaviour is "do not send the parameter".
 
-Model IDs are configuration: set AI_MODEL_GENERAL / AI_MODEL_ADVANCED to move
-to a new ID without a code change. An overridden ID that is not the one whose
-metadata/prices were verified gets NO price (cost stays NULL) - the registry
-never carries a price across to a different model.
+KLORIZ MODEL APPROVAL (2026-11-17): exactly TWO models are approved and these are the
+only two this registry will ever return - gemini-3.1-flash-lite and gemini-3.5-flash-lite.
+Adding or replacing a model is a code change here (plus verified metadata and price), made
+only on the CEO's approval. AI_MODEL_GENERAL / AI_MODEL_ADVANCED may still be set to the
+role's own approved ID; any other value is IGNORED with a warning, so neither routing nor
+fallback can ever reach an unapproved model.
 """
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from typing import Optional
+
+logger = logging.getLogger("kognit.ai.registry")
 
 PROVIDER_GEMINI = "gemini"
 
@@ -110,20 +115,20 @@ _VERIFIED = {_GENERAL.role: _GENERAL, _ADVANCED.role: _ADVANCED}
 _ENV_FOR_ROLE = {ROLE_GENERAL: "AI_MODEL_GENERAL", ROLE_ADVANCED: "AI_MODEL_ADVANCED"}
 
 
+_WARNED_OVERRIDES: set = set()
+
+
 def _resolve(spec: ModelSpec) -> ModelSpec:
+    """Return the approved spec for this role. An environment override naming ANY other model
+    is ignored (warned once per distinct value), never honoured."""
     override = (os.getenv(_ENV_FOR_ROLE[spec.role]) or "").strip()
-    if not override or override == spec.model_id:
-        return spec
-    if not _MODEL_ID_RE.match(override):
-        return spec
-    # A different model id: keep structural capabilities the operator is
-    # responsible for, drop everything that was verified for the OLD id.
-    return ModelSpec(
-        role=spec.role, model_id=override, display_name=override,
-        thinking_levels=(), default_thinking=None, price=None, sources=(),
-        verified_on="unverified",
-        notes=f"operator override of {spec.model_id}; capabilities/prices NOT verified",
-    )
+    if override and override != spec.model_id and (spec.role, override) not in _WARNED_OVERRIDES:
+        _WARNED_OVERRIDES.add((spec.role, override))
+        logger.warning(
+            "%s is set to a model that is not approved for this role - ignoring it and using %s",
+            _ENV_FOR_ROLE[spec.role], spec.model_id,
+        )
+    return spec
 
 
 def get_model(role: str) -> ModelSpec:

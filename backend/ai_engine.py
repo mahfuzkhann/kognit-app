@@ -43,7 +43,8 @@ logger = logging.getLogger("kognit.ai_engine")
 # SDK MIGRATION (google-generativeai -> google-genai), see investigation
 # report for the full root-cause writeup. Short version:
 #
-# gemini-3.6-flash is a dynamic-thinking ("reasoning") model. By default it
+# The model used when this migration was done (gemini-3.6-flash, since removed from the
+# approved list) is a dynamic-thinking ("reasoning") model. By default it
 # decides its own internal reasoning effort per request (Google's own model
 # card documents this and explicitly warns of "occasional slowness or
 # timeout issues"). The previously-pinned google-generativeai==0.8.3 SDK is
@@ -74,7 +75,14 @@ get_provider()
 # the previous hardcoded value, so behavior is identical unless GEMINI_MODEL
 # is set. This is configuration only: there is no model routing and no
 # automatic fallback to a different model.
-DEFAULT_MODEL_NAME = "gemini-3.6-flash"
+#
+# KLORIZ MODEL APPROVAL (2026-11-17): Kloriz is approved to use exactly TWO Gemini
+# models - gemini-3.1-flash-lite and gemini-3.5-flash-lite (see backend/ai/registry.py,
+# the only place that lists them). gemini-3.6-flash is NOT approved. The static/default
+# model is gemini-3.5-flash-lite because Google documents its thinking levels, so the
+# fixed chat level below ("low") is valid on it; GEMINI_MODEL may select either approved
+# model and nothing else.
+DEFAULT_MODEL_NAME = "gemini-3.5-flash-lite"
 MODEL_ENV_VAR = "GEMINI_MODEL"
 _MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
 
@@ -98,6 +106,13 @@ def _resolve_model_name(env=None) -> str:
             MODEL_ENV_VAR, DEFAULT_MODEL_NAME,
         )
         return DEFAULT_MODEL_NAME
+    approved = {spec.model_id for spec in _registry.all_models()}
+    if configured not in approved:
+        logger.warning(
+            "%s=%s is not an approved Kloriz model (approved: %s) - ignoring it and using %s",
+            MODEL_ENV_VAR, configured, ", ".join(sorted(approved)), DEFAULT_MODEL_NAME,
+        )
+        return DEFAULT_MODEL_NAME
     return configured
 
 
@@ -106,6 +121,22 @@ logger.info(
     "ai_engine model=%s (source=%s)",
     MODEL_NAME, MODEL_ENV_VAR if MODEL_NAME != DEFAULT_MODEL_NAME else "default",
 )
+logger.info(
+    "ai_engine config: router_mode=%s model_fallback=%s gateway=%s context_builder=%s verify=%s "
+    "approved_models=%s",
+    _ai_config.router_mode(), "on" if _ai_config.model_fallback_enabled() else "off",
+    "v2" if _ai_config.gateway_enabled() else "legacy", _ai_config.context_builder_mode(),
+    _ai_config.verify_mode(), ",".join(sorted(spec.model_id for spec in _registry.all_models())),
+)
+
+
+def _legacy_reasoning(level: Optional[str]) -> Optional[str]:
+    """Reasoning effort for the single-model (legacy/static) calls. Only a level the registry
+    documents for MODEL_NAME is ever sent: gemini-3.5-flash-lite accepts minimal/low/medium/high;
+    gemini-3.1-flash-lite's levels are not documented, so nothing is sent for it. A model the
+    registry does not know (tests patch MODEL_NAME) keeps the level unchanged."""
+    spec = _registry.model_for_id(MODEL_NAME)
+    return level if spec is None else _registry.thinking_level_for(spec, level)
 
 # Phase 7B (evaluation subsystem) prompt-versioning support.
 #
@@ -334,10 +365,10 @@ def _exception_type_name(exc: BaseException) -> str:
 #
 # Previously a bare `pdf_context[:10000]` slice with the comment "Truncate if
 # too long for safety" - a leftover from the pre-migration google-generativeai
-# code, with no connection to what gemini-3.6-flash actually supports. Per
-# Google's published model card (ai.google.dev/gemini-api/docs/models/
-# gemini-3.6-flash, confirmed July 2026), gemini-3.6-flash has a 1,048,576-
-# token INPUT context window and up to 65,536 output tokens - the old 10,000-
+# code, with no connection to what the model actually supports. Per the
+# model registry (Google's model cards for gemini-3.1-flash-lite and
+# gemini-3.5-flash-lite), both approved models have a 1,048,576-token
+# INPUT context window and up to 65,536 output tokens - the old 10,000-
 # char (~2,500-token) ceiling was using roughly 0.25% of the model's real
 # input budget, truncating mid-document on almost any real textbook chapter.
 #
@@ -362,8 +393,8 @@ MAX_PDF_CONTEXT_CHARS = 300_000
 # ---------------------------------------------------------------------------
 # THINKING LEVEL CONFIGURATION
 #
-# gemini-3.6-flash defaults to dynamic ("medium") thinking if left
-# unconfigured. Kognit's primary chat path is an interactive, turn-based
+# Reasoning models default to dynamic thinking if left
+# unconfigured (the previously used gemini-3.6-flash did). Kognit's primary chat path is an interactive, turn-based
 # student conversation - Google's own guidance names thinking_level="low"
 # as the explicit recommendation for exactly this use case ("real-time
 # chat"), trading some reasoning depth for materially lower and more
@@ -645,7 +676,8 @@ def _build_provider_history(history: list) -> list:
     return messages
 
 
-def _log_usage(usage: Optional[ProviderUsage], attempt: int, elapsed: float, mode: str, image: bool, pdf: bool) -> None:
+def _log_usage(usage: Optional[ProviderUsage], attempt: int, elapsed: float, mode: str, image: bool, pdf: bool,
+               model: Optional[str] = None) -> None:
     """
     Best-effort observability log for a successful call. The thoughts-token
     count in particular is the direct, measurable signal for how many tokens
@@ -660,7 +692,7 @@ def _log_usage(usage: Optional[ProviderUsage], attempt: int, elapsed: float, mod
         "generate_ai_response success attempt=%d/%d model=%s thinking_level=%s elapsed=%.3fs "
         "prompt_tokens=%s thought_tokens=%s output_tokens=%s total_tokens=%s "
         "(mode=%s, has_image=%s, has_pdf=%s)",
-        attempt, MAX_ATTEMPTS, MODEL_NAME, CHAT_THINKING_LEVEL, elapsed,
+        attempt, MAX_ATTEMPTS, model or MODEL_NAME, CHAT_THINKING_LEVEL, elapsed,
         prompt_tokens, thought_tokens, output_tokens, total_tokens,
         mode, image, pdf,
     )
@@ -686,7 +718,7 @@ def _is_successful_finish(finish_reason) -> bool:
     chunks" pattern used here, and separately treats an all-None
     finish_reason as evidence a turn may not be fully valid). Because this
     sandbox cannot reach the live Gemini API, it was NOT possible to
-    verify whether gemini-3.6-flash's typical successful stream reliably
+    verify whether the approved models' typical successful stream reliably
     emits finish_reason=STOP on its final chunk, or sometimes completes
     with it still unpopulated. Treating a never-observed finish_reason as
     success (rather than as interrupted) is the deliberately conservative
@@ -714,6 +746,7 @@ def _log_stream_telemetry(
     recovery_used: bool = False,
     request_id: Optional[str] = None,
     error_code: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> None:
     """
     BUG 3 INSTRUMENTATION - exactly one structured summary line per
@@ -747,7 +780,7 @@ def _log_stream_telemetry(
         "chunk_count=%d last_chunk_at=%s finish_reason=%s exception_type=%s "
         "http_status=%s total_duration=%.3fs explicit_completion_received=%s "
         "recovery_used=%s error_code=%s request_id=%s",
-        outcome, mode, attempt, MAX_ATTEMPTS, MODEL_NAME,
+        outcome, mode, attempt, MAX_ATTEMPTS, model or MODEL_NAME,
         ("%.3fs" % ttft_seconds) if ttft_seconds is not None else None,
         chunk_count,
         ("%.3fs" % last_chunk_elapsed) if last_chunk_elapsed is not None else None,
@@ -844,7 +877,7 @@ def _engine2_start(*, prompt, user_class, stream, plan, has_image, has_pdf, requ
     policy -> the routed model and thinking level are used"""
     mode = _ai_config.router_mode()
     route = None
-    model_id, thinking = MODEL_NAME, CHAT_THINKING_LEVEL
+    model_id, thinking = MODEL_NAME, _legacy_reasoning(CHAT_THINKING_LEVEL)
     if mode in ("shadow", "policy"):
         route = _router.route(_router.RouteInput(
             operation=operation or _router.OP_CHAT, plan=plan or "free", user_class=user_class,
@@ -1206,7 +1239,7 @@ def generate_ai_response(
             history=_req.history,
             model=MODEL_NAME,
             timeout_seconds=attempt_timeout,
-            reasoning_effort=CHAT_THINKING_LEVEL,
+            reasoning_effort=_legacy_reasoning(CHAT_THINKING_LEVEL),
             enable_web_search=enable_research,
             request_id=request_id,
         )
@@ -1692,7 +1725,7 @@ def generate_chat_title(history: list, board: str = "NCTB") -> Optional[str]:
             user_parts=[f"Conversation (board: {board}):\n{convo_text}\n\nTitle:"],
             model=MODEL_NAME,
             timeout_seconds=CHAT_TITLE_TIMEOUT_SECONDS,
-            reasoning_effort=TITLE_THINKING_LEVEL,
+            reasoning_effort=_legacy_reasoning(TITLE_THINKING_LEVEL),
         ))
         usage_collector.record_ai_call(
             operation="title", status="success", model=MODEL_NAME, usage=getattr(result, "usage", None),
@@ -1782,6 +1815,9 @@ class StreamChunk:
     # P0 STABILIZATION: stable machine-readable code (ERROR_* above) on
     # "error" and "interrupted" chunks. None on text/retry/done.
     error_code: Optional[str] = None
+    # The model that actually produced a successful answer (the routed model, or the other
+    # approved model after a fallback). Set on "done" only; used to label research metadata.
+    model: Optional[str] = None
 
 
 def stream_ai_response(
@@ -1925,6 +1961,7 @@ def stream_ai_response(
             explicit_completion_received=complete,
             recovery_used=recovery_used,
             request_id=request_id, error_code=error_code,
+            model=st.model_id,
         )
 
     logger.info(
@@ -2082,7 +2119,7 @@ def stream_ai_response(
                 return
 
             if _is_successful_finish(last_finish_reason):
-                _log_usage(usage, attempt, elapsed, mode, bool(image_bytes), bool(pdf_context))
+                _log_usage(usage, attempt, elapsed, mode, bool(image_bytes), bool(pdf_context), model=governor.model_id)
                 governor.record_success(time.perf_counter() - t_provider_call)
                 _telemetry("success", attempt, finish_reason=last_raw_finish_reason, complete=True)
                 yield StreamChunk(
@@ -2091,6 +2128,7 @@ def stream_ai_response(
                     grounding=grounding,
                     usage=usage,
                     elapsed_seconds=elapsed,
+                    model=governor.model_id,
                 )
                 return
 

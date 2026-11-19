@@ -125,7 +125,7 @@ class TestPerAttemptUsage:
         assert row["pricing_version"] == registry.PRICE_VERSION
 
     def test_cost_is_null_when_the_provider_reported_no_usage_or_the_model_is_unpriced(self):
-        _m, col, _ = stream([text_attempt("ok")])                    # static mode -> legacy gemini-3.6-flash, no price
+        _m, col, _ = stream([text_attempt("ok")])                    # static mode, the mock reports no usage -> no cost
         row = col.snapshot()[0]
         assert row["estimated_cost_usd"] is None
 

@@ -8,7 +8,7 @@
 | Automated tests | **Passed** (counts in §11). Mock/integration only. |
 | Database integration | **Passed** against a real PostgreSQL 16 (migrations, quota behaviour, 24-way concurrency) |
 | Frontend integration | **Passed** in jsdom **and** real Chromium 153 |
-| Live Gemini integration | **Pending paid credentials — NOT verified** |
+| Live Gemini integration | **Paid key now configured by the CEO. NOT yet verified: the live smoke test (`tools/live_gemini_smoke.py`, §13) has not been run against the real API** |
 | Security review | Code-level review done; **live Supabase RLS/Auth and a paid-tier key check are pending** |
 | Production capacity | **Not certified.** No 10,000-user claim is made or supported. |
 | Production readiness | **Not certified** |
@@ -121,6 +121,8 @@ Required secrets exist already (`GEMINI_API_KEY`, `SUPABASE_URL`, `SUPABASE_ANON
 
 ### 7.3 Rollout order, how to verify, how to roll back
 
+> **Superseded by §14 (CEO decision, 2026-11-17):** Kloriz launches with `policy` routing and approved-model fallback ON as the code defaults, without the staged shadow rollout below. The table is kept as the long-form reference for how each switch is verified and rolled back.
+
 | Stage | Action | Verify | Roll back |
 |---|---|---|---|
 | 0 | Apply 0014 then 0015 | queries in §7.1 | see the comment block at the top of each migration (usually leave the schema; flags suffice) |
@@ -134,6 +136,8 @@ Required secrets exist already (`GEMINI_API_KEY`, `SUPABASE_URL`, `SUPABASE_ANON
 **Rollback triggers:** rising `interrupted`/`error` rate, duplicate terminal events, TTFT regression, cost/request spike, any auth/privacy finding, quota inconsistency, wrong routing, quality regression.
 
 ## 8. Rollout safety rules
+
+> **Updated by §14:** `AI_ROUTER_MODE=policy` and `AI_MODEL_FALLBACK=on` are now the defaults (CEO decision). `AI_CONTEXT_BUILDER=v2` and `AI_VERIFY_MODE=shadow` remain OFF.
 * Everything below stays **disabled** until live Gemini validation passes: `AI_ROUTER_MODE=policy`, `AI_CONTEXT_BUILDER=v2`, `AI_VERIFY_MODE=shadow`, `AI_MODEL_FALLBACK=on`.
 * **Cross-provider fallback stays disabled** pending a separate privacy and contractual review. No other provider exists in the code.
 * Keep the Gemini key on the **paid tier**: Google's pricing page states free-tier content may be used to improve its products; paid tier is not.
@@ -174,3 +178,88 @@ Counts and the exact commands are in the engineering report delivered with these
 * **No payment flow exists**; Pro can only be granted in the database.
 * Router and verification quality are **unmeasured**; Bangla/English answer quality under the v2 prompts is untested against real answers.
 * The CI workflow is written but **has not run on GitHub**; the equivalent commands were run locally.
+
+## 13. Finalization audit — 2026-11-17 (scope: AI Engine 2.0 only; Phase 10 is NOT started)
+
+Baseline: `main` @ `341ac2b`. Official Google Gemini API is the only provider; no OpenRouter/OpenAI/Anthropic code exists or was added.
+
+### 13.1 What was verified today
+| Item | Result |
+|---|---|
+| Model ids `gemini-3.1-flash-lite`, `gemini-3.5-flash-lite` (the only two approved models) | Listed as **Stable** on Google's Models page (page dated 2026-10-28). 3.5 Flash-Lite model page: inputs text/image/video/audio/PDF, 1,048,576 in / 65,536 out, thinking, search grounding and structured output supported |
+| Prices (Standard paid tier, per 1M tokens) | **Confirmed 2026-11-17 on Google's official page `aistudio.google.com/docs/pricing`**: `gemini-3.1-flash-lite` input $0.25 (audio $0.50), output $1.50, cached input $0.025; `gemini-3.5-flash-lite` input $0.30, output $2.50, cached input $0.03. Output prices include thinking tokens. Both match `backend/ai/registry.py` exactly. Not modelled (not used by Kloriz): audio input, context-cache storage ($1.00/M tokens/hour), Google Search grounding ($14 per 1,000 searches after 5,000 free per month, shared across Gemini 3+ models) |
+| Installed SDK `google-genai==2.20.0` | `ThinkingLevel` has MINIMAL/LOW/MEDIUM/HIGH; the adapter's config (thinking level, search tool, timeout) builds correctly offline for every level; `chats.create(model, config, history)` signature matches the adapter |
+| Test suite | See 13.5 (final count after the approved-model correction) |
+| Secret scan (working tree + history for key patterns) | No secrets found |
+
+### 13.2 Changes made in this pass (all small, additive, reversible)
+1. `backend/providers/gemini.py` — a missing or blank `GEMINI_API_KEY` now raises a clear `RuntimeError` naming the setting (previously the SDK's generic `ValueError`). The value is never echoed.
+2. `backend/ai_engine.py` — the per-request `stream_telemetry` log line now prints the model actually used. It always printed the legacy `MODEL_NAME`, which was wrong whenever the router chose another model. Usage rows were already correct.
+3. `tools/live_gemini_smoke.py` (new) — bounded live test, 7 short calls, metadata-only output, `--dry-run` for checking the script itself.
+4. `test_ai_engine_finalization.py` (new) — 8 tests for the above and for the "exactly one terminal event" contract.
+
+### 13.3 Findings that are NOT fixed here (need a decision or live data)
+| # | Finding | Priority |
+|---|---|---|
+| 1 | ~~Default config prices nothing~~ — **closed in 13.5**: the static default is now an approved, priced model | closed |
+| 2 | Audit F-07 still open: a stream that closes with no `finish_reason` counts as success. Only the live smoke (check 3) can tell whether Gemini always sends STOP | P1, needs live run |
+| 3 | Upstream cancellation on client disconnect is by garbage collection of the synchronous generator; the provider call can continue until its next chunk and the admission slot is released earlier. Bounded, but unconfirmed live | P2 |
+| 4 | ~~Streaming research metadata labelled the provider model with the legacy `MODEL_NAME`~~ — **fixed in §14**: the `done` event now names the model that answered | closed |
+| 5 | Quiz generation, titles, notes AI and non-streaming `/api/chat` still use the legacy single-model path (unchanged from §10 item 1) | P2, deferred by design |
+| 6 | Models newer than the approved pair exist on Google's list. Not evaluated and not approved; the approved set is exactly two models and changes only on the CEO's decision backed by the benchmark | Info |
+| 7 | Everything in §12 (single worker, no capacity claim, no live RLS check) still stands | — |
+
+### 13.4 Readiness assessment
+**READY FOR INTERNAL TESTING.** Not yet *controlled beta*: that requires the live smoke test to pass and a staged `shadow` run (§7.3).
+
+### 13.5 Approved-model correction — 2026-11-17 (CEO instruction)
+**Kloriz is approved to use exactly two Gemini models: `gemini-3.1-flash-lite` and `gemini-3.5-flash-lite`. `gemini-3.6-flash` is NOT approved.** The first pass of this section wrongly treated 3.6 Flash as the legacy default; that is withdrawn.
+
+Every reference was audited. Runtime references (all removed or changed):
+| File | Was | Now |
+|---|---|---|
+| `backend/ai_engine.py` | `DEFAULT_MODEL_NAME = "gemini-3.6-flash"`; `GEMINI_MODEL` accepted any plausible id | Default `gemini-3.5-flash-lite`; `GEMINI_MODEL` accepts only the two approved ids (anything else is ignored with a warning). Legacy reasoning level is sent only if the registry documents it for the model |
+| `backend/ai/registry.py` | `AI_MODEL_GENERAL` / `AI_MODEL_ADVANCED` could name any model | Only the role's own approved id is ever returned; any other value is ignored with a warning. Router, fallback (`other_role`) and gateway all read this registry, so they cannot reach an unapproved model |
+| `.env.example` | Documented 3.6 Flash as default/example | Documents the two approved models and the default |
+| `docs/DEPLOYMENT.md` | "defaults to the built-in model id" | States the approved set and the default |
+
+Why `gemini-3.5-flash-lite` is the static default: Google documents its thinking levels (minimal/low/medium/high), so the fixed chat level `low` is valid on it; the registry sends no thinking level to `gemini-3.1-flash-lite` because none are documented. If an operator selects 3.1 via `GEMINI_MODEL`, the legacy path therefore sends no thinking level. Changing the default is one constant (`DEFAULT_MODEL_NAME`).
+
+Cost tracking: in static mode every usage row now carries a real `estimated_cost_usd` (both models are priced from the confirmed rates above). It is an estimate from reported token counts, not the billed amount; Google Search grounding fees are not included. No 3.6 Flash price exists anywhere in the code.
+
+Fixture-only mentions of `gemini-3.6-flash` that remain (no runtime effect): dummy `judge_model` / `provider_model` / mocked `model_version` strings in `evaluation/tests/*` and `test_research_*.py`, and one negative cost test that asserts the model is unpriced.
+
+Tests: `test_ai_engine_finalization.py` pins the approved set, the override lock, the default, `GEMINI_MODEL` rejection of 3.6 Flash, routing and fallback staying inside the pair (including with hostile environment overrides), static-mode requests reaching the provider with an approved model, real cost rows, the confirmed per-model prices, and the reasoning-level gate.
+
+## 14. FINAL launch configuration and closure — 2026-11-17 (CEO decision)
+
+**Decision:** Kloriz launches in December with `AI_ROUTER_MODE=policy` and `AI_MODEL_FALLBACK=on` as the built-in defaults. No staged rollout, no `.env` edits required: a deployment with no `AI_*` variables behaves as below. Phase 10 is not started.
+
+### 14.1 Final configuration (all defaults live in `backend/ai/config.py`)
+| Setting | Value | Why |
+|---|---|---|
+| `AI_ROUTER_MODE` | **policy** | Router picks the model per request: `gemini-3.1-flash-lite` for general text, `gemini-3.5-flash-lite` for images, PDFs and demanding subjects; Pro users send 70 % of requests where both models suit to the advanced model |
+| `AI_MODEL_FALLBACK` | **on** | One pre-token switch to the OTHER approved model on a 429 or an open circuit breaker. The two models have separate quotas, so this absorbs most quota hits. Never a third model, never another provider |
+| `AI_CONTEXT_BUILDER` | legacy (off) | The v2 prompt builder has never been tried on real Bangla/English answers; it is not needed to launch |
+| `AI_VERIFY_MODE` | off | Shadow verification adds a second paid model call to every answer and changes nothing the student sees |
+| `AI_GATEWAY` | v2 (reliability controls on) | Deadlines, retry budget, circuit breaker, admission control |
+| `PLAN_GATING` / `QUOTA_MODE` | enforce | Free/Pro limits enforced in the database |
+| `GEMINI_MODEL` | gemini-3.5-flash-lite | Used by quiz generation, titles, notes AI and the non-streaming chat path (which are not routed) |
+
+On startup the log prints one line, `ai_engine config: router_mode=policy model_fallback=on ...`, so the active configuration is visible without reading any file.
+
+### 14.2 Rollback (one variable, no redeploy of code)
+* Back to the single-model path: `AI_ROUTER_MODE=static` and `AI_MODEL_FALLBACK=off`.
+* Back to the pre-2.0 attempt loop entirely: also `AI_GATEWAY=legacy`.
+
+### 14.3 What this pass changed
+1. `backend/ai/config.py` — defaults `policy` / fallback `on`.
+2. `backend/ai_engine.py` — `StreamChunk` has a new optional `model` field, set on `done`, naming the model that actually answered (the routed model, or the other approved model after a fallback). The usage log line prints that model. One startup line prints the active AI configuration.
+3. `backend/main.py` — streamed research answers are labelled with the model that answered, not the legacy default.
+4. `conftest.py` — the many older tests that exercise the single-model loop run with `static` / fallback `off` pinned by an autouse fixture; any test can override it. `TestProductionDefaults` deletes both variables and proves the real defaults (routing per task, 429 recovery on the other approved model, exactly two attempts when both models are limited, one-variable rollback).
+
+### 14.4 Closure status — read this honestly
+* **Code complete for the AI Engine 2.0 scope:** routing, two-model-only registry, fallback, reliability controls, usage and cost accounting, entitlement hooks, telemetry. Automated tests: see the delivery report (all passing, including the full suite and the 72-test smoke suite).
+* **Not verified against the real Gemini API.** Nothing in this repository has ever been run against it, and the assistant's environment cannot reach it. The router's classification accuracy and answer quality on real Bangla/English questions are unmeasured. This is a limitation, not a claim of failure.
+* **One command closes that gap before launch:** `python tools/live_gemini_smoke.py` (7 short calls, well under US$0.01, metadata only). All 7 lines must say PASS. Then run it once more with `--policy`. If any line says FAIL, do not launch; send the output.
+* **Known limits that remain by design:** single worker only; no capacity number beyond a mock run; audit F-07 (a stream that closes with no finish reason counts as success); no payment flow yet.

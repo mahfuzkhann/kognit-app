@@ -597,15 +597,21 @@ class TestHttpContract:
 
 class TestModelConfiguration:
 
-    def test_default_is_unchanged_when_env_is_absent(self):
-        assert ai_engine.DEFAULT_MODEL_NAME == "gemini-3.6-flash"
-        assert ai_engine._resolve_model_name({}) == "gemini-3.6-flash"
+    def test_default_is_an_approved_model_when_env_is_absent(self):
+        assert ai_engine.DEFAULT_MODEL_NAME == "gemini-3.5-flash-lite"
+        assert ai_engine._resolve_model_name({}) == "gemini-3.5-flash-lite"
 
-    def test_env_value_overrides_the_default(self):
-        assert ai_engine._resolve_model_name({"GEMINI_MODEL": "gemini-custom-flash"}) == "gemini-custom-flash"
+    def test_env_value_may_select_the_other_approved_model(self):
+        assert ai_engine._resolve_model_name({"GEMINI_MODEL": "gemini-3.1-flash-lite"}) == "gemini-3.1-flash-lite"
 
     def test_env_value_is_trimmed(self):
-        assert ai_engine._resolve_model_name({"GEMINI_MODEL": "  gemini-custom-flash \n"}) == "gemini-custom-flash"
+        assert ai_engine._resolve_model_name({"GEMINI_MODEL": "  gemini-3.1-flash-lite \n"}) == "gemini-3.1-flash-lite"
+
+    @pytest.mark.parametrize("value", ["gemini-3.6-flash", "gemini-custom-flash", "gemini-3.8-flash"])
+    def test_an_unapproved_model_is_ignored_with_a_warning(self, value, caplog):
+        caplog.set_level(logging.WARNING)
+        assert ai_engine._resolve_model_name({"GEMINI_MODEL": value}) == ai_engine.DEFAULT_MODEL_NAME
+        assert any("not an approved Kloriz model" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.parametrize("value", ["", "   ", None])
     def test_empty_env_value_falls_back_to_the_default(self, value):
@@ -618,8 +624,8 @@ class TestModelConfiguration:
         assert any("not a valid model identifier" in r.getMessage() for r in caplog.records)
 
     def test_reads_the_real_environment_by_default(self, monkeypatch):
-        monkeypatch.setenv("GEMINI_MODEL", "gemini-from-real-env")
-        assert ai_engine._resolve_model_name() == "gemini-from-real-env"
+        monkeypatch.setenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
+        assert ai_engine._resolve_model_name() == "gemini-3.1-flash-lite"
         monkeypatch.delenv("GEMINI_MODEL")
         assert ai_engine._resolve_model_name() == ai_engine.DEFAULT_MODEL_NAME
 
@@ -634,10 +640,14 @@ class TestModelConfiguration:
         code = "import backend.ai_engine as a; print(a.MODEL_NAME)"
         base = dict(os.environ, GEMINI_API_KEY="dummy")
         out = subprocess.run([sys.executable, "-c", code], cwd=root, capture_output=True, text=True,
-                             env=dict(base, GEMINI_MODEL="gemini-import-override"), timeout=120)
+                             env=dict(base, GEMINI_MODEL="gemini-3.1-flash-lite"), timeout=120)
         assert out.returncode == 0, out.stderr
-        assert out.stdout.strip().splitlines()[-1] == "gemini-import-override"
+        assert out.stdout.strip().splitlines()[-1] == "gemini-3.1-flash-lite"
         out = subprocess.run([sys.executable, "-c", code], cwd=root, capture_output=True, text=True,
                              env=dict(base, GEMINI_MODEL="bad value with spaces"), timeout=120)
         assert out.returncode == 0, out.stderr
-        assert out.stdout.strip().splitlines()[-1] == "gemini-3.6-flash"
+        assert out.stdout.strip().splitlines()[-1] == "gemini-3.5-flash-lite"
+        out = subprocess.run([sys.executable, "-c", code], cwd=root, capture_output=True, text=True,
+                             env=dict(base, GEMINI_MODEL="gemini-3.6-flash"), timeout=120)
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip().splitlines()[-1] == "gemini-3.5-flash-lite"      # not approved -> default

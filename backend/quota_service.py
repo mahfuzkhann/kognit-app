@@ -77,7 +77,7 @@ from typing import Optional
 import httpx
 from fastapi import HTTPException
 
-from backend import database
+from backend import database, http_client
 
 logger = logging.getLogger("kognit.quota")
 
@@ -158,7 +158,7 @@ async def _rpc(user_token: str, function: str, params: dict):
                 headers=database._rest_headers(user_token),
                 json=params,
             )
-    except httpx.RequestError as exc:
+    except (httpx.RequestError, httpx.InvalidURL) as exc:   # InvalidURL: a malformed SUPABASE_URL must be a safe 503, not a 500
         logger.error("quota rpc %s network error type=%s", function, type(exc).__name__)
         raise QuotaUnavailable("network error") from exc
 

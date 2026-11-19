@@ -55,7 +55,7 @@ def router_mode() -> str:
     """static  = legacy: every request uses GEMINI_MODEL, no routing.
     shadow  = the router decides and logs, but the legacy model is still used.
     policy  = the router's model is used."""
-    return _choice("AI_ROUTER_MODE", ROUTER_MODES, "static")
+    return _choice("AI_ROUTER_MODE", ROUTER_MODES, "policy")
 
 
 def pro_advanced_share_percent() -> int:
@@ -68,7 +68,7 @@ def model_fallback_enabled() -> bool:
     """Allows ONE pre-token switch to the other approved Gemini model when the
     chosen model's circuit breaker is open or the first attempt fails
     transiently. Same provider only - cross-provider fallback does not exist."""
-    return _flag("AI_MODEL_FALLBACK", False)
+    return _flag("AI_MODEL_FALLBACK", True)
 
 
 # --- context / verification --------------------------------------------------

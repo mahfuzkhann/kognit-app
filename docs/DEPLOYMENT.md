@@ -13,7 +13,7 @@ Set these as server-side environment variables (never in the browser, HTML, git 
 |---|---|---|
 | `GEMINI_API_KEY` | yes | server-side only |
 | `SUPABASE_URL`, `SUPABASE_ANON_KEY` | yes | the anon/publishable key is public by design; protection comes from RLS |
-| `GEMINI_MODEL` | no | defaults to the built-in model id |
+| `GEMINI_MODEL` | no | one of the two approved models (`gemini-3.1-flash-lite`, `gemini-3.5-flash-lite`); anything else is ignored. Defaults to `gemini-3.5-flash-lite` |
 | `QUOTA_MODE` | no | `enforce` (default) or `off` |
 | `USAGE_WRITE_KEY` | for usage telemetry | server-side secret that lets the backend write usage rows through `record_ai_usage_events()` (migration 0011). Without it chat/quiz/quotas work, but usage rows are **not recorded** (one warning is logged). Setup in section 2a |
 | `PDF_CONTEXT_*`, `QUIZ_DEFINITION_*` | no | in-memory limits, see section 4 |

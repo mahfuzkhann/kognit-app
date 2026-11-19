@@ -263,6 +263,13 @@ class GeminiProvider:
     def __init__(self, api_key: Optional[str] = None, client=None):
         if client is None:
             key = api_key if api_key is not None else os.getenv("GEMINI_API_KEY")
+            if not key or not str(key).strip():
+                # A clear, value-free startup error. (The SDK's own message is a
+                # generic ValueError that does not say WHICH setting to fix.)
+                raise RuntimeError(
+                    "GEMINI_API_KEY is not set. Put it in the server environment or in "
+                    "the local .env file (never in frontend code). See .env.example."
+                )
             client = genai.Client(api_key=key)
         self.client = client
 

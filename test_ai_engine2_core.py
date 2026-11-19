@@ -37,12 +37,17 @@ class TestRegistry:
         assert registry.thinking_level_for(advanced, "extreme") is None
         assert registry.thinking_level_for(advanced, None) is None
 
-    def test_an_overridden_model_id_never_inherits_prices_or_levels(self, monkeypatch):
-        monkeypatch.setenv("AI_MODEL_ADVANCED", "gemini-9-future-lite")
+    def test_an_unapproved_override_is_ignored_and_the_approved_model_keeps_its_price_and_levels(self, monkeypatch):
+        # Kloriz is approved for exactly two models. An operator cannot add a third through the environment.
+        monkeypatch.setenv("AI_MODEL_ADVANCED", "gemini-3.6-flash")
         spec = registry.get_model(registry.ROLE_ADVANCED)
-        assert spec.model_id == "gemini-9-future-lite"
-        assert spec.price is None and spec.thinking_levels == () and spec.verified_on == "unverified"
-        assert cost.estimate("gemini-9-future-lite", ProviderUsage(prompt_tokens=10, output_tokens=10)).usd is None
+        assert spec.model_id == "gemini-3.5-flash-lite"
+        assert spec.price is not None and spec.thinking_levels and spec.verified_on != "unverified"
+        assert registry.role_for_model_id("gemini-3.6-flash") is None
+
+    def test_an_override_naming_the_other_approved_model_does_not_swap_roles(self, monkeypatch):
+        monkeypatch.setenv("AI_MODEL_GENERAL", "gemini-3.5-flash-lite")
+        assert registry.get_model(registry.ROLE_GENERAL).model_id == "gemini-3.1-flash-lite"
 
     def test_an_invalid_override_is_ignored(self, monkeypatch):
         monkeypatch.setenv("AI_MODEL_GENERAL", "bad id; rm -rf /")
@@ -92,7 +97,7 @@ class TestCost:
         est = cost.estimate("gemini-3.1-flash-lite", usage)
         assert est.usd is None and est.basis == f"unavailable:{reason}"
 
-    def test_unknown_model_has_no_cost(self):
+    def test_an_unapproved_model_has_no_price_and_none_is_ever_added(self):
         est = cost.estimate("gemini-3.6-flash", self._u())
         assert est.usd is None and est.basis == "unavailable:unknown_model"
 
@@ -461,14 +466,21 @@ class TestAdmission:
 
 # ================================= config ====================================
 class TestConfig:
-    def test_defaults_reproduce_pre_2_0_behaviour(self):
-        assert config.router_mode() == "static" and config.context_builder_mode() == "legacy"
-        assert config.verify_mode() == "off" and not config.model_fallback_enabled()
+    def test_production_defaults(self, monkeypatch):
+        # Final launch configuration: policy routing + one approved-model fallback ON; the
+        # unproven pieces (v2 prompt builder, verification) OFF. conftest pins `static` for
+        # the legacy tests, so clear every AI_* switch to see what a bare deployment does.
+        for name in ("AI_ROUTER_MODE", "AI_MODEL_FALLBACK", "AI_CONTEXT_BUILDER", "AI_VERIFY_MODE",
+                     "AI_GATEWAY", "PLAN_GATING"):
+            monkeypatch.delenv(name, raising=False)
+        assert config.router_mode() == "policy" and config.model_fallback_enabled()
+        assert config.context_builder_mode() == "legacy" and config.verify_mode() == "off"
         assert config.gateway_enabled() and config.plan_gating_mode() == "enforce"
 
     @pytest.mark.parametrize("env,value,getter,expected", [
         ("AI_ROUTER_MODE", "policy", config.router_mode, "policy"),
-        ("AI_ROUTER_MODE", "chaos", config.router_mode, "static"),
+        ("AI_ROUTER_MODE", "chaos", config.router_mode, "policy"),          # invalid -> the default
+        ("AI_ROUTER_MODE", "static", config.router_mode, "static"),         # the documented rollback value
         ("AI_VERIFY_MODE", "on", config.verify_mode, "off"),          # there is no student-facing mode
         ("AI_VERIFY_MODE", "shadow", config.verify_mode, "shadow"),
         ("AI_CONTEXT_BUILDER", "v2", config.context_builder_mode, "v2"),

@@ -1472,6 +1472,7 @@ async def chat_stream_endpoint(
 
         final_text = ""
         grounding = None
+        answered_by_model = None
         terminal_sent = False
 
         # AI Engine 2.0: bounded concurrent generations + bounded queue. Over the limit the
@@ -1533,6 +1534,7 @@ async def chat_stream_endpoint(
                 elif chunk.kind == "done":
                     final_text = chunk.text
                     grounding = chunk.grounding
+                    answered_by_model = chunk.model
                 elif chunk.kind == "interrupted":
                     # BUG 3 FIX: a genuinely partial/non-success stream. This
                     # must NEVER be forwarded as "done" - see the event
@@ -1585,7 +1587,7 @@ async def chat_stream_endpoint(
                     research_result = normalize_grounding_metadata(
                         grounding,
                         provider="google",
-                        provider_model=MODEL_NAME,
+                        provider_model=answered_by_model or MODEL_NAME,
                         research_latency_seconds=None,
                         decision_reason=research_decision.reason,
                         decision_category=research_decision.category,
