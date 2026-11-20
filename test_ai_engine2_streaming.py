@@ -74,20 +74,35 @@ class TestModelSelection:
         monkeypatch.setenv("AI_ROUTER_MODE", "policy")
         mock, _c, _ = stream([text_attempt("ok")], plan="free")
         assert mock.requests[0].model == GENERAL and mock.requests[0].reasoning_effort is None
-        mock, _c, _ = stream([text_attempt("ok")], plan="free", prompt="Solve the equation x^2 - 5x + 6 = 0")
+        mock, _c, _ = stream([text_attempt("ok")], plan="pro", prompt="Solve the equation x^2 - 5x + 6 = 0")
         assert mock.requests[0].model == ADVANCED and mock.requests[0].reasoning_effort == "medium"
+        # FINAL PLAN: the same maths question from a Free student stays on the general model (no level sent)
+        mock, _c, _ = stream([text_attempt("ok")], plan="free", prompt="Solve the equation x^2 - 5x + 6 = 0")
+        assert mock.requests[0].model == GENERAL and mock.requests[0].reasoning_effort is None
 
-    def test_images_and_documents_route_to_the_advanced_model(self, monkeypatch):
+    def test_images_and_documents_route_to_the_advanced_model_for_pro_only(self, monkeypatch):
         monkeypatch.setenv("AI_ROUTER_MODE", "policy")
-        mock, _c, _ = stream([text_attempt("ok")], image_bytes=png(), prompt="what is this?")
+        mock, _c, _ = stream([text_attempt("ok")], plan="pro", image_bytes=png(), prompt="what is this?")
         assert mock.requests[0].model == ADVANCED
-        mock, _c, _ = stream([text_attempt("ok")], pdf_context="Chapter 1 text", prompt="summarise")
+        mock, _c, _ = stream([text_attempt("ok")], plan="pro", pdf_context="Chapter 1 text", prompt="summarise")
         assert mock.requests[0].model == ADVANCED
+        mock, _c, _ = stream([text_attempt("ok")], plan="free", image_bytes=png(), prompt="what is this?")
+        assert mock.requests[0].model == GENERAL
+        mock, _c, _ = stream([text_attempt("ok")], plan="free", pdf_context="Chapter 1 text", prompt="summarise")
+        assert mock.requests[0].model == GENERAL
+
+    @pytest.mark.parametrize("mode", ["static", "shadow", "policy"])
+    @pytest.mark.parametrize("plan", ["free", "unmetered", None])
+    def test_a_non_pro_request_never_reaches_the_advanced_model_in_any_router_mode(self, monkeypatch, mode, plan):
+        monkeypatch.setenv("AI_ROUTER_MODE", mode)
+        kw = {} if plan is None else {"plan": plan}
+        mock, _c, _ = stream([text_attempt("ok")], image_bytes=png(), prompt="Solve x^2 = 4", **kw)
+        assert [r.model for r in mock.requests] == [GENERAL]
 
     def test_shadow_mode_logs_the_decision_but_keeps_the_legacy_model(self, monkeypatch, caplog):
         monkeypatch.setenv("AI_ROUTER_MODE", "shadow")
         with caplog.at_level("INFO"):
-            mock, _c, _ = stream([text_attempt("ok")], prompt="Solve x^2 = 4")
+            mock, _c, _ = stream([text_attempt("ok")], plan="pro", prompt="Solve x^2 = 4")
         assert mock.requests[0].model == ai_engine.MODEL_NAME
         assert "route_model=gemini-3.5-flash-lite" in caplog.text and "route_reason=advanced_mathematics" in caplog.text
 
@@ -107,7 +122,7 @@ class TestPerAttemptUsage:
         mock, col, chunks = stream([
             failing_attempt(K.UNAVAILABLE, http_status=503, after_text=["partial"]),
             text_attempt("full answer", usage=U(1000, 200)),
-        ], prompt="Solve x^2 = 4")
+        ], plan="pro", prompt="Solve x^2 = 4")
         assert kinds(chunks) == ["text", "retry", "text", "done"] and len(terminals(chunks)) == 1
         assert chunks[-1].text == "full answer"                     # never concatenated with "partial"
         rows = col.snapshot()
@@ -199,8 +214,9 @@ class TestHealthFallbackAndRateLimits:
 
     def test_with_fallback_enabled_a_429_gets_one_attempt_on_the_other_approved_model(self, monkeypatch):
         monkeypatch.setenv("AI_ROUTER_MODE", "policy")
+        monkeypatch.setenv("AI_PRO_ADVANCED_SHARE_PERCENT", "0")      # Pro plain text starts on the general model
         monkeypatch.setenv("AI_MODEL_FALLBACK", "on")
-        mock, col, chunks = stream([failing_attempt(K.RATE_LIMITED, http_status=429), text_attempt("recovered")])
+        mock, col, chunks = stream([failing_attempt(K.RATE_LIMITED, http_status=429), text_attempt("recovered")], plan="pro")
         assert mock.call_count == 2 and kinds(chunks) == ["text", "done"] and chunks[-1].text == "recovered"
         assert [r.model for r in mock.requests] == [GENERAL, ADVANCED]
         rows = col.snapshot()
@@ -209,14 +225,31 @@ class TestHealthFallbackAndRateLimits:
     def test_a_429_on_both_models_stops_after_exactly_two_attempts(self, monkeypatch):
         monkeypatch.setenv("AI_ROUTER_MODE", "policy")
         monkeypatch.setenv("AI_MODEL_FALLBACK", "on")
-        mock, _c, chunks = stream([failing_attempt(K.RATE_LIMITED, http_status=429)])
+        mock, _c, chunks = stream([failing_attempt(K.RATE_LIMITED, http_status=429)], plan="pro")
         assert mock.call_count == 2 and kinds(chunks) == ["error"]
 
-    def test_an_open_breaker_switches_the_retry_to_the_other_model(self, monkeypatch):
+    def test_a_free_request_has_no_alternate_model_so_a_429_is_a_single_attempt(self, monkeypatch):
+        # FINAL PLAN: the only other approved model is the advanced one, which Free may not use - not even
+        # as a fallback. The request ends with the normal quota message instead.
+        monkeypatch.setenv("AI_ROUTER_MODE", "policy")
+        monkeypatch.setenv("AI_MODEL_FALLBACK", "on")
+        mock, _c, chunks = stream([failing_attempt(K.RATE_LIMITED, http_status=429), text_attempt("x")], plan="free")
+        assert mock.call_count == 1 and kinds(chunks) == ["error"]
+        assert [r.model for r in mock.requests] == [GENERAL]
+
+    def test_a_free_request_is_never_switched_to_the_advanced_model_by_an_open_breaker(self, monkeypatch):
         monkeypatch.setenv("AI_ROUTER_MODE", "policy")
         monkeypatch.setenv("AI_MODEL_FALLBACK", "on")
         monkeypatch.setenv("AI_BREAKER_FAILURES", "1")
-        mock, col, chunks = stream([failing_attempt(K.UNAVAILABLE, http_status=503), text_attempt("ok")])
+        mock, _c, _chunks = stream([failing_attempt(K.UNAVAILABLE, http_status=503), text_attempt("ok")], plan="free")
+        assert ADVANCED not in [r.model for r in mock.requests]
+
+    def test_an_open_breaker_switches_the_retry_to_the_other_model(self, monkeypatch):
+        monkeypatch.setenv("AI_ROUTER_MODE", "policy")
+        monkeypatch.setenv("AI_PRO_ADVANCED_SHARE_PERCENT", "0")      # Pro plain text starts on the general model
+        monkeypatch.setenv("AI_MODEL_FALLBACK", "on")
+        monkeypatch.setenv("AI_BREAKER_FAILURES", "1")
+        mock, col, chunks = stream([failing_attempt(K.UNAVAILABLE, http_status=503), text_attempt("ok")], plan="pro")
         assert [r.model for r in mock.requests] == [GENERAL, ADVANCED] and kinds(chunks) == ["text", "done"]
         assert health.tracker.state(GENERAL) == "open"
         assert col.snapshot()[-1]["fallback_from"] == GENERAL

@@ -91,7 +91,7 @@ rollback;
 begin;
 do $$ begin
   begin
-    perform public.activate_pro_subscription('00000000-0000-0000-0000-0000000000f1','monthly','bkash','test-pay-guard-2',299,'BDT');
+    perform public.activate_pro_subscription('00000000-0000-0000-0000-0000000000f1','monthly','bkash','test-pay-guard-2',399,'BDT');
     perform pg_temp.check(false, 'activation must fail while pro limits are not configured');
   exception when sqlstate '22023' then
     perform pg_temp.check(sqlerrm = 'pro limits are not configured', 'refused for the right reason: ' || sqlerrm);

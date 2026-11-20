@@ -1,5 +1,5 @@
 -- Behaviour tests for the final CEO quota decisions (migration 0015 + the shipped 0008-0012 logic):
---   Free quiz = 3 per WEEK, weeks reset in Asia/Dhaka (Monday 00:00 +06:00)
+--   Free quiz = 1 per WEEK (0016; was 3 in 0015), weeks reset in Asia/Dhaka (Monday 00:00 +06:00)
 --   Pro flashcards = their OWN meter, 200/day temporary guard, configurable in plan_limits
 -- Every check raises on failure (psql ON_ERROR_STOP). Fixtures that could disturb later suites
 -- are inside transactions that roll back. Run by run_local_db_tests.sh.
@@ -31,17 +31,17 @@ begin
   perform pg_temp.check(expected_reset like '%T00:00:00+06:00', 'independent calc: the reset instant is midnight Dhaka');
   perform pg_temp.check(extract(isodow from (date_trunc('week', now() at time zone 'Asia/Dhaka') + interval '7 days')) = 1,
                         'independent calc: the reset day is a Monday');
-  for i in 1..3 loop
+  for i in 1..1 loop
     r := public.consume_quota('quiz', 'wk-quiz-' || lpad(i::text, 4, '0'), null);
-    perform pg_temp.check((r->>'allowed')::boolean and r->>'plan' = 'free' and (r->>'limit')::int = 3
-                          and (r->>'used')::int = i, 'free quiz ' || i || ' of 3 allowed');
+    perform pg_temp.check((r->>'allowed')::boolean and r->>'plan' = 'free' and (r->>'limit')::int = 1
+                          and (r->>'used')::int = i, 'free quiz ' || i || ' of 1 allowed');
     perform pg_temp.check(r->>'resets_at' = expected_reset, 'resets_at = next Monday 00:00 Asia/Dhaka (' || expected_reset || ')');
   end loop;
-  r := public.consume_quota('quiz', 'wk-quiz-0004', null);
+  r := public.consume_quota('quiz', 'wk-quiz-0002', null);
   perform pg_temp.check(not (r->>'allowed')::boolean and r->>'reason' = 'quota_exceeded'
-                        and (r->>'limit')::int = 3 and (r->>'used')::int = 3 and (r->>'remaining')::int = 0
+                        and (r->>'limit')::int = 1 and (r->>'used')::int = 1 and (r->>'remaining')::int = 0
                         and r->>'kind' = 'quiz' and r->>'resets_at' = expected_reset,
-                        'fourth free quiz refused with the structured quota_exceeded response');
+                        'second free quiz of the week refused with the structured quota_exceeded response');
   -- replaying an already-counted request id is never double counted
   r := public.consume_quota('quiz', 'wk-quiz-0001', null);
   perform pg_temp.check((r->>'allowed')::boolean and (r->>'replay')::boolean, 'replay of an allowed quiz is not double counted');
@@ -79,7 +79,7 @@ begin;
 set local role authenticated;
 set local request.jwt.claim.sub = '00000000-0000-0000-0000-0000000000e3';
 do $$ declare r jsonb; i int; begin
-  for i in 1..3 loop perform public.consume_quota('quiz', 'wk3-quiz-' || lpad(i::text, 4, '0'), null); end loop;
+  for i in 1..1 loop perform public.consume_quota('quiz', 'wk3-quiz-' || lpad(i::text, 4, '0'), null); end loop;
   r := public.consume_quota('quiz', 'wk3-quiz-0004', null);
   perform pg_temp.check(not (r->>'allowed')::boolean, 'exhausted within the week');
 end $$;
@@ -129,17 +129,16 @@ set local role authenticated;
 set local request.jwt.claim.sub = '00000000-0000-0000-0000-0000000000e1';
 do $$ declare r jsonb; i int; ok boolean; begin
   -- earlier section rolled back, so this user starts the week at zero
-  for i in 1..2 loop perform public.consume_quota('quiz', 'rf-quiz-' || lpad(i::text, 4, '0'), null); end loop;
   r := public.consume_quota('quiz', 'rf-quiz-0003', encode(sha256(convert_to('refund-secret-token-0001', 'UTF8')), 'hex'));
-  perform pg_temp.check((r->>'allowed')::boolean and (r->>'used')::int = 3, 'third quiz consumed');
-  perform pg_temp.check(not (public.consume_quota('quiz', 'rf-quiz-0004', null)->>'allowed')::boolean, 'fourth refused while three are live');
+  perform pg_temp.check((r->>'allowed')::boolean and (r->>'used')::int = 1, 'the weekly quiz consumed');
+  perform pg_temp.check(not (public.consume_quota('quiz', 'rf-quiz-0004', null)->>'allowed')::boolean, 'a second one is refused while the first is live');
   -- generation FAILED: the application refunds with the secret token it holds
   ok := public.refund_quota('quiz', 'rf-quiz-0003', 'refund-secret-token-0001');
   perform pg_temp.check(ok, 'the failed generation is refunded with its own token');
   perform pg_temp.check(not public.refund_quota('quiz', 'rf-quiz-0003', 'refund-secret-token-0001'), 'a refund can only happen once');
   perform pg_temp.check(not public.refund_quota('quiz', 'rf-quiz-0001', 'wrong-token-wrong-token'), 'a wrong token cannot refund');
   r := public.consume_quota('quiz', 'rf-quiz-0005', null);
-  perform pg_temp.check((r->>'allowed')::boolean and (r->>'used')::int = 3, 'the refunded unit is available again');
+  perform pg_temp.check((r->>'allowed')::boolean and (r->>'used')::int = 1, 'the refunded unit is available again');
   -- a refunded request id can never be reused to get a second free unit
   perform pg_temp.check(public.consume_quota('quiz', 'rf-quiz-0003', null)->>'reason' = 'request_id_reused', 'refunded request id cannot be replayed');
 end $$;

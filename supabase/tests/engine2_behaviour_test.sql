@@ -12,13 +12,13 @@ begin if ok is not true then raise exception 'TEST FAILED: %', msg; end if; end 
 do $$ declare r record; begin
   perform pg_temp.check((select limit_count from public.plan_limits where plan='pro' and kind='chat') = 20
      and (select period from public.plan_limits where plan='pro' and kind='chat') = 'day', 'Pro chat = 20/day');
-  perform pg_temp.check((select limit_count from public.plan_limits where plan='pro' and kind='quiz') = 15
-     and (select period from public.plan_limits where plan='pro' and kind='quiz') = 'day', 'Pro quiz = 15/day');
+  perform pg_temp.check((select limit_count from public.plan_limits where plan='pro' and kind='quiz') = 5
+     and (select period from public.plan_limits where plan='pro' and kind='quiz') = 'day', 'Pro quiz = 5/day (0016)');
   perform pg_temp.check((select limit_count from public.plan_limits where plan='pro' and kind='notes_ai') = 200, 'Pro notes_ai abuse guard = 200/day');
   perform pg_temp.check((select limit_count from public.plan_limits where plan='free' and kind='chat') = 1
      and (select first_day_limit_count from public.plan_limits where plan='free' and kind='chat') = 3, 'Free chat 1/day, 3 on first day (unchanged)');
-  perform pg_temp.check((select limit_count from public.plan_limits where plan='free' and kind='quiz') = 3
-     and (select period from public.plan_limits where plan='free' and kind='quiz') = 'week', 'Free quiz 3/week (unchanged, reset period flagged to CEO)');
+  perform pg_temp.check((select limit_count from public.plan_limits where plan='free' and kind='quiz') = 1
+     and (select period from public.plan_limits where plan='free' and kind='quiz') = 'week', 'Free quiz 1/week (0016)');
 end $$;
 
 -- fixtures
@@ -54,19 +54,19 @@ set local request.jwt.claim.sub = '00000000-0000-0000-0000-0000000000d2';
 do $$ declare r jsonb; i int; begin
   perform pg_temp.check(public.get_my_plan() = 'pro', 'active subscription -> pro');
   -- another student's plan is not readable through this function (it takes no user id at all)
-  -- ---- 3. Pro daily limits are enforced: chat 20, then denied; quiz 15, then denied
+  -- ---- 3. Pro daily limits are enforced: chat 20, then denied; quiz 5, then denied (0016)
   for i in 1..20 loop
     r := public.consume_quota('chat', 'e2-chat-' || lpad(i::text, 4, '0'), null);
     perform pg_temp.check((r->>'allowed')::boolean and r->>'plan' = 'pro' and (r->>'limit')::int = 20, 'Pro chat ' || i || ' allowed');
   end loop;
   r := public.consume_quota('chat', 'e2-chat-0021', null);
   perform pg_temp.check(not (r->>'allowed')::boolean and r->>'reason' = 'quota_exceeded', 'Pro chat 21 denied');
-  for i in 1..15 loop
+  for i in 1..5 loop
     r := public.consume_quota('quiz', 'e2-quiz-' || lpad(i::text, 4, '0'), null);
-    perform pg_temp.check((r->>'allowed')::boolean and (r->>'limit')::int = 15, 'Pro quiz ' || i || ' allowed');
+    perform pg_temp.check((r->>'allowed')::boolean and (r->>'limit')::int = 5, 'Pro quiz ' || i || ' allowed');
   end loop;
-  r := public.consume_quota('quiz', 'e2-quiz-0016', null);
-  perform pg_temp.check(not (r->>'allowed')::boolean, 'Pro quiz 16 denied (note-generated quizzes spend this same pool)');
+  r := public.consume_quota('quiz', 'e2-quiz-0006', null);
+  perform pg_temp.check(not (r->>'allowed')::boolean, 'Pro quiz 6 denied (note-generated quizzes spend this same pool)');
   -- replay of an already counted request is not double counted
   r := public.consume_quota('quiz', 'e2-quiz-0001', null);
   perform pg_temp.check((r->>'allowed')::boolean and (r->>'replay')::boolean, 'quiz replay allowed, not double counted');

@@ -69,30 +69,41 @@ class TestEntitlementPolicy:
 
     def test_the_written_policy_matches_the_documented_ceo_numbers(self):
         free, pro = entitlements.QUOTA_POLICY["free"], entitlements.QUOTA_POLICY["pro"]
-        assert free["chat"] == ("day", 1, 3) and free["quiz"] == ("week", 3, None)
-        assert pro["chat"] == ("day", 20, None) and pro["quiz"] == ("day", 15, None)
+        # FINAL PLAN (migration 0016)
+        assert free["chat"] == ("day", 1, 3) and free["quiz"] == ("week", 1, None)
+        assert free["photo_solve"] == ("lifetime", 1, None) and "pdf_upload" not in free
+        assert pro["chat"] == ("day", 20, None) and pro["quiz"] == ("day", 5, None)
+        assert pro["photo_solve"] == ("day", 5, None) and pro["pdf_upload"] == ("day", 2, None)
         assert pro["notes_ai"][1] == entitlements.PRO_NOTES_AI_PER_DAY
         assert pro["flashcards"] == ("day", 200, None) and "flashcards" not in free
 
     def test_the_migration_seeds_exactly_the_policy_written_in_code(self):
-        """Single source of truth: the Pro rows seeded by migrations 0014 + 0015 must equal QUOTA_POLICY."""
+        """Single source of truth: the Pro rows seeded by migrations 0014, 0015 and 0016 (later wins, exactly as
+        they are applied) must equal QUOTA_POLICY - and so must the Free rows that 0016 sets."""
         import pathlib
         import re
         root = pathlib.Path(__file__).parent / "supabase/migrations"
-        sql = (root / "0014_ai_engine_2_plans_usage_curriculum.sql").read_text() + (root / "0015_flashcards_meter.sql").read_text()
+        sql = "".join((root / name).read_text() for name in (
+            "0014_ai_engine_2_plans_usage_curriculum.sql", "0015_flashcards_meter.sql", "0016_free_pro_plan_final.sql"))
         rows = re.findall(r"\('pro',\s*'(\w+)',\s*'(\w+)',\s*(\d+),\s*(null|\d+)\)", sql)
         seeded = {kind: (period, int(limit)) for kind, period, limit, _first in rows}
         expected = {k: (v[0], v[1]) for k, v in entitlements.QUOTA_POLICY["pro"].items()}
         assert seeded == expected
+        free_rows = re.findall(r"\('free',\s*'(\w+)',\s*'(\w+)',\s*(\d+),\s*(null|\d+)\)",
+                               (root / "0016_free_pro_plan_final.sql").read_text())
+        free_seeded = {kind: (period, int(limit)) for kind, period, limit, _first in free_rows}
+        free_expected = {k: (v[0], v[1]) for k, v in entitlements.QUOTA_POLICY["free"].items() if k != "notes_ai"}
+        assert free_seeded == free_expected
 
 
 # ============================ notes generation gate ==========================
 class TestNotesGeneration:
     @pytest.mark.parametrize("path,payload", [("flashcards", {}), ("mini-quiz", {})])
     def test_free_students_cannot_generate_study_material_from_notes(self, client, db, monkeypatch, path, payload):
-        ledger = use_ledger(monkeypatch, plan="free")
+        ledger = use_ledger(monkeypatch, plan="pro")
         as_user(ALICE)
-        note = save(client)                                         # saving notes stays free
+        note = save(client)                                         # saved while Pro; the subscription then lapses
+        ledger.plan = "free"
         generate = MagicMock(return_value=MagicMock(text="[]"))
         with stub_ai(generate=generate):
             resp = client.post(f"/api/notes/{note['id']}/{path}", json=payload)
@@ -101,8 +112,31 @@ class TestNotesGeneration:
         generate.assert_not_called()                                # no provider spend
         assert consumed(ledger) == []                               # no quota unit spent either
 
-    def test_free_students_keep_saving_notes_and_getting_tag_suggestions(self, client, db, monkeypatch):
-        ledger = use_ledger(monkeypatch, plan="free")
+    def test_free_students_cannot_save_notes_edit_tags_or_get_tag_suggestions(self, client, db, monkeypatch):
+        """FINAL PLAN: Pocket Notes are Pro-only. Refused with a stable 403 BEFORE any database write, quota
+        unit or provider call - and a note a student already owns stays readable and deletable."""
+        ledger = use_ledger(monkeypatch, plan="pro")
+        as_user(ALICE)
+        note = save(client)
+        ledger.plan = "free"                                        # subscription lapsed / never had one
+        generate = MagicMock(return_value=MagicMock(text=json.dumps(["Force"])))
+        with stub_ai(generate=generate):
+            suggest = client.post(f"/api/notes/{note['id']}/suggest-tags")
+        create = client.post("/api/notes", json={"client_id": "c" * 12, "content_md": "x", "question_md": "q"})
+        edit = client.patch(f"/api/notes/{note['id']}", json={"tags": ["a"]})
+        for resp in (suggest, create, edit):
+            assert resp.status_code == 403, resp.text
+            detail = resp.json()["detail"]
+            assert detail["code"] == "PLAN_REQUIRED" and detail["feature"] == "pocket_notes" and detail["required_plan"] == "pro"
+        generate.assert_not_called()
+        assert consumed(ledger) == []
+        # nothing is deleted by a plan change: the student can still list, read and delete what they own
+        assert client.get("/api/notes").status_code == 200
+        assert client.get(f"/api/notes/{note['id']}").status_code == 200
+        assert client.delete(f"/api/notes/{note['id']}").status_code in (200, 204)
+
+    def test_pro_students_save_notes_and_get_tag_suggestions(self, client, db, monkeypatch):
+        ledger = use_ledger(monkeypatch, plan="pro")
         as_user(ALICE)
         note = save(client)
         assert note["id"]
@@ -145,18 +179,20 @@ class TestNotesGeneration:
         assert regen.status_code == 403                             # generating NEW material needs Pro
 
     def test_the_client_cannot_claim_a_plan(self, client, db, monkeypatch):
-        use_ledger(monkeypatch, plan="free")
+        ledger = use_ledger(monkeypatch, plan="pro")
         as_user(ALICE)
         note = save(client)
+        ledger.plan = "free"
         with provider_text(json.dumps(FLASH)):
             resp = client.post(f"/api/notes/{note['id']}/flashcards", json={"plan": "pro", "kind": "chat"},
                                headers={"X-Plan": "pro", "X-User-Plan": "pro"}, params={"plan": "pro"})
         assert resp.status_code == 403
 
     def test_a_plan_lookup_failure_fails_closed_with_a_safe_503(self, client, db, monkeypatch):
-        use_ledger(monkeypatch, plan="pro", fail_plan=True)
+        ledger = use_ledger(monkeypatch, plan="pro")
         as_user(ALICE)
         note = save(client)
+        ledger.fail_plan = True                                     # the plan lookup now fails
         generate = MagicMock(return_value=MagicMock(text=json.dumps(FLASH)))
         with stub_ai(generate=generate):
             resp = client.post(f"/api/notes/{note['id']}/flashcards", json={})

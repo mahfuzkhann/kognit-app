@@ -195,6 +195,24 @@ def _bucket(request_id: str) -> int:
     return int(digest[:8], 16) % 100
 
 
+def model_allowed_for_plan(plan: Optional[str], model_id: Optional[str]) -> bool:
+    """FINAL PLAN RULE: the advanced-reasoning model is a Pro entitlement. Free (and any unknown or
+    unmetered plan - fail closed) may only use the general model. A model the registry does not know
+    (operator override, test double) is not restricted here."""
+    spec = registry.model_for_id(model_id)
+    if spec is None or spec.role != registry.ROLE_ADVANCED:
+        return True
+    return plan == "pro"
+
+
+def plan_safe_model_id(plan: Optional[str], model_id: str) -> str:
+    """`model_id` itself when the plan may use it, otherwise the approved general model. The one place
+    that turns 'which model would we like' into 'which model this plan may have'."""
+    if model_allowed_for_plan(plan, model_id):
+        return model_id
+    return registry.get_model(registry.ROLE_GENERAL).model_id
+
+
 def route(inp: RouteInput, *, health: HealthTracker = None) -> RouteDecision:
     health = health or default_tracker
     plan = "pro" if inp.plan == "pro" else "free"
@@ -228,6 +246,12 @@ def route(inp: RouteInput, *, health: HealthTracker = None) -> RouteDecision:
         else:
             role, reason = registry.ROLE_GENERAL, "free_general_text"
 
+    # FINAL PLAN RULE (migration 0016): Free never gets the advanced model - not for reasoning subjects, not
+    # for an image, not for a document, not for a quiz, and (below) not as a capability or health
+    # alternative either. Advanced models are a Pro entitlement, decided here on the server.
+    if plan != "pro" and role == registry.ROLE_ADVANCED:
+        role, reason = registry.ROLE_GENERAL, reason + "+free_plan_general_only"
+
     # Capability gate (never route to a model that cannot do the job).
     needed_inputs = tuple(
         name for name, present in (("image", inp.has_image), ("pdf", inp.has_document)) if present
@@ -237,14 +261,14 @@ def route(inp: RouteInput, *, health: HealthTracker = None) -> RouteDecision:
     if not all(checks.values()):
         alt = registry.get_model(registry.other_role(role))
         alt_checks = registry.supports(alt, inputs=needed_inputs, structured=inp.needs_structured_output)
-        if all(alt_checks.values()):
+        if all(alt_checks.values()) and model_allowed_for_plan(plan, alt.model_id):
             spec, checks, role, reason = alt, alt_checks, alt.role, reason + "+capability_alternative"
 
     # Health gate.
     alternatives = []
     other = registry.get_model(registry.other_role(spec.role))
     other_checks = registry.supports(other, inputs=needed_inputs, structured=inp.needs_structured_output)
-    if all(other_checks.values()):
+    if all(other_checks.values()) and model_allowed_for_plan(plan, other.model_id):
         alternatives.append(other.model_id)
     health_state = health.state(spec.model_id)
     if health_state != "closed" and alternatives and health.allow(other.model_id) and not health.allow(spec.model_id):

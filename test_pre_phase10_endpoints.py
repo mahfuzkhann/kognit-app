@@ -38,8 +38,10 @@ DENIED = {"allowed": False, "reason": "quota_exceeded", "plan": "free", "kind": 
 class FakeQuota:
     """Stands in for the database functions. Records every call."""
 
-    def __init__(self, consume=ALLOWED, unavailable=False):
-        self.consume, self.unavailable, self.calls = dict(consume), unavailable, []
+    def __init__(self, consume=ALLOWED, unavailable=False, plan="pro"):
+        # `plan` is what get_my_plan() answers. PDF upload is a Pro feature (final plan), so the tests that
+        # exercise the PDF lifecycle run as a Pro student by default.
+        self.consume, self.unavailable, self.calls, self.plan = dict(consume), unavailable, [], plan
 
     async def rpc(self, user_token, function, params):
         self.calls.append({"function": function, "params": dict(params), "token": user_token})
@@ -49,6 +51,8 @@ class FakeQuota:
             return dict(self.consume, kind=params["p_kind"])
         if function == "refund_quota":
             return True
+        if function == "get_my_plan":
+            return self.plan
         raise AssertionError(f"unexpected rpc {function}")
 
     def named(self, function):
@@ -70,7 +74,7 @@ def _app_state(monkeypatch):
 
     main.app.dependency_overrides[main._rate_limited_chat] = _chat_user
     main.app.dependency_overrides[main._rate_limited_quiz_generation] = _chat_user
-    main.app.dependency_overrides[main._rate_limited_pdf_upload] = _user_id
+    main.app.dependency_overrides[main._rate_limited_pdf_upload] = _chat_user
     main.app.dependency_overrides[main.get_current_user_id] = _user_id
 
     async def _ctx(**kwargs):
@@ -311,6 +315,7 @@ class TestQuotaErrorMapping:
 @pytest.fixture
 def fake_pdf(monkeypatch):
     monkeypatch.setattr(main, "has_pdf_signature", lambda b: True)
+    monkeypatch.setattr(main, "count_pdf_pages", lambda b: 1)
     monkeypatch.setattr(main, "extract_text_from_pdf", lambda b, *a, **k: "Chapter text about force and motion.")
 
 

@@ -99,9 +99,13 @@ first. There is no automated down-migration.
 
 ## 3. Plans and quotas (current policy)
 
-* **Free:** 3 chats on the first (Asia/Dhaka) day the account exists, then 1 chat per day; 3 quizzes
-  per week. Days reset at midnight Dhaka time, weeks on Monday 00:00 Dhaka.
-* **Pro:** ৳299 monthly / ৳3,199 yearly, manual renewal (no auto-renew). Limits: **not yet decided**.
+* **Final plan (migration 0016) - see `docs/PLANS_AND_QUOTAS.md` for the complete rules.**
+* **Free:** 3 chats on the first (Asia/Dhaka) day the account exists, then 1 chat per day; 1 quiz per week;
+  1 Photo Solve per account for life; no PDF upload, no Pocket Notes, general model only. Days reset at
+  midnight Dhaka time, weeks on Monday 00:00 Dhaka.
+* **Pro:** ৳399 monthly (yearly price unchanged at ৳3,199, to be confirmed), manual renewal (no auto-renew).
+  20 chats/day, 5 Photo Solves/day (photo < 3 MB), 2 PDF uploads/day (max 5 pages), 5 quizzes/day,
+  Pocket Notes, flashcards, learning intelligence, advanced model.
 * A "chat" is one request to `/api/chat` or `/api/chat/stream`; a "quiz" is one `/api/quiz/generate`.
   Counting requests (not chat ids) means opening new chats cannot bypass a limit.
 * A request is counted when accepted, before the provider is called. A request rejected for quota
@@ -118,7 +122,7 @@ first. There is no automated down-migration.
   generation, an unexpected exception), the unit is returned immediately - not via a background task that
   FastAPI would skip when an exception escapes.
 * **Notes/title AI is a separate meter** (`notes_ai`, Free: 6 per Dhaka day - proposed): chat titles and
-  Pocket Notes topic suggestions, flashcards and mini-quizzes. Opening stored study material and
+  Pocket Notes topic suggestions (Pro only), flashcards and mini-quizzes. Opening stored study material and
   ordinary note create/read/edit/delete are free. The existing per-minute limiter remains as an extra
   layer only.
 

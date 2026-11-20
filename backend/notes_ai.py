@@ -38,7 +38,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
-from backend.ai_engine import MODEL_NAME
+from backend.ai_engine import MODEL_NAME, plan_model_for_current_request
 from backend.providers import ProviderError, ProviderRequest, get_provider
 from backend.providers.base import ProviderErrorKind
 from backend import notes_engine
@@ -87,13 +87,13 @@ def _call_model(system_instruction: str, user_text: str) -> str:
         result = get_provider().generate(ProviderRequest(
             system_instruction=system_instruction,
             user_parts=[user_text],
-            model=MODEL_NAME,
+            model=plan_model_for_current_request(),
             timeout_seconds=NOTES_AI_TIMEOUT_SECONDS,
             reasoning_effort=None,
         ))
     except ProviderError as exc:
         usage_collector.record_ai_call(
-            operation="notes", status="error", model=MODEL_NAME,
+            operation="notes", status="error", model=plan_model_for_current_request(),
             error_code=str(getattr(exc.kind, "value", exc.kind)),
         )
         # str(exc) is the safe label built by ProviderError itself.
@@ -107,13 +107,13 @@ def _call_model(system_instruction: str, user_text: str) -> str:
         raise NotesAIError(CODE_FAILED) from exc
     except Exception as exc:  # noqa: BLE001 - boundary: never leak anything upward
         usage_collector.record_ai_call(
-            operation="notes", status="error", model=MODEL_NAME, error_code=type(exc).__name__,
+            operation="notes", status="error", model=plan_model_for_current_request(), error_code=type(exc).__name__,
         )
         logger.error("notes_ai unexpected error type=%s", type(exc).__name__)
         raise NotesAIError(CODE_FAILED) from exc
 
     usage_collector.record_ai_call(
-        operation="notes", status="success", model=MODEL_NAME, usage=getattr(result, "usage", None),
+        operation="notes", status="success", model=plan_model_for_current_request(), usage=getattr(result, "usage", None),
         duration_seconds=time.perf_counter() - _t_notes,
     )
     text = (getattr(result, "text", None) or "").strip()

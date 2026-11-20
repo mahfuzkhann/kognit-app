@@ -90,7 +90,7 @@ class TestTelemetryReportsTheModelUsed:
         set_provider(MockProvider([text_attempt("ok")]))
         with caplog.at_level(logging.INFO, logger="kognit.ai_engine"):
             list(ai_engine.stream_ai_response(
-                "Hi", request_id="rid-final-4", user_class="Class 9-10 (SSC)", stream="Science"))
+                "Hi", request_id="rid-final-4", plan="pro", user_class="Class 9-10 (SSC)", stream="Science"))
         lines = [r.getMessage() for r in caplog.records if "stream_telemetry" in r.getMessage()]
         assert len(lines) == 1 and f"model={ai_engine.MODEL_NAME} " in lines[0]
 
@@ -178,7 +178,7 @@ class TestRoutingAndFallbackStayInsideTheApprovedPair:
             ai_failing(ProviderErrorKind.RATE_LIMITED), text_attempt("recovered")])
         set_provider(mock)
         chunks = list(ai_engine.stream_ai_response(
-            "Who wrote Amar Shonar Bangla?", request_id="rid-fb2", plan="free",
+            "Who wrote Amar Shonar Bangla?", request_id="rid-fb2", plan="pro",
             user_class="Class 9-10 (SSC)", stream="Science"))
         assert chunks[-1].kind == "done"
         assert mock.requests and all(r.model in APPROVED for r in mock.requests)
@@ -193,7 +193,7 @@ class TestStaticModeUsesAnApprovedPricedModel:
     def test_static_mode_sends_the_approved_default_to_the_provider(self):
         mock = MockProvider([text_attempt("ok")])
         set_provider(mock)
-        list(ai_engine.stream_ai_response("Hi", request_id="rid-st1", user_class="Class 9-10 (SSC)", stream="Science"))
+        list(ai_engine.stream_ai_response("Hi", request_id="rid-st1", plan="pro", user_class="Class 9-10 (SSC)", stream="Science"))
         assert [r.model for r in mock.requests] == [ai_engine.MODEL_NAME]
         assert mock.requests[0].model in APPROVED
 
@@ -201,7 +201,7 @@ class TestStaticModeUsesAnApprovedPricedModel:
         set_provider(MockProvider([text_attempt("ok", usage=ProviderUsage(
             prompt_tokens=1000, output_tokens=500, thoughts_tokens=100, total_tokens=1600))]))
         collector = usage_collector.start_collection("rid-st2", "")
-        list(ai_engine.stream_ai_response("Hi", request_id="rid-st2", user_class="Class 9-10 (SSC)", stream="Science"))
+        list(ai_engine.stream_ai_response("Hi", request_id="rid-st2", plan="pro", user_class="Class 9-10 (SSC)", stream="Science"))
         row = collector.snapshot()[0]
         assert row["model"] == ai_engine.MODEL_NAME
         assert row["estimated_cost_usd"] is not None and row["estimated_cost_usd"] > 0
@@ -241,7 +241,7 @@ class TestLegacyReasoningLevelFollowsTheRegistry:
             monkeypatch.setattr(ai_engine, "MODEL_NAME", model)
             mock = MockProvider([text_attempt("ok")])
             set_provider(mock)
-            list(ai_engine.stream_ai_response("Hi", request_id="rid-lv", user_class="Class 9-10 (SSC)", stream="Science"))
+            list(ai_engine.stream_ai_response("Hi", request_id="rid-lv", plan="pro", user_class="Class 9-10 (SSC)", stream="Science"))
             assert mock.requests[0].model == model
             assert mock.requests[0].reasoning_effort == expected
 
@@ -297,17 +297,18 @@ class TestProductionDefaults:
         mock = MockProvider([text_attempt("ok")])
         set_provider(mock)
         chunks = list(ai_engine.stream_ai_response(
-            "What does this diagram show?", request_id="rid-d2", plan="free", image_bytes=_png(),
+            "What does this diagram show?", request_id="rid-d2", plan="pro", image_bytes=_png(),
             user_class="Class 9-10 (SSC)", stream="Science"))
         assert chunks[-1].kind == "done" and chunks[-1].model == ADVANCED_ID
         assert mock.requests[0].model == ADVANCED_ID
 
-    def test_a_429_recovers_on_the_other_approved_model_and_the_done_event_names_it(self, bare_deployment):
+    def test_a_429_recovers_on_the_other_approved_model_and_the_done_event_names_it(self, bare_deployment, monkeypatch):
+        monkeypatch.setenv("AI_PRO_ADVANCED_SHARE_PERCENT", "0")     # Pro plain text starts on the general model
         mock = MockProvider([failing_attempt(ProviderErrorKind.RATE_LIMITED, http_status=429), text_attempt("recovered")])
         set_provider(mock)
         collector = usage_collector.start_collection("rid-d3", "")
         chunks = list(ai_engine.stream_ai_response(
-            "Who wrote Amar Shonar Bangla?", request_id="rid-d3", plan="free",
+            "Who wrote Amar Shonar Bangla?", request_id="rid-d3", plan="pro",
             user_class="Class 9-10 (SSC)", stream="Science"))
         assert [c.kind for c in chunks if c.kind in TERMINALS] == ["done"]
         assert [r.model for r in mock.requests] == [GENERAL_ID, ADVANCED_ID]
@@ -319,7 +320,7 @@ class TestProductionDefaults:
         mock = MockProvider([failing_attempt(ProviderErrorKind.RATE_LIMITED, http_status=429)])
         set_provider(mock)
         chunks = list(ai_engine.stream_ai_response(
-            "Who wrote Amar Shonar Bangla?", request_id="rid-d4", plan="free",
+            "Who wrote Amar Shonar Bangla?", request_id="rid-d4", plan="pro",
             user_class="Class 9-10 (SSC)", stream="Science"))
         assert [c.kind for c in chunks if c.kind in TERMINALS] == ["error"]
         assert mock.call_count == 2
@@ -330,16 +331,16 @@ class TestProductionDefaults:
         mock = MockProvider([text_attempt("ok")])
         set_provider(mock)
         chunks = list(ai_engine.stream_ai_response(
-            "Who wrote Amar Shonar Bangla?", request_id="rid-d5", plan="free",
+            "Who wrote Amar Shonar Bangla?", request_id="rid-d5", plan="pro",
             user_class="Class 9-10 (SSC)", stream="Science"))
         assert chunks[-1].model == ai_engine.MODEL_NAME and mock.requests[0].model == ai_engine.MODEL_NAME
 
     def test_the_done_event_names_the_model_in_static_mode_too(self):
         set_provider(MockProvider([text_attempt("ok")]))
-        chunks = list(ai_engine.stream_ai_response("Hi", request_id="rid-d6", user_class="Class 9-10 (SSC)", stream="Science"))
+        chunks = list(ai_engine.stream_ai_response("Hi", request_id="rid-d6", plan="pro", user_class="Class 9-10 (SSC)", stream="Science"))
         assert chunks[-1].kind == "done" and chunks[-1].model == ai_engine.MODEL_NAME
 
     def test_an_interrupted_or_failed_stream_does_not_claim_a_model(self, bare_deployment):
         set_provider(MockProvider([failing_attempt(ProviderErrorKind.AUTH, http_status=401)]))
-        chunks = list(ai_engine.stream_ai_response("Hi", request_id="rid-d7", plan="free", user_class="Class 9-10 (SSC)", stream="Science"))
+        chunks = list(ai_engine.stream_ai_response("Hi", request_id="rid-d7", plan="pro", user_class="Class 9-10 (SSC)", stream="Science"))
         assert chunks[-1].kind == "error" and chunks[-1].model is None

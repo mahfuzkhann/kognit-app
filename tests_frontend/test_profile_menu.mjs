@@ -441,9 +441,12 @@ await check("Get help lists real topics and adds no fake contact action", async 
 await check("help limits match the backend constants", () => {
     const main = read("backend/main.py");
     assert(/MAX_PDF_UPLOAD_SIZE_BYTES\s*=\s*15 \* 1024 \* 1024/.test(main));
-    assert(/MAX_IMAGE_UPLOAD_SIZE_BYTES\s*=\s*8 \* 1024 \* 1024/.test(main));
+    // Final plan: a photo must be LESS than 3 MB (entitlements.PHOTO_MAX_BYTES = 3 MiB - 1) and a Pro PDF has at most 5 pages.
+    assert(/MAX_IMAGE_UPLOAD_SIZE_BYTES\s*=\s*entitlements\.PHOTO_MAX_BYTES/.test(main));
+    assert(/PHOTO_MAX_BYTES\s*=\s*3 \* 1024 \* 1024 - 1/.test(read("backend/entitlements.py")));
+    assert(/PDF_MAX_PAGES\s*=\s*5/.test(read("backend/entitlements.py")));
     const i18n = read("static/js/i18n.js");
-    assert(i18n.includes("PDFs up to 15 MB and images up to 8 MB"));
+    assert(i18n.includes("Images must be smaller than 3 MB. PDF upload is part of the Pro plan (up to 5 pages)."));
 });
 
 /* =============================================================

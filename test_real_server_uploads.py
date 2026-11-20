@@ -72,7 +72,7 @@ def student(monkeypatch):
     overrides = {
         main._rate_limited_chat: user_and_token,
         main._rate_limited_quiz_generation: user_and_token,
-        main._rate_limited_pdf_upload: user_id,
+        main._rate_limited_pdf_upload: user_and_token,
         main.get_current_user_id: user_id,
         main.get_current_user_and_token: user_and_token,
     }

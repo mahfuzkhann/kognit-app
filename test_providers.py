@@ -744,13 +744,14 @@ class TestPolicyStreamingOverMock:
 
 class TestPolicyBuildsTheProviderRequest:
 
-    def test_stream_request_contents(self, use_mock, sleeps):
+    def test_stream_request_contents(self, use_mock, sleeps, monkeypatch):
+        monkeypatch.setenv("AI_ROUTER_MODE", "static")      # this test is about the request shape, not routing
         mock = use_mock(text_attempt("ok"))
         ai_engine.stream_ai_response  # noqa
         list(ai_engine.stream_ai_response(
             prompt="Why?", mode="socratic", board="NCTB", user_class="Class 9-10 (SSC)", stream="Science",
             history=[{"role": "user", "text": "a"}, {"role": "bot", "text": "b"}, {"role": "system", "text": "skip"}],
-            enable_research=True, request_id="rid-1"))
+            enable_research=True, request_id="rid-1", plan="pro"))
         r = mock.requests[0]
         assert mock.calls == ["stream_chat"]
         assert r.model == ai_engine.MODEL_NAME and r.reasoning_effort == ai_engine.CHAT_THINKING_LEVEL == "low"
@@ -888,6 +889,16 @@ class TestPolicyUnaryOverMock:
                  and "image_decode" not in r.getMessage()]
         assert len(lines) >= 3 and all("request_id=rid-log" in m for m in lines)
         assert "UNIQUE-UNARY-PROMPT-5" not in "\n".join(r.getMessage() for r in caplog.records)
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_usage_collector():
+    """A request's usage collector lives in a ContextVar and carries the plan the model gate reads. Another
+    test module may leave one behind; these provider-contract tests run with NO request context."""
+    from backend import usage_collector
+    usage_collector._current.set(None)
+    yield
+    usage_collector._current.set(None)
 
 
 class TestPolicyQuizAndTitleOverMock:

@@ -12,10 +12,20 @@ by public.consume_quota(); QUOTA_POLICY below is the same policy written down
 as data so a test can assert the migration seeds match it (single source of
 truth, no drift). It is documentation + test oracle, not a second enforcer.
 
-AMBIGUITIES (implemented configurable, flagged for the CEO):
-  * Free quiz allowance: "3 general quiz generations" has no stated reset
-    period. The existing, shipped policy is 3 per WEEK (Asia/Dhaka, weeks start
-    Monday); it is kept and can be changed with one UPDATE of plan_limits.
+FINALIZED PLAN (migration 0016, CEO specification):
+  Free: chat 1/day (3 on the signup day), quiz 1/week, Photo Solve 1 per account for life,
+        no PDF upload, no Pocket Notes, no advanced models, no learning intelligence.
+  Pro : chat 20/day, Photo Solve 5/day, PDF upload 2/day (max 5 pages), quiz 5/day, Pocket Notes and
+        flashcards, learning intelligence, advanced models.
+  Every number lives in public.plan_limits and is mirrored in QUOTA_POLICY below.
+
+INTERPRETATIONS (implemented, documented in docs/PLANS_AND_QUOTAS.md, flagged for the CEO):
+  * A request that carries a photo spends the Photo Solve meter INSTEAD of the chat meter. The two
+    allowances are separate lines in the plan, and a photo is one AI generation either way, so cost
+    is bounded by the sum of both meters. Free's one trial photo therefore never depends on whether
+    today's single chat has been used.
+  * Free has no PDF upload and no Pocket Notes (the plan table lists neither). Reading, listing and
+    deleting notes a student already owns stays allowed: a plan change deletes nothing.
   * Pro flashcards are "Unlimited flashcards" in everything the student sees. Quotas are
     integers, so the database holds a TEMPORARY, CONFIGURABLE abuse guard of
     PRO_FLASHCARDS_PER_DAY (200) on a dedicated `flashcards` meter (migration 0015).
@@ -44,23 +54,41 @@ LEARNING_SNAPSHOT = "learning_snapshot"        # GET /api/profile/snapshot
 LEARNING_MISTAKES = "learning_mistakes"        # GET /api/profile/mistakes
 LEARNING_NEXT_STEPS = "learning_next_steps"    # GET /api/profile/next-steps
 LEARNING_MATRIX = "learning_matrix"            # GET /api/profile/topics (topic mastery matrix)
+POCKET_NOTES = "pocket_notes"                  # creating / editing a note, AI tag suggestions (migration 0016)
+PDF_UPLOAD = "pdf_upload"                      # POST /api/pdf/upload (migration 0016)
 
 PRO_FEATURES = frozenset({
     NOTE_FLASHCARDS, NOTE_QUIZ, LEARNING_INSIGHTS, LEARNING_SNAPSHOT,
-    LEARNING_MISTAKES, LEARNING_NEXT_STEPS, LEARNING_MATRIX,
+    LEARNING_MISTAKES, LEARNING_NEXT_STEPS, LEARNING_MATRIX, POCKET_NOTES, PDF_UPLOAD,
 })
 PLAN_FEATURES = {PLAN_FREE: frozenset(), PLAN_PRO: PRO_FEATURES}
 
 # --- quota policy as data (mirrors supabase/migrations/0014...) ---------------
 PRO_NOTES_AI_PER_DAY = 200       # titles + tag suggestions (generic abuse guard, not a product number)
+PRO_CHATS_PER_DAY = 20
+PRO_PHOTO_SOLVES_PER_DAY = 5
+PRO_PDF_UPLOADS_PER_DAY = 2
+PRO_QUIZZES_PER_DAY = 5
 PRO_FLASHCARDS_PER_DAY = 200     # TEMPORARY internal abuse guard behind "Unlimited flashcards"
 QUOTA_POLICY = {
-    # plan: {kind: (period, limit, first_day_limit)}; Free has NO flashcards row on purpose.
-    PLAN_FREE: {"chat": ("day", 1, 3), "quiz": ("week", 3, None), "notes_ai": ("day", 6, None)},
-    PLAN_PRO: {"chat": ("day", 20, None), "quiz": ("day", 15, None),
+    # plan: {kind: (period, limit, first_day_limit)}. Free has NO flashcards and NO pdf_upload row on purpose.
+    # Free `notes_ai` (6/day) is the guard behind chat-title generation only: Free has no Pocket Notes.
+    PLAN_FREE: {"chat": ("day", 1, 3), "quiz": ("week", 1, None), "photo_solve": ("lifetime", 1, None),
+                "notes_ai": ("day", 6, None)},
+    PLAN_PRO: {"chat": ("day", PRO_CHATS_PER_DAY, None), "quiz": ("day", PRO_QUIZZES_PER_DAY, None),
+               "photo_solve": ("day", PRO_PHOTO_SOLVES_PER_DAY, None),
+               "pdf_upload": ("day", PRO_PDF_UPLOADS_PER_DAY, None),
                "notes_ai": ("day", PRO_NOTES_AI_PER_DAY, None),
                "flashcards": ("day", PRO_FLASHCARDS_PER_DAY, None)},
 }
+
+# --- upload limits (enforced on the SERVER from the real bytes, never from a client-reported size) --------
+# "Less than 3 MB": a photo of 3 MiB (3,145,728 bytes) or more is refused; one byte less is accepted.
+# Applied to every plan: Free's single trial photo is the same kind of request, and a Free limit larger
+# than Pro's would make no sense.
+PHOTO_MAX_BYTES = 3 * 1024 * 1024 - 1
+PHOTO_LIMIT_LABEL = "3MB"
+PDF_MAX_PAGES = 5
 
 # What the student is TOLD Pro includes: the single source for upgrade-UI copy, asserted by tests.
 # "Unlimited flashcards" is the advertised promise; the 200/day guard above is internal.
@@ -83,6 +111,8 @@ _FEATURE_LABEL = {
     LEARNING_MISTAKES: "Mistake analysis",
     LEARNING_NEXT_STEPS: "Personalised next steps",
     LEARNING_MATRIX: "Learning matrix",
+    POCKET_NOTES: "Pocket Notes",
+    PDF_UPLOAD: "PDF upload",
 }
 
 

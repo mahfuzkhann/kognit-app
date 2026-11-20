@@ -34,11 +34,10 @@ set local request.jwt.claim.sub = '00000000-0000-0000-0000-00000000000b';
 do $$ declare r jsonb; begin
   r := public.consume_quota('chat', 'req-b-0001', null); perform pg_temp.check((r->>'allowed')::boolean and (r->>'limit')::int = 1, 'B chat 1 allowed, daily limit 1');
   r := public.consume_quota('chat', 'req-b-0002', null); perform pg_temp.check(not (r->>'allowed')::boolean, 'B chat 2 denied');
-  -- quizzes: 3 per week
-  r := public.consume_quota('quiz', 'qz-b-0001', null); perform pg_temp.check((r->>'allowed')::boolean and (r->>'limit')::int = 3, 'quiz 1');
-  r := public.consume_quota('quiz', 'qz-b-0002', null); r := public.consume_quota('quiz', 'qz-b-0003', null);
-  perform pg_temp.check((r->>'allowed')::boolean, 'quiz 3');
-  r := public.consume_quota('quiz', 'qz-b-0004', null); perform pg_temp.check(not (r->>'allowed')::boolean, 'quiz 4 denied');
+  -- quizzes: 1 per week (0016)
+  r := public.consume_quota('quiz', 'qz-b-0001', null); perform pg_temp.check((r->>'allowed')::boolean and (r->>'limit')::int = 1, 'quiz 1');
+  r := public.consume_quota('quiz', 'qz-b-0002', null);
+  perform pg_temp.check(not (r->>'allowed')::boolean, 'quiz 2 denied');
 end $$;
 commit;
 
@@ -70,8 +69,8 @@ do $$ declare denied int := 0; begin
   begin update public.plan_limits set limit_count = 1000; exception when insufficient_privilege then denied := denied + 1; end;
   begin insert into public.quota_ledger (user_id, kind, period_key, request_id) values (auth.uid(), 'chat', 'x', 'forged-0001'); exception when insufficient_privilege then denied := denied + 1; end;
   begin delete from public.quota_ledger; exception when insufficient_privilege then denied := denied + 1; end;
-  begin perform public.activate_pro_subscription(auth.uid(), 'monthly', 'bkash', 'FAKE-1', 299, 'BDT'); exception when insufficient_privilege then denied := denied + 1; end;
-  begin insert into public.payments (user_id, provider, provider_payment_id, amount_bdt, billing_period) values (auth.uid(), 'bkash', 'FAKE-2', 299, 'monthly'); exception when insufficient_privilege then denied := denied + 1; end;
+  begin perform public.activate_pro_subscription(auth.uid(), 'monthly', 'bkash', 'FAKE-1', 399, 'BDT'); exception when insufficient_privilege then denied := denied + 1; end;
+  begin insert into public.payments (user_id, provider, provider_payment_id, amount_bdt, billing_period) values (auth.uid(), 'bkash', 'FAKE-2', 399, 'monthly'); exception when insufficient_privilege then denied := denied + 1; end;
   perform pg_temp.check(denied = 6, format('all 6 privileged writes denied (got %s)', denied));
   perform pg_temp.check((select count(*) from public.subscriptions) = 0, 'no subscription visible/created');
   perform pg_temp.check((select count(*) from public.quota_ledger) = 0 or true, 'ledger read attempts do not error out the test');
@@ -99,13 +98,13 @@ do $$ declare s1 uuid; s2 uuid; s3 uuid; e1 timestamptz; e3 timestamptz; bad boo
   begin perform public.activate_pro_subscription('00000000-0000-0000-0000-00000000000b','monthly','bkash','TX-0001', 298, 'BDT'); exception when others then bad := true; end;
   perform pg_temp.check(bad, 'wrong amount rejected');
   bad := false;
-  begin perform public.activate_pro_subscription('00000000-0000-0000-0000-00000000000b','monthly','bkash','TX-0001', 299, 'USD'); exception when others then bad := true; end;
+  begin perform public.activate_pro_subscription('00000000-0000-0000-0000-00000000000b','monthly','bkash','TX-0001', 399, 'USD'); exception when others then bad := true; end;
   perform pg_temp.check(bad, 'wrong currency rejected');
-  s1 := public.activate_pro_subscription('00000000-0000-0000-0000-00000000000b','monthly','bkash','TX-0001', 299, 'BDT');
-  s2 := public.activate_pro_subscription('00000000-0000-0000-0000-00000000000b','monthly','bkash','TX-0001', 299, 'BDT');
+  s1 := public.activate_pro_subscription('00000000-0000-0000-0000-00000000000b','monthly','bkash','TX-0001', 399, 'BDT');
+  s2 := public.activate_pro_subscription('00000000-0000-0000-0000-00000000000b','monthly','bkash','TX-0001', 399, 'BDT');
   perform pg_temp.check(s1 is not null and s1 = s2, 'replayed payment returns same subscription, no second period');
   bad := false;
-  begin perform public.activate_pro_subscription('00000000-0000-0000-0000-00000000000c','monthly','bkash','TX-0001', 299, 'BDT'); exception when others then bad := true; end;
+  begin perform public.activate_pro_subscription('00000000-0000-0000-0000-00000000000c','monthly','bkash','TX-0001', 399, 'BDT'); exception when others then bad := true; end;
   perform pg_temp.check(bad, 'payment id cannot be claimed by a different user');
   select expires_at into e1 from public.subscriptions where id = s1;
   s3 := public.activate_pro_subscription('00000000-0000-0000-0000-00000000000b','yearly','bkash','TX-0002', 3199, 'BDT');

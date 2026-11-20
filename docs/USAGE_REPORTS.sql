@@ -96,7 +96,9 @@ group by 1, 2 order by 2 desc, 1;
 -- 8. RETENTION (run deliberately, not on a schedule you have not approved). The
 --    retention period is a founder/legal decision; 180 days is only a starting point.
 -- delete from public.ai_usage_events where created_at < now() - interval '180 days';
--- delete from public.quota_ledger    where created_at < now() - interval '180 days';
+-- delete from public.quota_ledger    where created_at < now() - interval '180 days' and period_key <> 'lifetime';
+--    (migration 0016: 'lifetime' rows are the Free one-time Photo Solve record. They must NEVER be purged -
+--     a trigger makes the database refuse the delete above if the lifetime filter is left out.)
 -- ---------------------------------------------------------------------------
 -- 99. INTEGRITY REVIEW (migration 0011, Q-06) - READ-ONLY.
 -- Before 0011 any signed-in student could insert rows for themselves with any

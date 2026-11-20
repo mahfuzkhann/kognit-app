@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fires N simultaneous consume_quota calls and proves the limits cannot be bypassed:
-#   (1) a FREE student's weekly quiz allowance (3) -> exactly 3 of N allowed
+#   (1) a FREE student's weekly quiz allowance (1, migration 0016) -> exactly 1 of N allowed
 #   (2) a PRO student's flashcards guard, temporarily set to 5 -> exactly 5 of N allowed,
 #       while that student's quiz and notes_ai meters are untouched (separate counters)
 # Run by run_local_db_tests.sh against a throw-away database ONLY: it inserts test rows
@@ -30,7 +30,7 @@ select 'r:' || (public.consume_quota('$2','$3-{}0000', null)->>'allowed'); commi
 out="$(run_kind "$FREE" quiz cq-quiz)"
 allowed="$(echo "$out" | awk '$2=="r:true"{print $1}')"
 echo "free weekly quiz concurrency result: ${out//$'\n'/ | }"
-if [ "${allowed:-0}" != "3" ]; then echo "QUIZ CONCURRENCY TEST FAILED: expected exactly 3 allowed, got ${allowed:-0}" >&2; exit 1; fi
+if [ "${allowed:-0}" != "1" ]; then echo "QUIZ CONCURRENCY TEST FAILED: expected exactly 1 allowed, got ${allowed:-0}" >&2; exit 1; fi
 
 set_flashcards_limit 5
 out="$(run_kind "$PRO" flashcards cq-card)"
@@ -39,4 +39,4 @@ echo "pro flashcards concurrency result: ${out//$'\n'/ | }"
 if [ "${allowed:-0}" != "5" ]; then echo "FLASHCARDS CONCURRENCY TEST FAILED: expected exactly 5 allowed, got ${allowed:-0}" >&2; exit 1; fi
 other="$("${psql_base[@]}" -c "select count(*) from public.quota_ledger where user_id='$PRO' and kind <> 'flashcards'")"
 if [ "$other" != "0" ]; then echo "FLASHCARDS CONCURRENCY TEST FAILED: flashcards calls leaked into another meter ($other)" >&2; exit 1; fi
-echo "QUIZ + FLASHCARDS CONCURRENCY TESTS PASSED (exactly 3 of $N weekly quizzes; exactly 5 of $N flashcards; other meters untouched)"
+echo "QUIZ + FLASHCARDS CONCURRENCY TESTS PASSED (exactly 1 of $N weekly quizzes; exactly 5 of $N flashcards; other meters untouched)"

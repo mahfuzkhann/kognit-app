@@ -174,6 +174,8 @@ class TestExhaustionPreventsProviderCalls:
         use_ledger(monkeypatch)
 
         async def not_configured(user_token, function, params):
+            if function == "get_my_plan":
+                return "pro"
             return {"allowed": False, "reason": "plan_not_configured", "plan": "pro", "kind": params["p_kind"]}
         monkeypatch.setattr(quota_service, "_rpc", not_configured)
         as_user(ALICE)

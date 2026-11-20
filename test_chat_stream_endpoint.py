@@ -388,7 +388,8 @@ class TestStreamRecovery:
             chats = _Chats()
 
         monkeypatch.setattr(get_provider(), "client", _Client())
-        list(ai_engine.stream_ai_response(prompt="hi", history=[{"role": "user", "parts": [{"text": "earlier"}]}]))
+        monkeypatch.setenv("AI_ROUTER_MODE", "static")      # recovery-on-the-same-model is what is asserted, not routing
+        list(ai_engine.stream_ai_response(prompt="hi", plan="pro", history=[{"role": "user", "parts": [{"text": "earlier"}]}]))
         assert len(seen_models) == 2
         assert seen_models[0] == seen_models[1] == ai_engine.MODEL_NAME, "recovery must use the SAME model"
         assert seen_history[0] == seen_history[1], "recovery must use the SAME conversation context"

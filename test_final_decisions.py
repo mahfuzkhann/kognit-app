@@ -117,9 +117,10 @@ class TestFreeQuiz:
         quiz_env.assert_not_called()
 
     def test_free_students_cannot_make_quizzes_from_notes(self, client, db, monkeypatch):
-        ledger = use_ledger(monkeypatch, plan="free")
+        ledger = use_ledger(monkeypatch, plan="pro")
         as_user(ALICE)
         note = save(client)
+        ledger.plan = "free"                                      # saved while Pro; Free cannot generate from it
         generate = MagicMock(return_value=MagicMock(text=json.dumps(QUIZ)))
         with stub_ai(generate=generate):
             resp = client.post(f"/api/notes/{note['id']}/mini-quiz", json={})
@@ -203,9 +204,10 @@ class TestProFlashcards:
         assert consumed(ledger) == ["flashcards"]
 
     def test_free_students_are_refused_before_any_meter_is_touched(self, client, db, monkeypatch):
-        ledger = use_ledger(monkeypatch, plan="free")
+        ledger = use_ledger(monkeypatch, plan="pro")
         as_user(ALICE)
         note = save(client)
+        ledger.plan = "free"
         with provider_text(json.dumps(FLASH)):
             resp = client.post(f"/api/notes/{note['id']}/flashcards", json={})
         assert resp.status_code == 403 and consumed(ledger) == []
@@ -367,7 +369,8 @@ class TestPdfBudget:
     def test_the_upload_response_reports_truncation_explicitly(self, client, monkeypatch, caplog):
         auth()
         for size, expected in ((299_999, False), (300_000, False), (300_001, True), (450_000, True)):
-            with patch.object(main, "extract_text_from_pdf", lambda data, budget, size=size: "p" * size), \
+            with patch.object(main, "extract_text_from_pdf", lambda data, budget, pages=None, size=size: "p" * size), \
+                 patch.object(main, "count_pdf_pages", lambda b: 1), \
                  patch.object(main, "has_pdf_signature", lambda b: True):
                 with caplog.at_level(logging.WARNING):
                     r = client.post("/api/pdf/upload", data={"chat_id": f"c{size}"}, files={"file": ("a.pdf", b"%PDF-1.4 x", "application/pdf")})

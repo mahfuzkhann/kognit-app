@@ -130,12 +130,26 @@ logger.info(
 )
 
 
-def _legacy_reasoning(level: Optional[str]) -> Optional[str]:
+def plan_model_for_current_request(model_id: Optional[str] = None) -> str:
+    """The model a NON-routed call (non-streaming chat, quiz, title, notes AI) may use for the request it
+    is running inside. FINAL PLAN RULE: only Pro may use the advanced model, and that is decided here
+    from the plan the endpoint recorded from the DATABASE on the request's usage collector - never from a
+    client field. Inside a request whose plan is not 'pro' (including unmetered or not recorded) the
+    approved general model is used. With no request context at all (offline evaluation / scripts) the
+    configured model is returned unchanged, so benchmarks keep measuring exactly what they configure."""
+    model_id = model_id or MODEL_NAME
+    collector = usage_collector.current_collector()
+    if collector is None:
+        return model_id
+    return _router.plan_safe_model_id(collector.plan, model_id)
+
+
+def _legacy_reasoning(level: Optional[str], model_id: Optional[str] = None) -> Optional[str]:
     """Reasoning effort for the single-model (legacy/static) calls. Only a level the registry
     documents for MODEL_NAME is ever sent: gemini-3.5-flash-lite accepts minimal/low/medium/high;
     gemini-3.1-flash-lite's levels are not documented, so nothing is sent for it. A model the
     registry does not know (tests patch MODEL_NAME) keeps the level unchanged."""
-    spec = _registry.model_for_id(MODEL_NAME)
+    spec = _registry.model_for_id(model_id or MODEL_NAME)
     return level if spec is None else _registry.thinking_level_for(spec, level)
 
 # Phase 7B (evaluation subsystem) prompt-versioning support.
@@ -886,8 +900,17 @@ def _engine2_start(*, prompt, user_class, stream, plan, has_image, has_pdf, requ
         ))
         if mode == "policy":
             model_id, thinking = route.model_id, route.thinking_level
+    # FINAL PLAN RULE, whatever the router mode: a non-Pro request never runs on the advanced model...
+    if not _router.model_allowed_for_plan(plan, model_id):
+        model_id = _router.plan_safe_model_id(plan, model_id)
+        thinking = _legacy_reasoning(CHAT_THINKING_LEVEL, model_id)
     role = _registry.role_for_model_id(model_id) or _registry.ROLE_GENERAL
-    governor = _gateway.AttemptGovernor(request_id or "", model_id=model_id, role=role)
+    # ...and a rate-limit/health fallback must not smuggle it in either: the only other approved model is the
+    # advanced one, so a non-Pro request has no fallback model (it gets the normal retry/error behaviour).
+    governor = _gateway.AttemptGovernor(
+        request_id or "", model_id=model_id, role=role,
+        fallback_allowed=None if plan == "pro" else False,
+    )
     needs = tuple(n for n, present in (("image", has_image), ("pdf", has_pdf)) if present)
     return _Engine2State(route=route, router_mode=mode, model_id=model_id, thinking_level=thinking,
                          governor=governor, needs_inputs=needs)
@@ -1190,7 +1213,7 @@ def generate_ai_response(
         # exists but the provider did not finish cleanly (Q-11).
         usage_collector.record_ai_call(
             operation="chat", status=status or ("error" if is_error else "success"),
-            model=MODEL_NAME, usage=usage, duration_seconds=elapsed_seconds,
+            model=plan_model_for_current_request(), usage=usage, duration_seconds=elapsed_seconds,
             error_code=error_code,
         )
         # Bare-string callers (return_metadata=False, the default) get exactly
@@ -1237,9 +1260,9 @@ def generate_ai_response(
             system_instruction=_req.system_instruction,
             user_parts=_req.user_parts,
             history=_req.history,
-            model=MODEL_NAME,
+            model=plan_model_for_current_request(),
             timeout_seconds=attempt_timeout,
-            reasoning_effort=_legacy_reasoning(CHAT_THINKING_LEVEL),
+            reasoning_effort=_legacy_reasoning(CHAT_THINKING_LEVEL, plan_model_for_current_request()),
             enable_web_search=enable_research,
             request_id=request_id,
         )
@@ -1584,12 +1607,12 @@ def generate_quiz_questions(
             result = get_provider().generate(ProviderRequest(
                 system_instruction=system_instruction,
                 user_parts=[f"Create {count} MCQ questions on the topic given as the JSON string {topic_data}."],
-                model=MODEL_NAME,
+                model=plan_model_for_current_request(),
                 timeout_seconds=attempt_timeout,
                 reasoning_effort=QUIZ_THINKING_LEVEL,
             ))
             usage_collector.record_ai_call(
-                operation="quiz", status="success", model=MODEL_NAME, usage=getattr(result, "usage", None),
+                operation="quiz", status="success", model=plan_model_for_current_request(), usage=getattr(result, "usage", None),
                 duration_seconds=time.perf_counter() - _t_quiz, attempt=attempt,
             )
 
@@ -1628,7 +1651,7 @@ def generate_quiz_questions(
             status_label = getattr(e, "status", None)
             if isinstance(e, ProviderError):  # a provider failure (parse errors were recorded as success above)
                 usage_collector.record_ai_call(
-                    operation="quiz", status="error", model=MODEL_NAME, attempt=attempt,
+                    operation="quiz", status="error", model=plan_model_for_current_request(), attempt=attempt,
                     error_code=str(getattr(kind, "value", kind)),
                 )
 
@@ -1723,12 +1746,12 @@ def generate_chat_title(history: list, board: str = "NCTB") -> Optional[str]:
         result = get_provider().generate(ProviderRequest(
             system_instruction=TITLE_SYSTEM_INSTRUCTION,
             user_parts=[f"Conversation (board: {board}):\n{convo_text}\n\nTitle:"],
-            model=MODEL_NAME,
+            model=plan_model_for_current_request(),
             timeout_seconds=CHAT_TITLE_TIMEOUT_SECONDS,
-            reasoning_effort=_legacy_reasoning(TITLE_THINKING_LEVEL),
+            reasoning_effort=_legacy_reasoning(TITLE_THINKING_LEVEL, plan_model_for_current_request()),
         ))
         usage_collector.record_ai_call(
-            operation="title", status="success", model=MODEL_NAME, usage=getattr(result, "usage", None),
+            operation="title", status="success", model=plan_model_for_current_request(), usage=getattr(result, "usage", None),
             duration_seconds=time.perf_counter() - _t_title,
         )
         title = (result.text or "").strip()
@@ -1741,7 +1764,7 @@ def generate_chat_title(history: list, board: str = "NCTB") -> Optional[str]:
         return title
     except Exception as e:
         usage_collector.record_ai_call(
-            operation="title", status="error", model=MODEL_NAME,
+            operation="title", status="error", model=plan_model_for_current_request(),
             error_code=str(getattr(getattr(e, "kind", None), "value", type(e).__name__)),
         )
         logger.exception("generate_chat_title failed (board=%s) - caller will keep the existing title", board)

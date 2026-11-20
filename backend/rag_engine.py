@@ -235,6 +235,34 @@ def _extract_with_limits(file_bytes: bytes, max_chars: int, max_pages: int, time
     return text
 
 
+def count_pdf_pages(file_bytes: bytes) -> int:
+    """The document's REAL page count, read from the file itself (never from anything the client sent).
+    Used by the plan's page limit BEFORE any quota is spent or any text is extracted. Raises
+    PDFExtractionError, with the same student-safe messages as extraction, for a file that is not a PDF,
+    is password-protected, or cannot be parsed. Uses the same per-call decode limits as extraction."""
+    try:
+        if not has_pdf_signature(file_bytes):
+            raise PDFExtractionError("This file does not look like a valid PDF.")
+        with apply_configuration(
+            zlib_maximum_output_length=MAX_STREAM_DECODED_BYTES,
+            array_based_stream_maximum_output_length=MAX_STREAM_DECODED_BYTES,
+            lzw_maximum_output_length=MAX_STREAM_DECODED_BYTES,
+            run_length_maximum_output_length=MAX_STREAM_DECODED_BYTES,
+        ):
+            reader = PdfReader(io.BytesIO(file_bytes), strict=False)
+            if reader.is_encrypted:
+                raise PDFExtractionError("This PDF is password-protected and cannot be read.")
+            return len(reader.pages)
+    except PDFExtractionError:
+        raise
+    except Exception:
+        logger.exception("PDF page count failed (unexpected parser error)")
+        raise PDFExtractionError(
+            "Could not read this PDF. It may be corrupted, password-protected, "
+            "or in an unsupported format."
+        )
+
+
 def extract_text_from_pdf(
     file_bytes: bytes,
     max_chars: int = DEFAULT_MAX_EXTRACTED_CHARS,

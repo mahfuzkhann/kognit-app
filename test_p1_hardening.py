@@ -1012,7 +1012,7 @@ class TestImageThroughTheStreamEndpoint:
         monkeypatch.setattr(main_module, "MAX_IMAGE_UPLOAD_SIZE_BYTES", 1000)
         r = client.post("/api/chat/stream", data={"prompt": "q", "chat_id": "c1"},
                         files={"image": ("big.png", b"0" * 5000, "image/png")})
-        assert r.status_code == 413 and r.json()["detail"] == "Image exceeds the 0MB limit."
+        assert r.status_code == 413 and r.json()["detail"] == "Image must be smaller than 3MB."
 
     def test_non_stream_chat_endpoint_has_the_same_413(self, client, monkeypatch):
         async def _fake_user():

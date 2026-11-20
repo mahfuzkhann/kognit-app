@@ -23,7 +23,7 @@ from backend.ai_engine import (
 )
 from backend.research_decision import decide_research
 from backend.research_models import normalize_grounding_metadata, research_result_to_dict
-from backend.rag_engine import extract_text_from_pdf, PDFExtractionError, has_pdf_signature
+from backend.rag_engine import count_pdf_pages, extract_text_from_pdf, PDFExtractionError, has_pdf_signature
 from backend.database import (
     save_quiz_attempt,
     get_user_topic_profile,
@@ -55,7 +55,7 @@ from backend import entitlements, http_client
 from backend.ai import config as ai_config, gateway as ai_gateway, prompts as ai_prompts, verify as ai_verify
 from backend.ai import router as ai_router
 from backend import database as _database_module
-from backend.quota_service import KIND_CHAT, KIND_QUIZ, KIND_NOTES_AI
+from backend.quota_service import KIND_CHAT, KIND_QUIZ, KIND_NOTES_AI, KIND_PHOTO_SOLVE, KIND_PDF_UPLOAD
 from backend.learning_memory import detect_learning_signals, is_meaningful_signal_set, resolve_academic_context
 from backend.learning_snapshot import build_learning_snapshot
 from backend.next_step_engine import compute_next_steps
@@ -75,7 +75,9 @@ templates = Jinja2Templates(directory="templates")
 # ---------------------------------------------------------------------------
 MAX_PDF_UPLOAD_SIZE_BYTES = 15 * 1024 * 1024  # 15MB - adjust after testing real student PDFs
 ALLOWED_PDF_CONTENT_TYPES = {"application/pdf"}
-MAX_IMAGE_UPLOAD_SIZE_BYTES = 8 * 1024 * 1024  # 8MB - adjust after testing real student photos
+# Final plan: a photo must be LESS than 3 MB (a 3 MiB photo is refused, one byte less is accepted). The
+# limit is enforced on the real bytes read on the server and is the same for every plan.
+MAX_IMAGE_UPLOAD_SIZE_BYTES = entitlements.PHOTO_MAX_BYTES
 
 # P1-5: PDF extraction work bounds (see backend/rag_engine.py for the page and
 # time caps). The text budget is deliberately LARGER than
@@ -550,15 +552,17 @@ async def _rate_limited_quiz_generation(
     return user_and_token
 
 
-async def _rate_limited_pdf_upload(user_id: str = Depends(get_current_user_id)) -> str:
+async def _rate_limited_pdf_upload(
+    user_and_token: Tuple[str, str] = Depends(get_current_user_and_token)
+) -> Tuple[str, str]:
     """
-    Rate-limit dependency for /api/pdf/upload (P1-5). Same pattern as the
-    dependencies above; it wraps the SAME get_current_user_id the endpoint
-    already used (still exactly one auth lookup per request) and returns the
-    user_id unchanged, so the endpoint body is otherwise untouched.
+    Rate-limit dependency for /api/pdf/upload (P1-5). Same pattern as _rate_limited_chat. Since the final
+    plan work it returns (user_id, token): the upload now needs the student's OWN token to read their plan
+    and spend the Pro PDF allowance (still exactly one auth lookup per request).
     """
+    user_id, user_token = user_and_token
     _check_rate_limit(user_id, "pdf_upload")
-    return user_id
+    return user_id, user_token
 
 
 # P1-3: narrowest Content-Security-Policy that cannot break the current page.
@@ -603,6 +607,14 @@ async def _read_upload_capped(upload: UploadFile, max_bytes: int) -> Optional[by
     return b"".join(chunks)
 
 
+def _chat_quota_kind(image_bytes) -> str:
+    """Which meter a chat request spends. A request that carries a photo is a Photo Solve and spends the
+    Photo Solve allowance INSTEAD of the chat allowance (Free: one per account for life; Pro: 5/day); every
+    other request spends a chat. Streaming and non-streaming chat both call this, so the two endpoints can
+    never disagree. The decision is made from the bytes the SERVER read - never from a client flag."""
+    return KIND_PHOTO_SOLVE if image_bytes else KIND_CHAT
+
+
 async def _read_capped_image(image: UploadFile) -> bytes:
     """
     P1-7: shared by /api/chat and /api/chat/stream. Reads the image in chunks
@@ -617,8 +629,10 @@ async def _read_capped_image(image: UploadFile) -> bytes:
     """
     image_bytes = await _read_upload_capped(image, MAX_IMAGE_UPLOAD_SIZE_BYTES)
     if image_bytes is None:
-        max_mb = MAX_IMAGE_UPLOAD_SIZE_BYTES // (1024 * 1024)
-        raise HTTPException(status_code=413, detail=f"Image exceeds the {max_mb}MB limit.")
+        raise HTTPException(
+            status_code=413,
+            detail=f"Image must be smaller than {entitlements.PHOTO_LIMIT_LABEL}.",
+        )
     return image_bytes
 
 
@@ -704,12 +718,27 @@ async def readyz():
     )
 
 
+CODE_PDF_PAGE_LIMIT = "PDF_PAGE_LIMIT_EXCEEDED"
+
+
+async def _refund_pdf_upload(user_token: str, ticket) -> None:
+    """Gives one PDF upload back when it failed AFTER being counted. Best-effort and silent: a refund
+    problem must never mask the real error the student is about to be shown."""
+    if ticket is None:
+        return
+    try:
+        await quota_service.refund_quota(user_token, ticket)
+    except Exception:
+        logger.warning("pdf upload refund failed (kind=%s)", ticket.kind)
+
+
 @app.post("/api/pdf/upload")
 async def upload_pdf(
     file: UploadFile = File(...),
     chat_id: str = Form(...),
-    user_id: str = Depends(_rate_limited_pdf_upload)
+    user_and_token: Tuple[str, str] = Depends(_rate_limited_pdf_upload)
 ):
+    user_id, user_token = user_and_token
     # BUG 2 FIX: chat_id is required here specifically (unlike the softer
     # handling in chat_endpoint below) because an upload with no chat to
     # attach it to is meaningless - there is nothing safe to fall back to.
@@ -722,6 +751,11 @@ async def upload_pdf(
     is_pdf_extension = (file.filename or "").lower().endswith(".pdf")
     if not (is_pdf_content_type or is_pdf_extension):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+
+    # Final plan: PDF upload is a Pro feature. Checked from the DATABASE plan (never a client field) BEFORE
+    # the body is read, so a Free student calling this endpoint directly costs nothing and gets a stable
+    # 403 PLAN_REQUIRED. PLAN_GATING=off (documented rollback) skips the gate and the PDF allowance together.
+    gate_plan = await _require_plan_feature(user_token, entitlements.PDF_UPLOAD)
 
     file_bytes = await _read_upload_capped(file, MAX_PDF_UPLOAD_SIZE_BYTES)
     if file_bytes is None:
@@ -741,19 +775,50 @@ async def upload_pdf(
             detail="Kloriz is busy reading other PDFs right now. Please try again in a moment."
         )
 
+    pdf_ticket = None
     try:
+        # Final plan: the page limit is judged on the REAL page count read from the file, before any
+        # quota is spent. A six-page PDF is refused even if the browser claimed five.
+        try:
+            page_count = await run_in_threadpool(count_pdf_pages, file_bytes)
+        except PDFExtractionError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if page_count > entitlements.PDF_MAX_PAGES:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "code": CODE_PDF_PAGE_LIMIT,
+                    "message": f"PDFs can have at most {entitlements.PDF_MAX_PAGES} pages on your plan.",
+                    "max_pages": entitlements.PDF_MAX_PAGES,
+                    "pages": page_count,
+                },
+            )
+        # The upload is valid, so now (and only now) it is counted. A request refused above - wrong plan,
+        # bad file, too many pages - never consumes the allowance. consume is atomic in the database.
+        if gate_plan != "unmetered":
+            _decision, pdf_ticket = await quota_service.enforce_quota(
+                user_token, KIND_PDF_UPLOAD, quota_service.new_ledger_request_id()
+            )
         # P1-5: extraction is synchronous and CPU-bound; running it directly
         # inside this async endpoint blocked the whole event loop (every
         # other request, including streaming chats, stalled) for as long as
         # a large PDF took. Offloaded to the threadpool exactly like the
         # chat/quiz endpoints already do for the Gemini calls.
+        # max_pages is passed as well: even a file whose page tree under-reports its length can never make
+        # the server read more than the plan's page limit.
         pdf_text = await run_in_threadpool(
-            extract_text_from_pdf, file_bytes, PDF_EXTRACTION_TEXT_BUDGET_CHARS
+            extract_text_from_pdf, file_bytes, PDF_EXTRACTION_TEXT_BUDGET_CHARS, entitlements.PDF_MAX_PAGES
         )
+    except HTTPException:
+        # Refused after the allowance was taken (quota denial itself raises before a ticket exists).
+        await _refund_pdf_upload(user_token, pdf_ticket)
+        raise
     except PDFExtractionError as e:
+        await _refund_pdf_upload(user_token, pdf_ticket)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception:
         logger.exception("Unexpected error extracting PDF %s", file.filename)
+        await _refund_pdf_upload(user_token, pdf_ticket)
         raise HTTPException(status_code=500, detail="Could not process this PDF right now.")
     finally:
         _pdf_extraction_slots.release()
@@ -764,6 +829,8 @@ async def upload_pdf(
     try:
         _pdf_contexts.put(active_pdf_contexts, user_id, chat_id, pdf_text)
     except state_limits.ContextCapacityError:
+        # The student got nothing from this upload, so the allowance is given back.
+        await _refund_pdf_upload(user_token, pdf_ticket)
         logger.error("upload_pdf: document exceeds the configured context budget (user_id=%s)", user_id)
         raise HTTPException(status_code=413, detail="This PDF is too large to keep open. Please upload a smaller file.")
     # Truncation is EXPLICIT and OBSERVABLE (never silent): the client is told whether this document is
@@ -1169,7 +1236,7 @@ async def chat_endpoint(
     usage.bind(user_id, user_token)
     _require_expected_pdf(pdf_expected, user_id, chat_id)
     usage.request_id = request_id
-    quota_decision, usage.refund_ticket = await quota_service.enforce_quota(user_token, KIND_CHAT, request_id)
+    quota_decision, usage.refund_ticket = await quota_service.enforce_quota(user_token, _chat_quota_kind(image_bytes), request_id)
     usage.plan = quota_decision.plan
     try:
         if not chat_id:
@@ -1423,7 +1490,7 @@ async def chat_stream_endpoint(
     # starts, like the auth and rate-limit rejections above.
     usage.bind(user_id, user_token)
     usage.request_id = request_id
-    quota_decision, usage.refund_ticket = await quota_service.enforce_quota(user_token, KIND_CHAT, request_id)
+    quota_decision, usage.refund_ticket = await quota_service.enforce_quota(user_token, _chat_quota_kind(image_bytes), request_id)
     usage.plan = quota_decision.plan
 
     # Identical academic-context resolution to /api/chat: profile-derived,
@@ -2829,6 +2896,7 @@ async def create_note_endpoint(
     note text. Saving never depends on any AI operation.
     """
     user_id, user_token = user_and_token
+    await _require_plan_feature(user_token, entitlements.POCKET_NOTES)  # final plan: Pocket Notes are Pro-only (server-side)
     body = await _read_json_body(request)
     try:
         clean = notes_engine.validate_create_payload(body)
@@ -2914,6 +2982,7 @@ async def update_note_tags_endpoint(
     answer). Provenance is decided server-side - see
     notes_engine.merge_tag_edits."""
     user_id, user_token = user_and_token
+    await _require_plan_feature(user_token, entitlements.POCKET_NOTES)  # final plan: Pocket Notes are Pro-only (server-side)
     _require_note_id(note_id)
     body = await _read_json_body(request)
     try:
@@ -2975,6 +3044,7 @@ async def suggest_note_topics_endpoint(
     """
     user_id, user_token = user_and_token
     usage_telemetry.bind_current(user_id, user_token)  # Pre-Phase 10: identity for the post-response usage writer
+    await _require_plan_feature(user_token, entitlements.POCKET_NOTES)  # final plan: Pocket Notes are Pro-only (server-side)
     note = await _load_owned_note_for_ai(user_token, user_id, note_id, "suggest_note_topics_endpoint")
     _check_rate_limit(user_id, "notes_ai")
     await _enforce_notes_ai_quota(usage, user_id, user_token)  # Q-05: DB meter, before the provider

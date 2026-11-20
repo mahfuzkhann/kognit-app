@@ -140,18 +140,22 @@ class TestRouting:
         d = R(plan="free", prompt="Who wrote Amar Shonar Bangla?", user_class="Class 9-10 (SSC)")
         assert d.model_id == "gemini-3.1-flash-lite" and d.reason == "free_general_text"
 
-    def test_images_and_documents_always_use_the_advanced_model(self):
+    def test_images_and_documents_use_the_advanced_model_for_pro_only(self):
+        # FINAL PLAN (migration 0016): the advanced model is a Pro entitlement. Free gets the general model
+        # for the same request, and the decision says why.
         for kw in ({"has_image": True}, {"has_document": True}):
-            for plan in ("free", "pro"):
-                d = R(plan=plan, prompt="explain this", **kw)
-                assert d.model_id == "gemini-3.5-flash-lite" and d.reason == "multimodal_or_document"
+            d = R(plan="pro", prompt="explain this", **kw)
+            assert d.model_id == "gemini-3.5-flash-lite" and d.reason == "multimodal_or_document"
+            d = R(plan="free", prompt="explain this", **kw)
+            assert d.model_id == "gemini-3.1-flash-lite" and d.reason.endswith("+free_plan_general_only")
         assert R(has_image=True, prompt="x").task_category == router.CAT_MULTIMODAL
         assert R(has_document=True, prompt="x").task_category == router.CAT_DOCUMENT
 
-    @pytest.mark.parametrize("plan", ["free", "pro"])
-    def test_demanding_subjects_use_the_advanced_model_on_every_plan(self, plan):
-        d = R(plan=plan, prompt="Solve the integral of x^2 dx", user_class="Class 11-12 (HSC)")
+    def test_demanding_subjects_use_the_advanced_model_for_pro_only(self):
+        d = R(plan="pro", prompt="Solve the integral of x^2 dx", user_class="Class 11-12 (HSC)")
         assert d.model_id == "gemini-3.5-flash-lite" and d.reason == "advanced_mathematics"
+        d = R(plan="free", prompt="Solve the integral of x^2 dx", user_class="Class 11-12 (HSC)")
+        assert d.model_id == "gemini-3.1-flash-lite" and d.reason == "advanced_mathematics+free_plan_general_only"
 
     def test_pro_general_text_follows_the_70_30_distribution_deterministically(self):
         picks = [R(plan="pro", prompt="Tell me about Lalon Fakir", request_id=f"req-{i}").role for i in range(2000)]
@@ -182,9 +186,12 @@ class TestRouting:
         assert R(plan="enterprise-gold", prompt="hello").reason == "free_general_text"
 
     def test_quiz_on_a_demanding_subject_uses_the_advanced_model(self):
-        d = R(operation=router.OP_QUIZ, prompt="Quadratic equations and their solution", user_class="Class 9-10 (SSC)")
+        d = R(operation=router.OP_QUIZ, plan="pro", prompt="Quadratic equations and their solution", user_class="Class 9-10 (SSC)")
         assert d.role == registry.ROLE_ADVANCED
-        assert R(operation=router.OP_QUIZ, prompt="Bengali literature of the 19th century").role == registry.ROLE_GENERAL
+        assert R(operation=router.OP_QUIZ, plan="pro", prompt="Bengali literature of the 19th century").role == registry.ROLE_GENERAL
+        # ...but never for a Free student (final plan: advanced models are Pro-only)
+        assert R(operation=router.OP_QUIZ, plan="free", prompt="Quadratic equations and their solution",
+                 user_class="Class 9-10 (SSC)").role == registry.ROLE_GENERAL
 
     @pytest.mark.parametrize("op", [router.OP_TITLE, router.OP_NOTES])
     def test_titles_and_notes_ai_use_the_general_model(self, op):
@@ -200,15 +207,35 @@ class TestRouting:
 
     def test_thinking_level_is_only_set_for_the_model_that_documents_levels(self):
         assert R(plan="free", prompt="hello").thinking_level is None                       # 3.1: undocumented
-        assert R(plan="free", prompt="Solve x^2 = 4", user_class="Class 9-10 (SSC)").thinking_level == "medium"
-        assert R(has_image=True, prompt="x").thinking_level == "low"
+        assert R(plan="pro", prompt="Solve x^2 = 4", user_class="Class 9-10 (SSC)").thinking_level == "medium"
+        assert R(plan="pro", has_image=True, prompt="x").thinking_level == "low"
+        # a Free student is on the general model, which documents no level, so none is sent
+        assert R(plan="free", prompt="Solve x^2 = 4", user_class="Class 9-10 (SSC)").thinking_level is None
+        assert R(plan="free", has_image=True, prompt="x").thinking_level is None
 
-    def test_an_open_breaker_diverts_to_the_other_capable_model(self):
+    def test_an_open_breaker_diverts_a_pro_request_to_the_other_capable_model(self, monkeypatch):
+        monkeypatch.setenv("AI_PRO_ADVANCED_SHARE_PERCENT", "0")      # plain Pro text starts on the general model
+        h = health.HealthTracker()
+        for _ in range(config.breaker_failure_threshold()):
+            h.record_failure("gemini-3.1-flash-lite", "unavailable")
+        d = router.route(router.RouteInput(plan="pro", prompt="hello"), health=h)
+        assert d.model_id == "gemini-3.5-flash-lite" and d.reason.endswith("+health_alternative")
+
+    def test_an_open_breaker_never_diverts_a_free_request_to_the_advanced_model(self):
         h = health.HealthTracker()
         for _ in range(config.breaker_failure_threshold()):
             h.record_failure("gemini-3.1-flash-lite", "unavailable")
         d = router.route(router.RouteInput(plan="free", prompt="hello"), health=h)
-        assert d.model_id == "gemini-3.5-flash-lite" and d.reason.endswith("+health_alternative")
+        assert d.model_id == "gemini-3.1-flash-lite" and "health_alternative" not in d.reason
+        assert d.eligible_alternatives == ()
+
+    def test_plan_safe_model_id_is_the_single_plan_gate(self):
+        adv, gen = "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"
+        assert router.plan_safe_model_id("pro", adv) == adv
+        for plan in ("free", "unmetered", None, "enterprise-gold"):
+            assert router.plan_safe_model_id(plan, adv) == gen
+            assert router.plan_safe_model_id(plan, gen) == gen
+        assert router.plan_safe_model_id("free", "some-test-double") == "some-test-double"   # unknown id untouched
 
     def test_when_both_breakers_are_open_the_original_choice_is_kept(self):
         h = health.HealthTracker()

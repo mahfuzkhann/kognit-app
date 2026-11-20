@@ -23,14 +23,14 @@ This module is the thin Python side: it calls those functions with the
 STUDENT'S OWN token (never a service-role key), turns the answer into a
 QuotaDecision, and maps decisions/failures to stable HTTP responses.
 
-POLICY (CEO decisions recorded for this implementation)
-------------------------------------------------------
-  Free : 3 chats on the first (Asia/Dhaka) day the account exists, then 1 chat
-         per day; 3 quizzes per week.
-  Pro  : price 299 BDT/month, 3,199 BDT/year; limits are NOT yet decided, so
-         no 'pro' rows are seeded in plan_limits. A Pro user with no configured
-         limits is denied with reason "plan_not_configured" rather than being
-         silently given invented numbers. Insert the rows once decided.
+POLICY (finalized plan, migration 0016 - the numbers live in public.plan_limits and
+backend/entitlements.py QUOTA_POLICY; docs/PLANS_AND_QUOTAS.md is the readable version)
+------------------------------------------------------------------------------------
+  Free : chat 1/day (3 on the first Asia/Dhaka day the account exists), quiz 1/week,
+         Photo Solve 1 per account for life, no PDF upload, no Pocket Notes.
+  Pro  : 399 BDT/month; chat 20/day, Photo Solve 5/day, PDF upload 2/day, quiz 5/day.
+         A Pro user with a missing limits row is denied with reason
+         "plan_not_configured" rather than being silently given invented numbers.
   Days/weeks reset in Asia/Dhaka; weeks start on Monday.
   A "chat" is one request to /api/chat or /api/chat/stream. Counting requests
   (not distinct chat_ids) means opening many chats cannot bypass the limit.
@@ -88,7 +88,12 @@ KIND_NOTES_AI = "notes_ai"   # chat titles + note tag suggestions (migration 001
 # titles or tag suggestions. Free has no row: the application refuses first (PLAN_REQUIRED) and the
 # database answers plan_not_configured if that check were ever bypassed.
 KIND_FLASHCARDS = "flashcards"
-VALID_KINDS = (KIND_CHAT, KIND_QUIZ, KIND_NOTES_AI, KIND_FLASHCARDS)
+# Migration 0016. A request that carries a photo spends KIND_PHOTO_SOLVE instead of KIND_CHAT (Free: ONE
+# per account for life, period 'lifetime'; Pro: 5/day). A Pro PDF upload spends KIND_PDF_UPLOAD (2/day);
+# Free has no row, so the application answers PLAN_REQUIRED first.
+KIND_PHOTO_SOLVE = "photo_solve"
+KIND_PDF_UPLOAD = "pdf_upload"
+VALID_KINDS = (KIND_CHAT, KIND_QUIZ, KIND_NOTES_AI, KIND_FLASHCARDS, KIND_PHOTO_SOLVE, KIND_PDF_UPLOAD)
 
 PLAN_UNMETERED = "unmetered"  # reported when QUOTA_MODE=off
 
@@ -96,7 +101,8 @@ CODE_QUOTA_EXCEEDED = "QUOTA_EXCEEDED"
 CODE_QUOTA_UNAVAILABLE = "QUOTA_UNAVAILABLE"
 CODE_PLAN_NOT_CONFIGURED = "PLAN_NOT_CONFIGURED"
 
-_KIND_NOUN = {KIND_CHAT: "chats", KIND_QUIZ: "quizzes", KIND_NOTES_AI: "AI note tools", KIND_FLASHCARDS: "flashcards"}
+_KIND_NOUN = {KIND_CHAT: "chats", KIND_QUIZ: "quizzes", KIND_NOTES_AI: "AI note tools", KIND_FLASHCARDS: "flashcards",
+              KIND_PHOTO_SOLVE: "photo solves", KIND_PDF_UPLOAD: "PDF uploads"}
 
 
 class QuotaUnavailable(Exception):
@@ -253,6 +259,12 @@ _EXCEEDED_MESSAGES = {
     # Deliberately does NOT quote the number: the product advertises "Unlimited flashcards"; this is the
     # temporary abuse guard, configurable in public.plan_limits.
     KIND_FLASHCARDS: "You've created a lot of flashcards today. Please try again after the time shown.",
+    KIND_PHOTO_SOLVE: "You've used all of your photo solves for this period. Your photo solves reset at the time shown.",
+    KIND_PDF_UPLOAD: "You've used all of your PDF uploads for today. Your PDF uploads reset at the time shown.",
+}
+# The Free one-time Photo Solve trial never resets, so it must not promise a reset time that does not exist.
+_LIFETIME_EXCEEDED_MESSAGES = {
+    KIND_PHOTO_SOLVE: "You've used your one free Photo Solve. Upgrade to Pro for daily Photo Solves.",
 }
 
 
@@ -272,6 +284,8 @@ def exceeded_http_exception(decision: QuotaDecision) -> HTTPException:
         )
     headers = {}
     message = _EXCEEDED_MESSAGES.get(decision.kind, "You've reached your limit for this period.")
+    if decision.resets_at is None and decision.kind in _LIFETIME_EXCEEDED_MESSAGES:
+        message = _LIFETIME_EXCEEDED_MESSAGES[decision.kind]
     if decision.reason == "rate_limited":
         # Migration 0012's per-user ledger-growth cap (500 rows / 24 h, refunds included).
         # Only an automated consume/refund loop can reach it; same code and shape as an

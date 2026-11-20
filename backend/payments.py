@@ -28,10 +28,10 @@ THE RULES THIS BOUNDARY ENFORCES
    extends from the current expiry; an expired subscription simply stops
    matching and the user is Free again, with payment history untouched.
 
-PRICES are a CEO decision (299 BDT monthly, 3,199 BDT yearly). The database
-table public.plan_prices is the authority at activation time;
-PRO_PRICES_BDT below exists so a mismatch is rejected early, and
-test_payments_boundary.py asserts the two stay identical.
+PRICES are a CEO decision (399 BDT monthly since migration 0016; the 3,199 BDT yearly
+price is unchanged and still to be confirmed). The database table public.plan_prices
+is the authority at activation time; PRO_PRICES_BDT below exists so a mismatch is
+rejected early, and test_free_pro_plan_final.py asserts the two stay identical.
 """
 
 import logging
@@ -45,7 +45,7 @@ PROVIDER_BKASH = "bkash"
 CURRENCY_BDT = "BDT"
 BILLING_MONTHLY = "monthly"
 BILLING_YEARLY = "yearly"
-PRO_PRICES_BDT = {BILLING_MONTHLY: 299, BILLING_YEARLY: 3199}
+PRO_PRICES_BDT = {BILLING_MONTHLY: 399, BILLING_YEARLY: 3199}
 
 
 class PaymentVerificationError(Exception):

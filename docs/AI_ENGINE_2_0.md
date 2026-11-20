@@ -49,7 +49,7 @@ The NDJSON stream contract (`start`/`delta`/`retry`/`done`/`interrupted`/`error`
 
 Output price includes thinking tokens. Search grounding is billed per query and is **not** part of `estimated_cost_usd`. Re-verify prices and IDs before launch: they are a snapshot.
 
-Routing (first match; policy `2026-11-03.r1`): image/PDF → advanced · Class 9–12 maths/physics/chemistry/numerical commerce/reasoning ICT → advanced · otherwise Free → general, Pro → ≈70% advanced / 30% general by a stable hash of the request id · suitability always beats the split · an open breaker diverts to the other capable model. The subject classifier is a **keyword heuristic with unmeasured accuracy** — run `shadow` first.
+**Final plan override (migration 0016, `docs/PLANS_AND_QUOTAS.md`): the advanced model is a Pro entitlement. A Free request is always routed to the general model, whatever the rule below says, and a Free request has no fallback model (the only other model is the advanced one). Non-streaming chat, quizzes, titles and notes AI obey the same rule.** Routing (first match; policy `2026-11-03.r1`): image/PDF → advanced · Class 9–12 maths/physics/chemistry/numerical commerce/reasoning ICT → advanced · otherwise Free → general, Pro → ≈70% advanced / 30% general by a stable hash of the request id · suitability always beats the split · an open breaker diverts to the other capable model. The subject classifier is a **keyword heuristic with unmeasured accuracy** — run `shadow` first.
 
 ## 3. Plans, quotas and entitlements (final CEO decisions)
 
@@ -111,7 +111,7 @@ Deadlines: first token `AI_FIRST_TOKEN_DEADLINE_SECONDS` (75 s), whole answer `A
 
 **Apply both BEFORE deploying the application.** The profile read selects the `curriculum` column (0014) and Pro flashcards use the `flashcards` meter (0015); the new code fails closed (503) on the missing pieces. Both are additive and idempotent. Verify after applying:
 ```sql
-select plan, kind, period, limit_count from public.plan_limits order by plan, kind;   -- pro chat 20/day, quiz 15/day, notes_ai 200/day, flashcards 200/day; free chat 1(3), quiz 3/week, notes_ai 6/day; NO free flashcards row
+select plan, kind, period, limit_count from public.plan_limits order by plan, kind;   -- (after 0016) pro chat 20/day, quiz 5/day, photo_solve 5/day, pdf_upload 2/day, notes_ai 200/day, flashcards 200/day; free chat 1(3), quiz 1/week, photo_solve 1 lifetime, notes_ai 6/day; NO free flashcards / pdf_upload row
 select public.get_my_plan();                                                           -- as a signed-in student: 'free' (or 'pro')
 select column_name from information_schema.columns where table_name='student_profiles' and column_name='curriculum';
 ```

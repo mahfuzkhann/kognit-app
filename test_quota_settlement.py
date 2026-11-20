@@ -49,7 +49,7 @@ class LedgerQuota:
         self.fail_plan = fail_plan
         # "flashcards" is the dedicated Pro meter of migration 0015 (Free has no row in the database; the
         # application refuses Free before any meter is touched, see test_engine2_entitlements.py).
-        self.limits = {"chat": 1, "quiz": 3, "notes_ai": 6, "flashcards": 200}
+        self.limits = {"chat": 1, "quiz": 3, "notes_ai": 6, "flashcards": 200, "photo_solve": 1, "pdf_upload": 2}
         self.limits.update(limits or {})
         self.fail_consume = fail_consume
         self.lose_consume_response = lose_consume_response
@@ -526,7 +526,10 @@ class TestInvalidImage:
         ev = events(resp)
         assert ev[-1]["type"] == "error" and ev[-1]["code"] == "REQUEST_INVALID"
         assert mock.call_count == 0, "no provider call was made"
-        assert ledger.live("chat") == 0, "the student produced nothing usable: refunded"
+        # A request carrying a photo spends the PHOTO SOLVE meter (not a chat), and a photo that could not be
+        # read gives it straight back - the Free student's one-time trial is not wasted on a corrupt file.
+        assert ledger.live("photo_solve") == 0 and ledger.live("chat") == 0, "the student produced nothing usable: refunded"
+        assert [c["params"]["p_kind"] for c in ledger.named("consume_quota")] == ["photo_solve"]
         rows = [r for w in usage_writes for r in w["rows"]]
         assert rows and rows[0]["status"] == "error" and rows[0]["error_code"] == "REQUEST_INVALID"
 

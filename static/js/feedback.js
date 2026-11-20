@@ -64,6 +64,8 @@
         quotaChat: "আপনার চ্যাটের সীমা শেষ হয়ে গেছে।",
         quotaQuiz: "আপনার কুইজের সীমা শেষ হয়ে গেছে।",
         quotaNotes: "আপনার নোট টুলের সীমা শেষ হয়ে গেছে।",
+        quotaPhoto: "আপনার ফটো সলভের সীমা শেষ হয়ে গেছে।",
+        quotaPdf: "আপনার PDF আপলোডের সীমা শেষ হয়ে গেছে।",
         quotaGeneric: "আপনার ব্যবহারের সীমা শেষ হয়ে গেছে।",
         quotaFree: "ফ্রি প্ল্যানে ",
         quotaResets: " {when} থেকে আবার ব্যবহার করতে পারবেন।",
@@ -162,7 +164,7 @@
 
     /* ---------------- classification ---------------- */
 
-    var QUOTA_KIND_KEY = { chat: "quotaChat", quiz: "quotaQuiz", notes_ai: "quotaNotes" };
+    var QUOTA_KIND_KEY = { chat: "quotaChat", quiz: "quotaQuiz", notes_ai: "quotaNotes", photo_solve: "quotaPhoto", pdf_upload: "quotaPdf" };
 
     // Actions a failure can offer. The caller decides how to render them; an
     // action is only ever returned when it can actually be performed.
@@ -355,7 +357,7 @@
     var UPGRADE_COPY = {
         note_flashcards: {
             title: "Flashcards are a Pro feature",
-            explanation: "Creating flashcards from your notes is part of the Pro plan. You can still save notes, and any flashcards you already made stay available.",
+            explanation: "Creating flashcards from your notes is part of the Pro plan. Any flashcards you already made stay available.",
             value: "With Pro you get unlimited flashcards, so every note can become a revision deck."
         },
         note_quiz: {
@@ -387,6 +389,16 @@
             title: "Your learning matrix is a Pro feature",
             explanation: "The topic-by-topic view of what you know is part of Pro's learning intelligence.",
             value: "Pro maps your strong and weak topics so your revision is never guesswork."
+        },
+        pocket_notes: {
+            title: "Pocket Notes are a Pro feature",
+            explanation: "Saving answers as Pocket Notes is part of the Pro plan. Any notes you already saved stay available.",
+            value: "With Pro you can save as many notes as you need and turn them into flashcards and quizzes."
+        },
+        pdf_upload: {
+            title: "PDF upload is a Pro feature",
+            explanation: "Asking questions about your own PDF is part of the Pro plan. Everything else on the Free plan keeps working.",
+            value: "With Pro you can upload PDFs of up to 5 pages and ask questions about them."
         }
     };
     var UPGRADE_FALLBACK = {
