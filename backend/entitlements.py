@@ -12,20 +12,19 @@ by public.consume_quota(); QUOTA_POLICY below is the same policy written down
 as data so a test can assert the migration seeds match it (single source of
 truth, no drift). It is documentation + test oracle, not a second enforcer.
 
-FINALIZED PLAN (migration 0016, CEO specification):
+FINALIZED PLAN (migrations 0016 + 0017, CEO decisions of 2026-11-20 / 2026-11-21):
   Free: chat 1/day (3 on the signup day), quiz 1/week, Photo Solve 1 per account for life,
         no PDF upload, no Pocket Notes, no advanced models, no learning intelligence.
   Pro : chat 20/day, Photo Solve 5/day, PDF upload 2/day (max 5 pages), quiz 5/day, Pocket Notes and
         flashcards, learning intelligence, advanced models.
   Every number lives in public.plan_limits and is mirrored in QUOTA_POLICY below.
 
-INTERPRETATIONS (implemented, documented in docs/PLANS_AND_QUOTAS.md, flagged for the CEO):
-  * A request that carries a photo spends the Photo Solve meter INSTEAD of the chat meter. The two
-    allowances are separate lines in the plan, and a photo is one AI generation either way, so cost
-    is bounded by the sum of both meters. Free's one trial photo therefore never depends on whether
-    today's single chat has been used.
-  * Free has no PDF upload and no Pocket Notes (the plan table lists neither). Reading, listing and
-    deleting notes a student already owns stays allowed: a plan change deletes nothing.
+CEO DECISIONS THAT SHAPE THE CODE (docs/PLANS_AND_QUOTAS.md):
+  * Photo Solve has its OWN independent quota. A request that carries a photo spends exactly one
+    Photo Solve and never a chat; a text request spends exactly one chat and never a Photo Solve.
+  * Free cannot upload PDFs and cannot create or edit Pocket Notes. Reading, listing and deleting
+    notes a student already owns stays allowed: a plan change deletes nothing.
+  * Photos may be at most 5 MB. PDFs: Pro only, 2 a day, at most 5 pages.
   * Pro flashcards are "Unlimited flashcards" in everything the student sees. Quotas are
     integers, so the database holds a TEMPORARY, CONFIGURABLE abuse guard of
     PRO_FLASHCARDS_PER_DAY (200) on a dedicated `flashcards` meter (migration 0015).
@@ -83,11 +82,12 @@ QUOTA_POLICY = {
 }
 
 # --- upload limits (enforced on the SERVER from the real bytes, never from a client-reported size) --------
-# "Less than 3 MB": a photo of 3 MiB (3,145,728 bytes) or more is refused; one byte less is accepted.
-# Applied to every plan: Free's single trial photo is the same kind of request, and a Free limit larger
-# than Pro's would make no sense.
-PHOTO_MAX_BYTES = 3 * 1024 * 1024 - 1
-PHOTO_LIMIT_LABEL = "3MB"
+# CEO decision 4: a photo may be at most 5 MB. "5 MB" is 5 MiB (5,242,880 bytes): exactly that size is
+# accepted, one byte more is refused - before any quota is spent. The same limit applies to every plan.
+# static/js/app.js (MAX_IMAGE_UPLOAD_BYTES) mirrors it so the student is told before uploading; this server
+# check is the authority and is tested against the frontend constant.
+PHOTO_MAX_BYTES = 5 * 1024 * 1024
+PHOTO_LIMIT_LABEL = "5MB"
 PDF_MAX_PAGES = 5
 
 # What the student is TOLD Pro includes: the single source for upgrade-UI copy, asserted by tests.

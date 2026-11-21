@@ -75,8 +75,8 @@ templates = Jinja2Templates(directory="templates")
 # ---------------------------------------------------------------------------
 MAX_PDF_UPLOAD_SIZE_BYTES = 15 * 1024 * 1024  # 15MB - adjust after testing real student PDFs
 ALLOWED_PDF_CONTENT_TYPES = {"application/pdf"}
-# Final plan: a photo must be LESS than 3 MB (a 3 MiB photo is refused, one byte less is accepted). The
-# limit is enforced on the real bytes read on the server and is the same for every plan.
+# Final plan: a photo may be at most 5 MB (5 MiB is accepted, one byte more is refused with 413 BEFORE any
+# quota is spent). Enforced on the real bytes read on the server; the same for every plan.
 MAX_IMAGE_UPLOAD_SIZE_BYTES = entitlements.PHOTO_MAX_BYTES
 
 # P1-5: PDF extraction work bounds (see backend/rag_engine.py for the page and
@@ -608,9 +608,9 @@ async def _read_upload_capped(upload: UploadFile, max_bytes: int) -> Optional[by
 
 
 def _chat_quota_kind(image_bytes) -> str:
-    """Which meter a chat request spends. A request that carries a photo is a Photo Solve and spends the
-    Photo Solve allowance INSTEAD of the chat allowance (Free: one per account for life; Pro: 5/day); every
-    other request spends a chat. Streaming and non-streaming chat both call this, so the two endpoints can
+    """Which meter a chat request spends (CEO decision 3: Photo Solve has its own independent quota). A request
+    that carries a photo spends exactly one Photo Solve and NEVER a chat (Free: one per account for life; Pro:
+    5/day); every other request spends exactly one chat and never a Photo Solve. Streaming and non-streaming chat both call this, so the two endpoints can
     never disagree. The decision is made from the bytes the SERVER read - never from a client flag."""
     return KIND_PHOTO_SOLVE if image_bytes else KIND_CHAT
 
@@ -631,7 +631,7 @@ async def _read_capped_image(image: UploadFile) -> bytes:
     if image_bytes is None:
         raise HTTPException(
             status_code=413,
-            detail=f"Image must be smaller than {entitlements.PHOTO_LIMIT_LABEL}.",
+            detail=f"Image must be {entitlements.PHOTO_LIMIT_LABEL} or smaller.",
         )
     return image_bytes
 
@@ -692,6 +692,26 @@ def _require_expected_pdf(pdf_expected: str, user_id: str, chat_id: str) -> None
             "message": "Your PDF is no longer loaded on the server (it expired or the server restarted). Please upload it again.",
         },
     )
+
+
+async def _load_pdf_context(user_token: str, user_id: str, chat_id: str, pdf_expected: str) -> str:
+    """The PDF text a chat request may use, or "" when the chat has none.
+
+    PDF is a Pro feature, and a context uploaded while the student was Pro stays in server memory until its
+    idle TTL. Reading it is therefore gated on the CURRENT plan (read from the database, never from the
+    client): once a subscription has expired the stored text is no longer used and the student gets the same
+    403 PLAN_REQUIRED as a Free student. Nothing is deleted - the context simply stops being served, and is
+    served again if the student becomes Pro within its TTL.
+
+    Runs BEFORE any quota unit is spent, so a refusal never costs a chat. The plan is looked up only when a
+    context actually exists, so ordinary chats without a PDF pay no extra round trip. A failed plan lookup
+    fails CLOSED (503) like every other plan check. Raises 409 PDF_CONTEXT_EXPIRED exactly as before when
+    the browser expects a PDF the server no longer holds."""
+    _require_expected_pdf(pdf_expected, user_id, chat_id)
+    context = _pdf_contexts.get(active_pdf_contexts, user_id, chat_id) if chat_id else ""
+    if context:
+        await _require_plan_feature(user_token, entitlements.PDF_UPLOAD)
+    return context
 
 
 @app.get("/healthz")
@@ -1234,14 +1254,13 @@ async def chat_endpoint(
     # read does (an HTTPException inside it would be swallowed into a 200).
     # The PDF check runs first so a rejected request never consumes a chat.
     usage.bind(user_id, user_token)
-    _require_expected_pdf(pdf_expected, user_id, chat_id)
+    pdf_context = await _load_pdf_context(user_token, user_id, chat_id, pdf_expected)
     usage.request_id = request_id
     quota_decision, usage.refund_ticket = await quota_service.enforce_quota(user_token, _chat_quota_kind(image_bytes), request_id)
     usage.plan = quota_decision.plan
     try:
         if not chat_id:
             logger.warning("chat_endpoint: request received with no chat_id - proceeding without PDF context")
-        pdf_context = _pdf_contexts.get(active_pdf_contexts, user_id, chat_id) if chat_id else ""
         conversation_history = parse_and_validate_history(history)
         t_after_parsing = time.perf_counter()
 
@@ -1480,8 +1499,7 @@ async def chat_stream_endpoint(
 
     if not chat_id:
         logger.warning("chat_stream_endpoint: request received with no chat_id - proceeding without PDF context")
-    _require_expected_pdf(pdf_expected, user_id, chat_id)
-    pdf_context = _pdf_contexts.get(active_pdf_contexts, user_id, chat_id) if chat_id else ""
+    pdf_context = await _load_pdf_context(user_token, user_id, chat_id, pdf_expected)
     conversation_history = parse_and_validate_history(history)
 
     # Pre-Phase 10: server-side plan quota. After every cheap validation (so a

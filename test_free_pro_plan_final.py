@@ -6,7 +6,7 @@ refunds, RLS on Pocket Notes - is proven against a real PostgreSQL by supabase/t
 and supabase/tests/concurrency_photo_pdf_test.sh):
 
   * a request carrying a photo spends the PHOTO SOLVE meter, never a chat - on BOTH chat endpoints;
-  * a photo of 3 MiB or more is refused (413) BEFORE any quota is spent; one byte less is accepted;
+  * a photo of more than 5 MiB is refused (413) BEFORE any quota is spent; exactly 5 MiB is accepted;
   * PDF upload is Pro-only (403 PLAN_REQUIRED, body never read), judged on the REAL page count (<= 5),
     spends the Pro PDF allowance only for a valid upload, and gives it back if the upload then fails;
   * Pocket Notes are Pro-only server-side (covered in test_engine2_entitlements.py), existing notes stay;
@@ -144,6 +144,15 @@ class TestPhotoSolveMeter:
         assert "one free Photo Solve" in detail["message"]
         assert mock.call_count == calls
 
+    @pytest.mark.parametrize("path", ["/api/chat/stream", "/api/chat"])
+    def test_exactly_one_unit_of_exactly_one_meter_per_request_never_two(self, client, ledger, path):
+        """CEO decision 3: one Photo Solve request = exactly one Photo Solve; one text request = exactly one chat."""
+        mock_provider()
+        client.post(path, data={"prompt": "q", "chat_id": "c1"}, files={"image": ("a.png", png(), "image/png")})
+        assert kinds(ledger) == ["photo_solve"] and ledger.live("photo_solve") == 1 and ledger.live("chat") == 0
+        client.post(path, data={"prompt": "second question", "chat_id": "c1"})
+        assert kinds(ledger) == ["photo_solve", "chat"] and ledger.live("photo_solve") == 1 and ledger.live("chat") == 1
+
     def test_the_trial_does_not_touch_the_daily_chat_allowance(self, client, ledger):
         mock_provider()
         assert client.post("/api/chat/stream", data={"prompt": "q", "chat_id": "c1"},
@@ -173,24 +182,37 @@ class TestPhotoSolveMeter:
 
 # ============================================================= photo size
 class TestPhotoSizeLimit:
-    LIMIT = 3 * 1024 * 1024
+    LIMIT = 5 * 1024 * 1024                      # CEO decision 4: "maximum 5 MB" = 5 MiB, inclusive
 
-    def test_the_limit_is_exactly_three_mib_exclusive(self):
-        assert entitlements.PHOTO_MAX_BYTES == self.LIMIT - 1 == main.MAX_IMAGE_UPLOAD_SIZE_BYTES
+    def test_the_limit_is_exactly_five_mib_inclusive(self):
+        assert entitlements.PHOTO_MAX_BYTES == self.LIMIT == main.MAX_IMAGE_UPLOAD_SIZE_BYTES == 5_242_880
+        assert entitlements.PHOTO_LIMIT_LABEL == "5MB"
+
+    def test_the_frontend_limit_is_the_backend_limit(self):
+        import pathlib
+        import re
+        js = (pathlib.Path(__file__).parent / "static/js/app.js").read_text(encoding="utf-8")
+        m = re.search(r"const MAX_IMAGE_UPLOAD_BYTES = (\d+) \* 1024 \* 1024;", js)
+        assert m and int(m.group(1)) * 1024 * 1024 == entitlements.PHOTO_MAX_BYTES
+        # the browser refuses before reading or uploading anything, and reuses the existing "too large" message
+        handler = js[js.index("window.handleImageSelect"):js.index("window.clearSelectedImage")]
+        assert "file.size > MAX_IMAGE_UPLOAD_BYTES" in handler and 'fbMsg("tooLarge")' in handler
+        assert handler.index("file.size > MAX_IMAGE_UPLOAD_BYTES") < handler.index("new FileReader()")
 
     @pytest.mark.parametrize("path", ["/api/chat/stream", "/api/chat"])
-    @pytest.mark.parametrize("size", [LIMIT, LIMIT + 1, 8 * 1024 * 1024])
-    def test_a_photo_at_or_above_3mb_is_refused_before_any_quota_is_spent(self, client, ledger, path, size):
+    @pytest.mark.parametrize("size", [LIMIT + 1, LIMIT + 4096, 8 * 1024 * 1024])
+    def test_a_photo_above_5mb_is_refused_before_any_quota_is_spent(self, client, ledger, path, size):
         mock = mock_provider()
         r = client.post(path, data={"prompt": "q", "chat_id": "c1"}, files={"image": ("big.png", png(size - len(png())), "image/png")})
-        assert r.status_code == 413 and r.json()["detail"] == "Image must be smaller than 3MB."
-        assert ledger.calls == [] and mock.call_count == 0, "a refused upload costs nothing"
+        assert r.status_code == 413 and r.json()["detail"] == "Image must be 5MB or smaller."
+        assert ledger.calls == [] and mock.call_count == 0, "a refused upload costs nothing (no plan call, no quota call)"
 
     @pytest.mark.parametrize("path", ["/api/chat/stream", "/api/chat"])
-    def test_a_photo_just_under_3mb_is_accepted(self, client, ledger, path):
+    @pytest.mark.parametrize("size", [LIMIT - 1, LIMIT])
+    def test_a_photo_of_up_to_exactly_5mb_is_accepted_and_spends_one_photo_solve(self, client, ledger, path, size):
         mock_provider()
-        data = png(self.LIMIT - 1 - len(png()))
-        assert len(data) == self.LIMIT - 1
+        data = png(size - len(png()))
+        assert len(data) == size
         r = client.post(path, data={"prompt": "q", "chat_id": "c1"}, files={"image": ("ok.png", data, "image/png")})
         assert r.status_code == 200
         assert kinds(ledger) == ["photo_solve"]
@@ -405,14 +427,149 @@ class TestPolicyIsOneSourceOfTruth:
 
 
 class TestPriceMirror:
-    def test_the_application_price_matches_the_database_after_migration_0016(self):
+    """CEO decision 1: 399 BDT monthly, 4,548 BDT yearly. NOTE (flagged to the CEO): the decision calls the
+    yearly price "exactly 12 x 399", but 12 x 399 is 4,788. The explicit figure 4,548 is what is implemented
+    and pinned here; if 4,788 was meant, these numbers, migration 0017, payments.py and the docs change together."""
+
+    @staticmethod
+    def _executable(path):
+        return "\n".join(l for l in path.read_text(encoding="utf-8").splitlines() if not l.lstrip().startswith("--"))
+
+    def test_the_application_prices_match_the_migrations(self):
         import pathlib
         import re
         from backend import payments
         root = pathlib.Path(__file__).parent / "supabase/migrations"
-        executable = "\n".join(l for l in (root / "0016_free_pro_plan_final.sql").read_text().splitlines()
-                               if not l.lstrip().startswith("--"))          # the ROLLBACK note mentions the old 299
-        m = re.search(r"update public\.plan_prices set amount_bdt = (\d+) where plan = 'pro' and billing_period = 'monthly'", executable)
-        assert m and int(m.group(1)) == payments.PRO_PRICES_BDT[payments.BILLING_MONTHLY] == 399
-        seed = (root / "0008_plans_quota_subscriptions.sql").read_text()
-        assert re.search(r"'pro',\s*'yearly',\s*" + str(payments.PRO_PRICES_BDT[payments.BILLING_YEARLY]) + r"\b", seed)
+        monthly = re.search(r"amount_bdt = (\d+) where plan = 'pro' and billing_period = 'monthly'",
+                            self._executable(root / "0016_free_pro_plan_final.sql"))
+        yearly = re.search(r"amount_bdt = (\d+)\s+where plan = 'pro' and billing_period = 'yearly'",
+                           self._executable(root / "0017_final_yearly_price.sql"))
+        assert monthly and yearly
+        assert payments.PRO_PRICES_BDT == {payments.BILLING_MONTHLY: int(monthly.group(1)), payments.BILLING_YEARLY: int(yearly.group(1))}
+        assert payments.PRO_PRICES_BDT == {payments.BILLING_MONTHLY: 399, payments.BILLING_YEARLY: 4548}
+
+    def test_the_documents_that_must_agree_carry_the_final_prices_and_limits(self):
+        import pathlib
+        root = pathlib.Path(__file__).parent
+        for rel in ("docs/DEPLOYMENT.md", "docs/PLANS_AND_QUOTAS.md", "docs/AI_ENGINE_2_0.md"):
+            text = (root / rel).read_text(encoding="utf-8")
+            for stale in ("3,199", "3199", "৳299", "3 MB", "3MB", "not yet decided", "not seeded", "photo spends Photo Solve instead",
+                          "Interpretation to confirm"):
+                assert stale not in text, f"{rel} still says {stale!r}"
+        deploy = (root / "docs/DEPLOYMENT.md").read_text(encoding="utf-8")
+        plans = (root / "docs/PLANS_AND_QUOTAS.md").read_text(encoding="utf-8")
+        assert "৳399 monthly / ৳4,548 yearly" in deploy and "৳399 / month, ৳4,548 / year" in plans
+        assert "at most 5 MB" in plans and "its own, independent quota" in plans
+
+
+class TestNothingInTheUiClaimsAPrice:
+    def test_no_price_or_discount_text_is_shown_anywhere_in_the_frontend(self):
+        import pathlib
+        import re
+        root = pathlib.Path(__file__).parent
+        for rel in ("static/js/i18n.js", "static/js/feedback.js", "templates/index.html"):
+            text = (root / rel).read_text(encoding="utf-8")
+            assert not re.search(r"৳\s*\d|\bBDT\b|\btaka\b|4,?548|3,?199|discount|ডিসকাউন্ট", text, re.I), rel
+
+
+# =========================================== PDF context vs. subscription expiry (Correction B)
+class TestPdfContextRespectsTheCurrentPlan:
+    """A PDF uploaded while Pro lives in server memory until its idle TTL. Before this fix the chat endpoints read
+    it by (user, chat) alone, so a student whose subscription had expired kept getting answers from the Pro-only
+    document. These tests PROVE the behaviour end to end with a real PDF and the real endpoints."""
+
+    @pytest.fixture
+    def pro(self, monkeypatch):
+        monkeypatch.setenv("QUOTA_MODE", "enforce")
+        led = PlanLedger(plan="pro")
+        monkeypatch.setattr(quota_service, "_rpc", led.rpc)
+        monkeypatch.setenv("AI_ROUTER_MODE", "policy")
+        yield led
+        set_provider(None)
+        usage_collector._current.set(None)
+
+    def _ask(self, client, path, chat_id="chat-1", **extra):
+        data = {"prompt": "What does page 1 say?", "chat_id": chat_id}
+        data.update(extra)
+        return client.post(path, data=data)
+
+    @pytest.mark.parametrize("path", ["/api/chat/stream", "/api/chat"])
+    def test_an_active_pro_student_gets_answers_from_their_pdf(self, client, pro, path):
+        assert upload(client, make_pdf(2)).status_code == 200
+        mock = mock_provider()
+        r = self._ask(client, path)
+        assert r.status_code == 200
+        assert "force and motion" in mock.requests[0].system_instruction, "the Pro student's PDF text reaches the model"
+        assert kinds(pro) == ["pdf_upload", "chat"]
+
+    @pytest.mark.parametrize("path", ["/api/chat/stream", "/api/chat"])
+    def test_after_expiry_the_stored_pdf_is_no_longer_served_and_nothing_is_spent(self, client, pro, path):
+        assert upload(client, make_pdf(2)).status_code == 200
+        pro.plan = "free"                                                       # the subscription expired
+        mock = mock_provider()
+        before = len(kinds(pro))
+        r = self._ask(client, path)
+        assert r.status_code == 403
+        d = r.json()["detail"]
+        assert d["code"] == "PLAN_REQUIRED" and d["feature"] == "pdf_upload" and d["required_plan"] == "pro"
+        assert mock.call_count == 0, "the document text never reaches the model"
+        assert len(kinds(pro)) == before, "a refused request costs no chat and no photo solve"
+        # nothing was deleted: the data is retained, it just is not served
+        assert main.active_pdf_contexts["user-1"]["chat-1"]
+
+    @pytest.mark.parametrize("path", ["/api/chat/stream", "/api/chat"])
+    def test_a_chat_without_a_pdf_still_works_normally_after_expiry(self, client, pro, path):
+        assert upload(client, make_pdf(1), chat_id="chat-1").status_code == 200
+        pro.plan = "free"
+        pro.limits["chat"] = 5
+        mock = mock_provider()
+        r = self._ask(client, path, chat_id="a-different-chat")
+        assert r.status_code == 200
+        assert "force and motion" not in mock.requests[0].system_instruction
+        assert kinds(pro)[-1] == "chat"
+
+    def test_the_plan_is_looked_up_only_when_a_pdf_context_exists(self, client, pro):
+        mock_provider()
+        assert self._ask(client, "/api/chat/stream", chat_id="no-pdf-here").status_code == 200
+        assert pro.named("get_my_plan") == [], "an ordinary chat pays no extra plan round trip"
+
+    def test_a_returning_subscriber_gets_the_same_context_back_within_its_ttl(self, client, pro):
+        assert upload(client, make_pdf(1)).status_code == 200
+        pro.plan = "free"
+        assert self._ask(client, "/api/chat/stream").status_code == 403
+        pro.plan = "pro"                                                        # renewed
+        mock = mock_provider()
+        assert self._ask(client, "/api/chat/stream").status_code == 200
+        assert "force and motion" in mock.requests[0].system_instruction
+
+    def test_an_expected_pdf_that_the_server_no_longer_holds_is_still_the_existing_409(self, client, pro):
+        pro.plan = "free"
+        r = self._ask(client, "/api/chat/stream", chat_id="never-uploaded", pdf_expected="1")
+        assert r.status_code == 409 and r.json()["detail"]["code"] == "PDF_CONTEXT_EXPIRED"
+
+    def test_an_expected_pdf_that_exists_but_the_plan_expired_is_a_plan_error_not_a_context_error(self, client, pro):
+        assert upload(client, make_pdf(1)).status_code == 200
+        pro.plan = "free"
+        r = self._ask(client, "/api/chat/stream", pdf_expected="1")
+        assert r.status_code == 403 and r.json()["detail"]["code"] == "PLAN_REQUIRED"
+
+    def test_a_failed_plan_lookup_fails_closed_and_the_pdf_is_not_used(self, client, pro):
+        assert upload(client, make_pdf(1)).status_code == 200
+        pro.fail_plan = True
+        mock = mock_provider()
+        r = self._ask(client, "/api/chat/stream")
+        assert r.status_code == 503 and mock.call_count == 0
+        assert kinds(pro) == ["pdf_upload"]
+
+    def test_an_expired_student_can_still_remove_their_own_pdf(self, client, pro):
+        assert upload(client, make_pdf(1)).status_code == 200
+        pro.plan = "free"
+        r = client.post("/api/pdf/clear", data={"chat_id": "chat-1"})
+        assert r.status_code == 200 and "chat-1" not in main.active_pdf_contexts.get("user-1", {})
+
+    def test_the_client_cannot_keep_pro_pdf_access_by_claiming_a_plan(self, client, pro):
+        assert upload(client, make_pdf(1)).status_code == 200
+        pro.plan = "free"
+        r = client.post("/api/chat/stream", data={"prompt": "q", "chat_id": "chat-1", "plan": "pro"},
+                        headers={"X-Plan": "pro"})
+        assert r.status_code == 403

@@ -3974,9 +3974,20 @@ window.clearPDFContext = async function() {
     }
 };
 
+// CEO decision 4: a photo may be at most 5 MB. Mirrors entitlements.PHOTO_MAX_BYTES on the server (the
+// server check is the authority and a test keeps the two numbers equal); checking here tells the student
+// BEFORE they send, and nothing is read or uploaded.
+const MAX_IMAGE_UPLOAD_BYTES = 5 * 1024 * 1024;
+
 window.handleImageSelect = function(event) {
     const file = event.target.files[0];
     if (!file) return;
+
+    if (file.size > MAX_IMAGE_UPLOAD_BYTES) {
+        event.target.value = "";
+        reportFailureToast({ code: "TOO_LARGE", text: fbMsg("tooLarge"), action: null, actionLabel: null }, {});
+        return;
+    }
 
     selectedImageFile = file;
     const reader = new FileReader();

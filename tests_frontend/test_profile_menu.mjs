@@ -441,12 +441,14 @@ await check("Get help lists real topics and adds no fake contact action", async 
 await check("help limits match the backend constants", () => {
     const main = read("backend/main.py");
     assert(/MAX_PDF_UPLOAD_SIZE_BYTES\s*=\s*15 \* 1024 \* 1024/.test(main));
-    // Final plan: a photo must be LESS than 3 MB (entitlements.PHOTO_MAX_BYTES = 3 MiB - 1) and a Pro PDF has at most 5 pages.
+    // Final plan: a photo may be at most 5 MB (entitlements.PHOTO_MAX_BYTES = 5 MiB, inclusive; the browser
+    // mirrors it in app.js) and a Pro PDF has at most 5 pages.
     assert(/MAX_IMAGE_UPLOAD_SIZE_BYTES\s*=\s*entitlements\.PHOTO_MAX_BYTES/.test(main));
-    assert(/PHOTO_MAX_BYTES\s*=\s*3 \* 1024 \* 1024 - 1/.test(read("backend/entitlements.py")));
+    assert(/PHOTO_MAX_BYTES\s*=\s*5 \* 1024 \* 1024\b/.test(read("backend/entitlements.py")));
+    assert(/const MAX_IMAGE_UPLOAD_BYTES = 5 \* 1024 \* 1024;/.test(read("static/js/app.js")));
     assert(/PDF_MAX_PAGES\s*=\s*5/.test(read("backend/entitlements.py")));
     const i18n = read("static/js/i18n.js");
-    assert(i18n.includes("Images must be smaller than 3 MB. PDF upload is part of the Pro plan (up to 5 pages)."));
+    assert(i18n.includes("Images can be up to 5 MB. PDF upload is part of the Pro plan (up to 5 pages)."));
 });
 
 /* =============================================================

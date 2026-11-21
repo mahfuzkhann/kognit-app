@@ -1,4 +1,4 @@
--- Behaviour tests for migration 0016 (the finalized Free / Pro plan):
+-- Behaviour tests for migrations 0016 + 0017 (the finalized Free / Pro plan and prices):
 --   * the seeded limits and the 399 BDT monthly price
 --   * Free Photo Solve = ONE per account for life (period 'lifetime', no reset time, refundable)
 --   * Pro Photo Solve = 5/day, Pro PDF upload = 2/day, Free PDF upload has no row (refused)
@@ -42,8 +42,27 @@ begin
                         and (select period from public.plan_limits where plan='pro' and kind='pdf_upload') = 'day', 'Pro pdf_upload = 2/day');
   perform pg_temp.check(not exists (select 1 from public.plan_limits where plan='free' and kind='pdf_upload'), 'Free has no pdf_upload row');
   perform pg_temp.check((select amount_bdt from public.plan_prices where plan='pro' and billing_period='monthly') = 399, 'Pro monthly = 399 BDT');
-  perform pg_temp.check((select amount_bdt from public.plan_prices where plan='pro' and billing_period='yearly') = 3199, 'yearly price deliberately untouched');
+  -- migration 0017 (applied by the runner right after 0016): the CEO's explicit yearly figure
+  perform pg_temp.check((select amount_bdt from public.plan_prices where plan='pro' and billing_period='yearly') = 4548,
+                        'Pro yearly = 4548 (note: 12 x 399 would be 4788 - flagged to the CEO)');
 end $$;
+
+-- =====================================================================================
+-- A2. Payment activation only accepts the final prices (service role only; rolled back)
+-- =====================================================================================
+begin;
+set local role service_role;
+do $$ declare bad boolean; s uuid; begin
+  bad := false;
+  begin perform public.activate_pro_subscription('00000000-0000-0000-0000-0000000001a3','yearly','bkash','p17-old-yearly', 3199, 'BDT'); exception when others then bad := true; end;
+  perform pg_temp.check(bad, 'the old yearly price (3199) is refused after 0017');
+  bad := false;
+  begin perform public.activate_pro_subscription('00000000-0000-0000-0000-0000000001a3','monthly','bkash','p17-old-monthly', 299, 'BDT'); exception when others then bad := true; end;
+  perform pg_temp.check(bad, 'the old monthly price (299) is refused');
+  s := public.activate_pro_subscription('00000000-0000-0000-0000-0000000001a3','yearly','bkash','p17-yearly-ok', 4548, 'BDT');
+  perform pg_temp.check(s is not null, 'a yearly payment of exactly 4548 BDT activates');
+end $$;
+rollback;
 
 -- =====================================================================================
 -- B. Free Photo Solve: exactly one per account, for life

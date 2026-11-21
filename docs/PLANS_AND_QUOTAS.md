@@ -1,4 +1,4 @@
-# Free and Pro plans, quotas and entitlements (migration 0016)
+# Free and Pro plans, quotas and entitlements (migrations 0016 + 0017)
 
 This is the readable version of the finalized plan. The numbers live in **one place per layer** and tests
 keep the layers equal:
@@ -10,15 +10,15 @@ keep the layers equal:
 
 ## 1. The plans
 
-| | Free | Pro (৳399 / month) |
+| | Free | Pro (৳399 / month, ৳4,548 / year) |
 |---|---|---|
 | AI chats | 3 on the signup day, then 1 / day | 20 / day |
 | Direct Answer + Socratic | share the chat allowance (one meter) | share the chat allowance |
-| Photo Solve | **1 per account, for life** | 5 / day |
-| Photo size | less than 3 MB | less than 3 MB |
+| Photo Solve (**its own, independent quota**) | **1 per account, for life** | 5 / day |
+| Photo size | at most 5 MB | at most 5 MB |
 | PDF upload | not available | 2 / day, at most 5 pages each |
 | AI practice quizzes | 1 / week | 5 / day |
-| Pocket Notes | not available | yes (saved notes: no product-level count limit) |
+| Pocket Notes | cannot create or edit (existing notes stay readable and deletable) | yes |
 | Flashcards, quizzes from notes | not available | yes (200 / day internal abuse guard) |
 | Learning insights / matrix / next steps / mistake analysis | not available | yes |
 | Advanced AI model | not available | yes |
@@ -32,8 +32,8 @@ the request is validated and before the provider is called**, then handed back i
 
 | Request | Meter | Taken when | Given back when |
 |---|---|---|---|
-| `/api/chat`, `/api/chat/stream` **with an image** | `photo_solve` (not `chat`) | after auth, the 3 MB check and the PDF-context check | no text was delivered (provider failure before the first word, unreadable image, server error) |
-| `/api/chat`, `/api/chat/stream` without an image | `chat` | same | same |
+| `/api/chat`, `/api/chat/stream` **with an image** | `photo_solve` — exactly one, **never a chat** | after auth, the 5 MB check and the PDF-context plan check | no text was delivered (provider failure before the first word, unreadable image, server error) |
+| `/api/chat`, `/api/chat/stream` without an image | `chat` — exactly one, **never a Photo Solve** | same | same |
 | `/api/quiz/generate`, mini-quiz from a note | `quiz` | after validation | generation failed / produced nothing usable |
 | `/api/pdf/upload` | `pdf_upload` | after: Pro check, real signature, **real page count ≤ 5** | extraction failed, no readable text, or the text could not be stored |
 | flashcards from a note | `flashcards` | after the Pro check | generation failed |
@@ -45,9 +45,10 @@ re-sends the same request id is counted once (`request_id` replay is idempotent)
 never be replayed for a second free unit. A response delivered to the student is final and not refunded
 (CEO decision A, unchanged).
 
-**Interpretation to confirm (flagged):** a photo question spends Photo Solve *instead of* a chat, so the two
-allowances are separate lines of the plan and Free's one trial photo never depends on whether today's single
-chat was used. Cost is bounded by the sum of both meters.
+**Photo Solve is independent (CEO decision).** A photo request spends exactly one Photo Solve and no chat; a text
+request spends exactly one chat and no Photo Solve; no request ever spends two units. The decision is made on the
+server from the bytes it read (a client field cannot change the meter), and both chat endpoints share one helper
+(`_chat_quota_kind`), so streaming and non-streaming cannot disagree. Cost is bounded by the sum of the two meters.
 
 ## 3. Time rules
 
@@ -61,7 +62,8 @@ chat was used. Cost is bounded by the sum of both meters.
 * The plan is read from the database (`public.get_my_plan()` for the verified JWT). `plan`, `tier`, `model`, `kind` fields, `X-Plan` headers and query parameters are ignored (tested).
 * Pro features: `PRO_FEATURES` in `backend/entitlements.py`, checked by `_require_plan_feature` **before** any body is read, quota unit spent or provider called. 403 `PLAN_REQUIRED` with `feature` and `required_plan`. Features: note flashcards, note quiz, learning insights / snapshot / mistakes / next steps / matrix, **Pocket Notes** (create, edit tags, AI tag suggestions), **PDF upload**.
 * Pocket Notes are also Pro-only **in the database**: the INSERT policy on `pocket_notes` requires `get_my_plan() = 'pro'`, so calling PostgREST directly does not work either. Reading, listing and deleting notes a student already owns stays allowed. Nothing is deleted when a subscription ends.
-* Uploads, from the real bytes: photo ≥ 3 MiB (3,145,728 bytes) → 413 before any quota call; bad image → refunded; PDF must have a `%PDF-` signature and a parseable, unencrypted body, with the page count taken from the file (a 6-page PDF is refused whatever the client says → 413 `PDF_PAGE_LIMIT_EXCEEDED`). Extraction is additionally capped at 5 pages.
+* Uploads, from the real bytes: photo larger than 5 MiB (5,242,880 bytes; exactly 5 MiB is accepted) → 413 before any quota or plan call (the browser checks the same number first and shows the existing "file too large" message); bad image → refunded; PDF must have a `%PDF-` signature and a parseable, unencrypted body, with the page count taken from the file (a 6-page PDF is refused whatever the client says → 413 `PDF_PAGE_LIMIT_EXCEEDED`). Extraction is additionally capped at 5 pages.
+* **PDF context and expiry.** A PDF uploaded while Pro is kept in server memory until its idle TTL. It is only ever served while the student is **currently Pro**: both chat endpoints check the plan (database, never the client) before using it and answer 403 `PLAN_REQUIRED` (`feature: pdf_upload`) otherwise, **before any quota unit is spent**. The text is not deleted (it simply is not served, and is served again if the student renews within the TTL), removing it with `/api/pdf/clear` still works, and a chat without a PDF never pays the extra plan lookup. Regression-tested end to end in `test_free_pro_plan_final.py::TestPdfContextRespectsTheCurrentPlan`.
 * A quota backend outage fails **closed** (503 `QUOTA_UNAVAILABLE`).
 * `QUOTA_MODE=off` (local development) and `PLAN_GATING=off` (documented rollback) keep their pre-existing meaning.
 
@@ -76,7 +78,9 @@ chat was used. Cost is bounded by the sum of both meters.
 
 ## 6. Subscription lifecycle and payments
 
-`public.subscriptions` is server-controlled (no client write path). A subscription is Pro while `status = 'active' and starts_at <= now() < expires_at`; when it passes `expires_at` the student is Free again **with no job running**, and keeps every note, flashcard and result. `activate_pro_subscription()` (service-role only) validates the amount against `plan_prices` — **monthly is now 399 BDT**; **yearly is untouched at 3,199 BDT** (the specification gives no yearly price: decide it, then `update public.plan_prices set amount_bdt = <N> where plan='pro' and billing_period='yearly'` and `PRO_PRICES_BDT` in `backend/payments.py`).
+`public.subscriptions` is server-controlled (no client write path). A subscription is Pro while `status = 'active' and starts_at <= now() < expires_at`; when it passes `expires_at` the student is Free again **with no job running**, and keeps every note, flashcard and result. `activate_pro_subscription()` (service-role only) validates the amount against `plan_prices` — **monthly is 399 BDT** (migration 0016) and **yearly is 4,548 BDT** (migration 0017). No yearly discount is advertised, and no price is shown anywhere in the UI.
+
+> **Open issue for the CEO.** The decision calls the yearly price "exactly 12 × ৳399", but 12 × 399 = **4,788**; ৳4,548 is 12 × 379 (240 BDT, 5%, below twelve months). The explicit figure ৳4,548 is what is implemented. If ৳4,788 was meant, change it in four places that must agree: `supabase/migrations/0017_final_yearly_price.sql`, `PRO_PRICES_BDT` in `backend/payments.py`, `supabase/tests/plan_final_0016_test.sql`, and `test_free_pro_plan_final.py::TestPriceMirror` (plus this paragraph and `docs/DEPLOYMENT.md`).
 
 **Payment status: unchanged and honest.** No payment provider is integrated; there is no checkout route and no fake success path. The Pro button still says "Pro isn't available yet". Before Pro can be sold: a verified bKash Merchant callback that calls `activate_pro_subscription` from a trusted server context (see `backend/payments.py`), plus an operator process for manual grants.
 
@@ -85,9 +89,9 @@ chat was used. Cost is bounded by the sum of both meters.
 | Case | HTTP | `detail.code` |
 |---|---|---|
 | not signed in | 401 | (existing) |
-| Pro-only feature | 403 | `PLAN_REQUIRED` (+ `feature`, `required_plan`) |
+| Pro-only feature (incl. using a stored PDF after expiry) | 403 | `PLAN_REQUIRED` (+ `feature`, `required_plan`) |
 | allowance used up | 429 | `QUOTA_EXCEEDED` (+ `kind`, `plan`, `limit`, `used`, `remaining`, `resets_at`; `resets_at` is `null` for the lifetime trial) |
-| photo ≥ 3 MB | 413 | string detail "Image must be smaller than 3MB." (unchanged shape) |
+| photo > 5 MB | 413 | string detail "Image must be 5MB or smaller." (unchanged shape) |
 | PDF > 5 pages | 413 | `PDF_PAGE_LIMIT_EXCEEDED` (+ `max_pages`, `pages`) |
 | invalid file | 400 | (existing messages) |
 | quota / plan lookup down | 503 | `QUOTA_UNAVAILABLE` |
@@ -100,11 +104,11 @@ Existing `ai_usage_events` rows carry `plan`, model, tokens and estimated cost (
 
 ## 9. Deploy, verify, roll back
 
-**Apply order (do not reverse):** 1) apply `supabase/migrations/0016_free_pro_plan_final.sql` in the Supabase SQL editor (idempotent; it resets the numbers above if re-run), 2) deploy the application, 3) verify.
+**Apply order (do not reverse):** 1) apply `0016_free_pro_plan_final.sql`, then `0017_final_yearly_price.sql`, in the Supabase SQL editor (both idempotent; re-running them re-asserts the numbers above), 2) deploy the application, 3) verify. Nothing in this repository applies a migration or deploys by itself.
 
 ```sql
 select plan, kind, period, limit_count, first_day_limit_count from public.plan_limits order by plan, kind;
-select plan, billing_period, amount_bdt from public.plan_prices order by 1, 2;     -- pro monthly 399, yearly 3199
+select plan, billing_period, amount_bdt from public.plan_prices order by 1, 2;     -- pro monthly 399, yearly 4548
 select polname from pg_policy where polrelid = 'public.pocket_notes'::regclass;    -- pocket_notes_insert_own present
 select tgname from pg_trigger where tgname = 'trg_quota_ledger_protect_lifetime';
 ```
@@ -118,16 +122,15 @@ cd tests_frontend && npm ci && npm run test:jsdom     # frontend behaviour tests
 bash supabase/tests/run_local_db_tests.sh             # real PostgreSQL: every migration, RLS, concurrency (needs a local Postgres)
 ```
 
-**Rollback:** application — redeploy the previous version (the old code ignores the new kinds). Data — the commented ROLLBACK block at the top of the migration. Nothing is deleted by either direction.
+**Rollback:** application — redeploy the previous version (the old code ignores the new kinds). Data — the commented ROLLBACK blocks at the top of `0016` and `0017` (prices, limits, notes policy). Nothing is deleted by either direction.
 
-## 10. Known limitations / decisions for the CEO
+## 10. Known limitations
 
-1. Monthly price changed 299 → 399 as instructed; the earlier recorded ৳299 / ৳3,199 pair no longer matches (yearly undecided).
-2. Free has no PDF upload and no Pocket Notes — read from the plan table (neither is listed for Free); existing data stays readable.
-3. The 3 MB photo limit is applied to every plan (a phone camera photo is often 3–8 MB and the frontend does not resize: expect "too large" for many raw photos until client-side resizing is added).
-4. A photo spends Photo Solve instead of a chat (section 2).
-5. Free is now on the general model for *everything* (maths, images, quizzes): expect lower answer quality on hard questions; the Pro difference is real, not cosmetic.
-6. `MAX_NOTES_PER_USER = 500` (`backend/notes_engine.py`) is a pre-existing technical cap on saved notes; "unlimited" in marketing means "no plan limit" — raise the constant if 500 is too low.
-7. An expired Pro student's in-memory PDF context (TTL-bounded, per chat) can still be used for chat until it expires; no new upload is possible.
-8. Learning Insights / Matrix / Next Steps / Mistake Analysis were already implemented and Pro-gated; this task only verified that.
-9. Outdated plan copy was corrected in `static/js/i18n.js` (Free card: photo trial, 1 quiz/week, no Pocket Notes line; help text on file limits) and `static/js/feedback.js` (upgrade copy for the two new Pro features); `static/sw.js` version bumped so returning users get the new files. No layout, style or component changed. `about.kloriz.p2` still describes the whole product ("PDFs … Pocket Notes") and was left alone.
+1. **Yearly price arithmetic** — see the open issue in section 6.
+2. Photos up to 5 MB are accepted as they are (no compression). A raw phone photo can still be larger; the student is told before sending and keeps the original quality.
+3. Free is on the general model for *everything* (maths, images, quizzes): expect lower answer quality on hard questions than Pro.
+4. `MAX_NOTES_PER_USER = 500` (`backend/notes_engine.py`) is a technical safeguard against runaway storage. It is deliberately not part of the plan and is not marketed as a limit.
+5. A PDF context that outlives a Pro subscription stays in memory until its idle TTL (it is not served — see section 4); a server restart drops all contexts anyway (known MVP behaviour).
+6. Learning Insights / Matrix / Next Steps / Mistake Analysis were already implemented and Pro-gated; they were verified, not changed.
+7. Payments are not integrated: no checkout route, no fake success path, no subscription without a verified payment (section 6).
+8. Verified only locally (full Python suite, jsdom suite, a local PostgreSQL 16 with every migration). Not verified: production Supabase, live Gemini behaviour, real browsers (puppeteer suites were not run), real devices.

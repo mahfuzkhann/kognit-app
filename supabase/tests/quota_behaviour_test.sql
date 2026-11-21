@@ -107,7 +107,7 @@ do $$ declare s1 uuid; s2 uuid; s3 uuid; e1 timestamptz; e3 timestamptz; bad boo
   begin perform public.activate_pro_subscription('00000000-0000-0000-0000-00000000000c','monthly','bkash','TX-0001', 399, 'BDT'); exception when others then bad := true; end;
   perform pg_temp.check(bad, 'payment id cannot be claimed by a different user');
   select expires_at into e1 from public.subscriptions where id = s1;
-  s3 := public.activate_pro_subscription('00000000-0000-0000-0000-00000000000b','yearly','bkash','TX-0002', 3199, 'BDT');
+  s3 := public.activate_pro_subscription('00000000-0000-0000-0000-00000000000b','yearly','bkash','TX-0002', 4548, 'BDT');
   select expires_at into e3 from public.subscriptions where id = s3;
   perform pg_temp.check(e3 > e1 + interval '364 days', 'renewal while active extends from the current expiry');
   perform pg_temp.check((select count(*) from public.payments where user_id = '00000000-0000-0000-0000-00000000000b') = 2, 'two verified payments recorded');

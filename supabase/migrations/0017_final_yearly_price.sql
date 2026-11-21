@@ -1,0 +1,25 @@
+-- ===========================================================================
+-- 0017  Final yearly Pro price
+--
+-- CEO decision (2026-11-21): Pro is 399 BDT per month and 4,548 BDT per year. No yearly discount may
+-- be advertised.
+--
+-- !! OPEN ISSUE FOR THE CEO: the decision says the yearly price is "exactly 12 x 399", but 12 x 399 is
+-- !! 4,788, not 4,548 (4,548 = 12 x 379, i.e. 240 BDT / 5% below twelve months). This migration implements
+-- !! the explicit figure 4,548. If 4,788 was meant, change the number below, PRO_PRICES_BDT in
+-- !! backend/payments.py and the two tests that pin it (docs/PLANS_AND_QUOTAS.md section 6 lists all four).
+--
+-- This changes ONE value: the yearly row of public.plan_prices (was 3,199 BDT from migration 0008).
+-- activate_pro_subscription() validates every payment against this table, so after this migration a
+-- yearly payment of any other amount is refused. The monthly price (399, migration 0016) is re-asserted
+-- here so the pair is correct whichever of the two migrations was applied first.
+--
+-- No quota, entitlement, RLS, function or subscription row is touched. Existing subscriptions and
+-- payments (there are none while payments are not live) keep the amount they were activated with.
+--
+-- DEPLOY ORDER: apply after 0016, before or together with the application release.
+-- IDEMPOTENT: safe to apply twice.
+-- ROLLBACK: update public.plan_prices set amount_bdt = 3199 where plan = 'pro' and billing_period = 'yearly';
+-- ===========================================================================
+update public.plan_prices set amount_bdt = 399  where plan = 'pro' and billing_period = 'monthly';
+update public.plan_prices set amount_bdt = 4548 where plan = 'pro' and billing_period = 'yearly';

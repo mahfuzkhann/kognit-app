@@ -49,19 +49,22 @@ The NDJSON stream contract (`start`/`delta`/`retry`/`done`/`interrupted`/`error`
 
 Output price includes thinking tokens. Search grounding is billed per query and is **not** part of `estimated_cost_usd`. Re-verify prices and IDs before launch: they are a snapshot.
 
-**Final plan override (migration 0016, `docs/PLANS_AND_QUOTAS.md`): the advanced model is a Pro entitlement. A Free request is always routed to the general model, whatever the rule below says, and a Free request has no fallback model (the only other model is the advanced one). Non-streaming chat, quizzes, titles and notes AI obey the same rule.** Routing (first match; policy `2026-11-03.r1`): image/PDF → advanced · Class 9–12 maths/physics/chemistry/numerical commerce/reasoning ICT → advanced · otherwise Free → general, Pro → ≈70% advanced / 30% general by a stable hash of the request id · suitability always beats the split · an open breaker diverts to the other capable model. The subject classifier is a **keyword heuristic with unmeasured accuracy** — run `shadow` first.
+**Plan rule (CEO decision 5, `docs/PLANS_AND_QUOTAS.md`): the advanced model is a Pro entitlement. A Free request is always routed to `gemini-3.1-flash-lite`, whatever the rule below says, and has no fallback model (the only other approved model is the advanced one). Streaming chat, non-streaming chat, quizzes, titles and notes AI obey the same rule through one gate, `router.plan_safe_model_id`. Pro keeps the routing below unchanged.** Routing (first match; policy `2026-11-03.r1`): image/PDF → advanced · Class 9–12 maths/physics/chemistry/numerical commerce/reasoning ICT → advanced · otherwise Free → general, Pro → ≈70% advanced / 30% general by a stable hash of the request id · suitability always beats the split · for Pro an open breaker diverts to the other capable model (a Free request has none). The subject classifier is a **keyword heuristic with unmeasured accuracy** — run `shadow` first.
 
 ## 3. Plans, quotas and entitlements (final CEO decisions)
 
 | | Free | Pro |
 |---|---|---|
-| Chat | 3 on the first login day, then 1/day | 20/day |
-| **Quiz** | **3 per week, weeks reset Monday 00:00 Asia/Dhaka (+06:00, no DST)** | 15/day (**note-generated quizzes count here**) |
-| Notes: save | yes | yes |
-| Notes: titles / tag suggestions (`notes_ai`) | 6/day | 200/day generic guard (separate meter) |
+| Chat | 3 on the first Dhaka day, then 1/day | 20/day |
+| Photo Solve (its own meter — never a chat) | **1 per account, for life** | 5/day |
+| PDF upload | **403 `PLAN_REQUIRED`** | 2/day, at most 5 pages |
+| **Quiz** | **1 per week, weeks reset Monday 00:00 Asia/Dhaka (+06:00, no DST)** | 5/day (**note-generated quizzes count here**) |
+| Notes: create / edit tags | **403 `PLAN_REQUIRED`** (notes already saved stay readable and deletable) | yes (technical safeguard: 500 notes per student) |
+| Notes: titles / tag suggestions (`notes_ai`) | 6/day (chat titles only) | 200/day generic guard (separate meter) |
 | Notes: flashcards | **403 `PLAN_REQUIRED`** | own `flashcards` meter — **200/day temporary abuse guard** |
-| Notes: quiz from a note | **403 `PLAN_REQUIRED`** | shares the 15/day quiz pool |
+| Notes: quiz from a note | **403 `PLAN_REQUIRED`** | shares the 5/day quiz pool |
 | Insights, snapshot, mistakes, next-steps, topic matrix | **403 `PLAN_REQUIRED`** | yes |
+| AI model | `gemini-3.1-flash-lite` only | existing router: advanced model per the routing policy |
 
 * **What the student is told:** Pro = "20x more usage limit · 35x more quizzes than Free plan · **Unlimited flashcards** · Quizzes and flashcards from your saved notes · Learning insights and your learning matrix · Personalised next steps and mistake analysis". Tests assert this list is identical in the backend (`entitlements.PRO_FEATURE_LIST`), the upgrade UI (`feedback.js`) and the Plan screen (`i18n.js`). **The 200/day guard appears in no student-facing text** (also asserted).
 * **The flashcards guard is TEMPORARY and CONFIGURABLE** — an abuse guard behind "Unlimited flashcards", not a product allowance. Change it with no deploy: `update public.plan_limits set limit_count = <N> where plan='pro' and kind='flashcards';`. It has its own meter so it can never throttle titles, tag suggestions, quizzes or chat.
@@ -69,7 +72,7 @@ Output price includes thinking tokens. Search grounding is billed per query and 
 * **Quiz entry points** (inventory-tested): `POST /api/quiz/generate` and `POST /api/notes/{note_id}/mini-quiz`. Both spend the `quiz` meter; a new route that generates quizzes fails the inventory test until it is reviewed.
 * **Server-side only.** The plan comes from `public.get_my_plan()`; a Free request for Pro material is refused **before** any quota unit or provider call; a plan-lookup failure fails **closed** (503). `PLAN_GATING=off` is the rollback.
 * **Refunds:** a generation that fails with no usable output is refunded; a successful one never is; a refunded request id cannot be replayed (SQL-tested).
-* **Concurrency:** quota consumption is serialised per student in the database (advisory lock). Proven on real PostgreSQL: **exactly 3 of 24** simultaneous weekly quizzes and **exactly 5 of 24** simultaneous flashcards (guard temporarily 5) are counted.
+* **Concurrency:** quota consumption is serialised per student in the database (advisory lock). Proven on real PostgreSQL: **exactly 1 of 24** simultaneous Free weekly quizzes, **exactly 1 of 24** Free lifetime Photo Solves, **exactly 5 of 24** Pro Photo Solves, **exactly 2 of 24** Pro PDF uploads and **exactly 5 of 24** simultaneous flashcards (guard temporarily 5) are counted.
 * **Weekly boundary proof (honest scope):** `consume_quota()` reads `now()`, which a test cannot fake. The boundary is therefore proven by (1) rows from the previous week's key not counting, (2) the allowance being fresh when the week key changes, (3) the reported `resets_at` equalling an independently computed next-Monday-00:00+06:00, and (4) the identical `date_trunc('week', … at time zone 'Asia/Dhaka')` expression evaluated at the instants either side of the boundary (Sunday 23:59:59 vs Monday 00:00:00 Dhaka) — it is **not** a test that travels the real clock across a Monday.
 
 ## 4. Upgrade UX
@@ -238,8 +241,8 @@ Tests: `test_ai_engine_finalization.py` pins the approved set, the override lock
 ### 14.1 Final configuration (all defaults live in `backend/ai/config.py`)
 | Setting | Value | Why |
 |---|---|---|
-| `AI_ROUTER_MODE` | **policy** | Router picks the model per request: `gemini-3.1-flash-lite` for general text, `gemini-3.5-flash-lite` for images, PDFs and demanding subjects; Pro users send 70 % of requests where both models suit to the advanced model |
-| `AI_MODEL_FALLBACK` | **on** | One pre-token switch to the OTHER approved model on a 429 or an open circuit breaker. The two models have separate quotas, so this absorbs most quota hits. Never a third model, never another provider |
+| `AI_ROUTER_MODE` | **policy** | Router picks the model per request: `gemini-3.1-flash-lite` for general text, `gemini-3.5-flash-lite` for images, PDFs and demanding subjects; Pro users send 70 % of requests where both models suit to the advanced model; Free requests always use the general model |
+| `AI_MODEL_FALLBACK` | **on** | One pre-token switch to the OTHER approved model on a 429 or an open circuit breaker — **for Pro requests only** (a Free request has no alternate model: the only other one is the advanced model, a Pro entitlement). The two models have separate quotas, so this absorbs most quota hits. Never a third model, never another provider |
 | `AI_CONTEXT_BUILDER` | legacy (off) | The v2 prompt builder has never been tried on real Bangla/English answers; it is not needed to launch |
 | `AI_VERIFY_MODE` | off | Shadow verification adds a second paid model call to every answer and changes nothing the student sees |
 | `AI_GATEWAY` | v2 (reliability controls on) | Deadlines, retry budget, circuit breaker, admission control |

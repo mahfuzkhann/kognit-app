@@ -26,7 +26,8 @@ configured). Liveness: `GET /healthz`.
 ## 2. Database migrations
 
 Apply in numeric order in the Supabase SQL editor. Run each file once, except `0002, 0004, 0006,
-0008, 0009, 0010, 0011, 0012`, which are safe to re-run.
+0008, 0009, 0010, 0011, 0012, 0014, 0015, 0016, 0017`, which are safe to re-run (re-running `0016` or `0017`
+re-asserts the plan numbers / prices it sets, so apply them once and tune afterwards).
 
 1. `0001`–`0007` — existing schema.
 2. `0008_plans_quota_subscriptions.sql` — plans, limits, prices, payments, subscriptions, quota
@@ -41,26 +42,33 @@ Apply in numeric order in the Supabase SQL editor. Run each file once, except `0
    `TRIGGER`) that API roles held on `ai_usage_events`, so `supabase/verify_policies.sql` query 4 returns
    zero rows, and caps `quota_ledger` growth per user (500 rows per rolling 24 h, refunded rows included)
    so a signed-in student cannot grow the ledger without bound by looping the quota functions. Adds an
-   index. Deletes nothing; the backend works with or without it. **If you ever set Pro daily limits,
-   keep a Pro student's legitimate rows per day well under 500, or raise the cap in the function first.**
+   index. Deletes nothing; the backend works with or without it. **If you ever raise Pro daily limits,
+   keep a Pro student's legitimate rows per day well under 500, or raise the cap in the function first**
+   (today's Pro worst case is 432: 20 chats + 5 photo solves + 2 PDF uploads + 5 quizzes + 200 note-AI + 200 flashcards).
+7. `0013_shared_chats.sql` — shared-chat links.
+8. `0014_ai_engine_2_plans_usage_curriculum.sql` — seeds the Pro limits, `get_my_plan()`, usage and curriculum columns.
+9. `0015_flashcards_meter.sql` — the separate `flashcards` meter (Pro-only abuse guard).
+10. `0016_free_pro_plan_final.sql` — the final plan: new `photo_solve` (own meter) and `pdf_upload` meters, the
+   `lifetime` period, Free quiz 1/week, Pro quiz 5/day, Pro monthly price 399 BDT, Pocket Notes INSERT policy
+   requires Pro, and a guard that stops a retention purge from deleting lifetime ledger rows.
+11. `0017_final_yearly_price.sql` — Pro yearly price 4,548 BDT (one row of `plan_prices`).
 
 After applying, run `supabase/verify_schema.sql` (expect **zero rows**) and
 `supabase/verify_policies.sql` (query 1 must return **zero rows**; review any policy it lists — a
 hand-made policy such as `using (true)` on `user_projects` would still be in force and must be
 removed deliberately).
 
-**Deploy order matters:** apply `0008`–`0012` **before** deploying code running with
+**Deploy order matters:** apply `0008`–`0017` **before** deploying code running with
 `QUOTA_MODE=enforce`. If the migration is missing, chat and quiz requests fail closed with a safe
 503 (`QUOTA_UNAVAILABLE`) rather than running unmetered.
 
-**Pro limits are not seeded** (the CEO has not fixed them). Until you insert them, a Pro subscriber
-is refused with `PLAN_NOT_CONFIGURED`, and since 0011 `activate_pro_subscription()` itself refuses to
-record a payment until all three exist, so nobody can pay for a plan that would then be denied.
-Insert when decided:
+**Pro limits are seeded** by `0014` and `0016` (nothing to insert by hand). If a `(plan, kind)` row is ever
+missing, the API answers `PLAN_NOT_CONFIGURED` and `activate_pro_subscription()` refuses to record a payment
+(so nobody can pay for a plan that would then be denied). To confirm what is live:
 
 ```sql
-insert into public.plan_limits (plan, kind, period, limit_count)
-values ('pro','chat','day', <N>), ('pro','quiz','day', <M>), ('pro','notes_ai','day', <K>);
+select plan, kind, period, limit_count, first_day_limit_count from public.plan_limits order by plan, kind;
+select plan, billing_period, amount_bdt from public.plan_prices order by 1, 2;
 ```
 
 ### 2a. One-time setup of the trusted usage writer (after applying 0011)
@@ -86,8 +94,8 @@ NULL, validates every field, and accepts at most 1000 rows per user per 24 h (a 
 Rows written before 0011 may have been forged by a student: run query 99 in `docs/USAGE_REPORTS.sql`
 and decide deliberately; nothing is deleted for you.
 
-**Configuring the Notes/title limit.** Limits are data, not code. The 0011 seed is a **proposal awaiting
-CEO approval**: Free = 6 AI note/title operations per Dhaka day. Change it with
+**Configuring the Notes/title limit.** Limits are data, not code. `notes_ai` is an internal abuse guard
+(Free = 6 chat-title operations per Dhaka day; Pro = 200) and is not part of the advertised plan. Change it with
 `update public.plan_limits set limit_count = <N> where plan='free' and kind='notes_ai';` (no deploy
 needed). If a (plan, kind) row is missing, the API answers 403 `PLAN_NOT_CONFIGURED` and the provider is
 never called.
@@ -99,14 +107,18 @@ first. There is no automated down-migration.
 
 ## 3. Plans and quotas (current policy)
 
-* **Final plan (migration 0016) - see `docs/PLANS_AND_QUOTAS.md` for the complete rules.**
+* **Final plan (migrations 0016 + 0017) - see `docs/PLANS_AND_QUOTAS.md` for the complete rules and the table below.**
 * **Free:** 3 chats on the first (Asia/Dhaka) day the account exists, then 1 chat per day; 1 quiz per week;
   1 Photo Solve per account for life; no PDF upload, no Pocket Notes, general model only. Days reset at
   midnight Dhaka time, weeks on Monday 00:00 Dhaka.
-* **Pro:** ৳399 monthly (yearly price unchanged at ৳3,199, to be confirmed), manual renewal (no auto-renew).
-  20 chats/day, 5 Photo Solves/day (photo < 3 MB), 2 PDF uploads/day (max 5 pages), 5 quizzes/day,
-  Pocket Notes, flashcards, learning intelligence, advanced model.
-* A "chat" is one request to `/api/chat` or `/api/chat/stream`; a "quiz" is one `/api/quiz/generate`.
+* **Pro:** ৳399 monthly / ৳4,548 yearly, manual renewal (no auto-renew). 20 chats/day, 5 Photo Solves/day,
+  2 PDF uploads/day (max 5 pages), 5 quizzes/day, Pocket Notes, flashcards, learning intelligence, advanced
+  model per the routing policy. **Photo Solve has its own meter** (a photo request never spends a chat and a text
+  request never spends a Photo Solve). Photos may be at most 5 MB. No yearly discount is advertised.
+  (Open pricing note: the decision calls ৳4,548 "exactly 12 × ৳399", but 12 × 399 = 4,788 - see
+  `docs/PLANS_AND_QUOTAS.md` §6.)
+* A "chat" is one text request to `/api/chat` or `/api/chat/stream`; a "Photo Solve" is one such request carrying an
+  image; a "quiz" is one `/api/quiz/generate`.
   Counting requests (not chat ids) means opening new chats cannot bypass a limit.
 * A request is counted when accepted, before the provider is called. A request rejected for quota
   is not counted. If generation then fails and the student received nothing usable, the unit is
@@ -121,14 +133,14 @@ first. There is no automated down-migration.
 * If the server fails *after* consuming a unit but before any text exists (profile lookup, quiz
   generation, an unexpected exception), the unit is returned immediately - not via a background task that
   FastAPI would skip when an exception escapes.
-* **Notes/title AI is a separate meter** (`notes_ai`, Free: 6 per Dhaka day - proposed): chat titles and
+* **Notes/title AI is a separate meter** (`notes_ai`, Free: 6 per Dhaka day): chat titles and
   Pocket Notes topic suggestions (Pro only), flashcards and mini-quizzes. Opening stored study material and
   ordinary note create/read/edit/delete are free. The existing per-minute limiter remains as an extra
   layer only.
 
-**Payments.** No payment integration exists. `backend/payments.py` and `activate_pro_subscription()`
-define the rules (provider-verified, right user, BDT, exact price, idempotent, service-role-only
-activation). A real bKash Merchant verifier must be written against bKash's published API with
+**Payments.** No payment integration exists, and no subscription can be activated without a verified payment.
+`backend/payments.py` and `activate_pro_subscription()` define the rules (provider-verified, right user, BDT,
+exact price - 399 monthly / 4,548 yearly -, idempotent, service-role-only activation). A real bKash Merchant verifier must be written against bKash's published API with
 credentials the founder supplies, plus a small privileged component that calls the activation
 function — kept out of the request path.
 
