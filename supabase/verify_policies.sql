@@ -88,3 +88,21 @@ select count(*) as configured_key_hashes from public.usage_write_keys;
 -- Query 7 (migration 0011, Q-08): Pro limits that must exist before Pro can be sold.
 -- EXPECTED once Pro is approved: three rows (chat, quiz, notes_ai). Today: none.
 select kind, period, limit_count from public.plan_limits where plan = 'pro' order by kind;
+
+-- Query 8 (migration 0018, AI-content reports): students and anonymous clients must have
+-- NO access path to content_reports except the submit_content_report() function.
+-- EXPECTED RESULT: ZERO ROWS. A row means a table privilege, a policy, or an EXECUTE grant
+-- exists that should not (reports must not be readable, editable or deletable by students).
+select 'table privilege' as problem, grantee, privilege_type as detail
+from information_schema.role_table_grants
+where table_schema = 'public' and table_name = 'content_reports'
+  and grantee in ('anon', 'authenticated', 'PUBLIC')
+union all
+select 'policy', coalesce(roles::text, ''), policyname
+from pg_policies
+where schemaname = 'public' and tablename = 'content_reports'
+union all
+select 'function executable by anon', 'anon', p.proname
+from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+where n.nspname = 'public' and p.proname = 'submit_content_report'
+  and has_function_privilege('anon', p.oid, 'execute');

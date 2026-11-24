@@ -18,7 +18,7 @@
 --   details        which table.column entries are affected
 --
 -- Re-run this after applying a migration; when it returns zero rows you are in step
--- with the repository. (0002, 0004, 0006, 0008, 0009, 0010, 0011 and 0013 are safe to run twice. 0001,
+-- with the repository. (0002, 0004, 0006, 0008, 0009, 0010, 0011, 0013 and 0018 are safe to run twice. 0001,
 -- 0003, 0005 and 0007 create policies - run each of those only once.)
 --
 -- ALSO RUN supabase/verify_policies.sql after 0010: it reports any row level
@@ -47,6 +47,17 @@ with expected (table_name, column_name, added_by, relaxed_by) as (
     ('quiz_attempts', 'user_id', '0001_quiz_persistence.sql', null),
     ('quiz_attempts', 'stream', '0002_quiz_topic_identity.sql', null),
     ('quiz_attempts', 'topic_key', '0002_quiz_topic_identity.sql', null),
+    ('content_reports', 'ai_response_excerpt', '0018_content_reports.sql', null),
+    ('content_reports', 'app_version', '0018_content_reports.sql', null),
+    ('content_reports', 'category', '0018_content_reports.sql', null),
+    ('content_reports', 'created_at', '0018_content_reports.sql', null),
+    ('content_reports', 'id', '0018_content_reports.sql', null),
+    ('content_reports', 'note', '0018_content_reports.sql', null),
+    ('content_reports', 'platform', '0018_content_reports.sql', null),
+    ('content_reports', 'prompt_excerpt', '0018_content_reports.sql', null),
+    ('content_reports', 'request_id', '0018_content_reports.sql', null),
+    ('content_reports', 'status', '0018_content_reports.sql', null),
+    ('content_reports', 'user_id', '0018_content_reports.sql', null),
     ('conversation_index', 'attribution_confidence', '0003_learning_memory_foundation.sql', null),
     ('conversation_index', 'chat_id', '0003_learning_memory_foundation.sql', null),
     ('conversation_index', 'created_at', '0003_learning_memory_foundation.sql', null),
@@ -191,7 +202,7 @@ rls_problems as (
          'enable row level security - see the migration that creates ' || tablename::text as run_migration
   from pg_tables
   where schemaname = 'public'
-    and tablename in ('ai_usage_events', 'conversation_index', 'learning_evidence', 'payments', 'plan_limits', 'plan_prices', 'pocket_notes', 'quiz_answers', 'quiz_attempts', 'quota_ledger', 'shared_chats', 'student_profiles', 'subscriptions', 'usage_write_keys', 'user_projects')
+    and tablename in ('ai_usage_events', 'content_reports', 'conversation_index', 'learning_evidence', 'payments', 'plan_limits', 'plan_prices', 'pocket_notes', 'quiz_answers', 'quiz_attempts', 'quota_ledger', 'shared_chats', 'student_profiles', 'subscriptions', 'usage_write_keys', 'user_projects')
     and not rowsecurity
 )
 select run_migration,

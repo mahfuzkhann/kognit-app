@@ -1731,3 +1731,64 @@ async def get_public_shared_chat(token: str) -> Optional[dict]:
     except ValueError:
         logger.error("get_public_shared_chat: unexpected response shape")
         raise DatabaseError("unexpected response shape from get_public_shared_chat")
+
+
+# ===========================================================================
+# AI-content reports (migration 0018_content_reports.sql). Domain rules:
+# backend/report_engine.py.
+#
+# A student's report is written ONLY through the SECURITY DEFINER function
+# submit_content_report(), called with the STUDENT'S OWN token: the function takes
+# the reporter from auth.uid(), so no user_id is ever sent from here, and the
+# table itself grants students no privilege at all (no read-back either).
+#
+# Report text (note, excerpts) is NEVER logged: logs carry the operation name,
+# status code and user_id only.
+# ===========================================================================
+
+class ReportingUnavailableError(DatabaseError):
+    """submit_content_report() is not there (migration 0018 not applied)."""
+
+
+class ReportLimitError(DatabaseError):
+    """The student already filed the maximum number of reports in 24 hours."""
+
+
+async def submit_content_report(user_token: str, user_id: str, params: dict) -> Optional[str]:
+    """
+    Files one report. `params` is exactly the dict report_engine.build_report()
+    returns (the function's argument names). Returns the new report's id.
+    Raises ReportLimitError (53400), ReportingUnavailableError (migration missing)
+    or DatabaseError (anything else).
+    """
+    _require_supabase_configured()
+    try:
+        async with http_client.client(timeout=DB_REQUEST_TIMEOUT_SECONDS) as client:
+            resp = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/submit_content_report",
+                headers=_rest_headers(user_token),
+                json=params,
+            )
+    except httpx.RequestError:
+        logger.exception("submit_content_report: network error (user_id=%s)", user_id)
+        raise DatabaseError("network error during submit_content_report")
+
+    if resp.status_code == 200:
+        try:
+            value = resp.json()
+        except ValueError:
+            value = None
+        if isinstance(value, str) and value:
+            return value
+        logger.error("submit_content_report: unexpected response shape (user_id=%s)", user_id)
+        raise DatabaseError("submit_content_report returned an unexpected response")
+
+    if _is_missing_relation(resp):
+        logger.error("submit_content_report: function is missing - apply migration 0018 (user_id=%s)", user_id)
+        raise ReportingUnavailableError("submit_content_report is not available")
+    if resp.status_code in (400, 429) and "53400" in resp.text[:600]:
+        raise ReportLimitError("report limit reached")
+
+    # Status only - PostgREST error text could echo a parameter value.
+    logger.error("submit_content_report: request failed status=%d (user_id=%s)", resp.status_code, user_id)
+    raise DatabaseError(f"submit_content_report failed with status {resp.status_code}")

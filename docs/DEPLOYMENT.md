@@ -49,7 +49,7 @@ and restart; with `MIN_ANDROID_VERSION` unset the gate refuses nobody.
 ## 2. Database migrations
 
 Apply in numeric order in the Supabase SQL editor. Run each file once, except `0002, 0004, 0006,
-0008, 0009, 0010, 0011, 0012, 0014, 0015, 0016, 0017`, which are safe to re-run (re-running `0016` or `0017`
+0008, 0009, 0010, 0011, 0012, 0014, 0015, 0016, 0017, 0018`, which are safe to re-run (re-running `0016` or `0017`
 re-asserts the plan numbers / prices it sets, so apply them once and tune afterwards).
 
 1. `0001`–`0007` — existing schema.
@@ -75,6 +75,13 @@ re-asserts the plan numbers / prices it sets, so apply them once and tune afterw
    `lifetime` period, Free quiz 1/week, Pro quiz 5/day, Pro monthly price 399 BDT, Pocket Notes INSERT policy
    requires Pro, and a guard that stops a retention purge from deleting lifetime ledger rows.
 11. `0017_final_yearly_price.sql` — Pro yearly price 4,548 BDT (one row of `plan_prices`).
+12. `0018_content_reports.sql` — AI-content reports: table `content_reports` (RLS on, **no** policy and **no**
+   grant to students or anon) and the `submit_content_report()` function, the only write path (reporter =
+   `auth.uid()`, 20 reports per rolling 24 h enforced in the database). Purely additive. Until it is applied,
+   `POST /api/report` answers 503 `REPORTING_UNAVAILABLE`; nothing else is affected. **Reviewing reports:**
+   there is no admin screen yet - open *Table Editor -> content_reports* in the Supabase dashboard (newest
+   first; filter `status = 'new'`) and set `status` to `reviewing`, `actioned` or `dismissed`. Check it
+   regularly once the app is in closed testing: nothing alerts you when a report arrives.
 
 After applying, run `supabase/verify_schema.sql` (expect **zero rows**) and
 `supabase/verify_policies.sql` (query 1 must return **zero rows**; review any policy it lists — a

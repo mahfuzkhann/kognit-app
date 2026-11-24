@@ -48,8 +48,11 @@ from backend.database import (
     get_active_shared_chat,
     delete_shared_chat,
     get_public_shared_chat,
+    submit_content_report,
+    ReportingUnavailableError,
+    ReportLimitError,
 )
-from backend import notes_engine, notes_ai, share_engine
+from backend import notes_engine, notes_ai, share_engine, report_engine
 from backend import state_limits, quota_service, usage_telemetry
 from backend import entitlements, http_client
 from backend import client_access
@@ -395,6 +398,9 @@ RATE_LIMIT_CONFIG = {
     # CHAT SHARING: creating / revoking a share is a cheap RLS-scoped write (no
     # AI). The cap only stops snapshot spam; real use is a handful per hour.
     "share_write": (10, 60),
+    # AI-CONTENT REPORTS: one cheap database call (no AI). 5/minute is far above
+    # real use; the database separately caps an account at 20 reports per 24h.
+    "report": (5, 60),
     # POCKET NOTES: topic suggestions, flashcards and mini-quizzes each cost
     # one provider call. Same order of magnitude as quiz_generation. Applied
     # ONLY when a call is actually about to be made - returning an already
@@ -3385,6 +3391,61 @@ async def public_shared_chat_page(request: Request, token: str):
         response.headers[name] = value
     response.headers["Content-Security-Policy"] = _SHARE_PAGE_CSP
     return response
+
+
+# ---------------------------------------------------------------------------
+# AI-CONTENT REPORTS - POST /api/report
+# Domain rules: backend/report_engine.py. Storage + security model:
+# supabase/migrations/0018_content_reports.sql. The reporter is the verified
+# token's user; the body can not name a user, status or platform.
+# ---------------------------------------------------------------------------
+
+def _report_error(status_code: int, code: str, message: str) -> HTTPException:
+    return HTTPException(status_code=status_code, detail={"code": code, "message": message})
+
+
+async def _rate_limited_report(
+    user_and_token: Tuple[str, str] = Depends(get_current_user_and_token)
+) -> Tuple[str, str]:
+    user_id, _token = user_and_token
+    _check_rate_limit(user_id, "report")
+    return user_and_token
+
+
+@app.post("/api/report")
+async def report_content_endpoint(
+    request: Request,
+    user_and_token: Tuple[str, str] = Depends(_rate_limited_report),
+):
+    """Files a report about an AI answer. Authenticated only. Never logs the
+    report's text. Responses are never cached."""
+    user_id, user_token = user_and_token
+    body = await _read_json_body(request, max_bytes=report_engine.MAX_REQUEST_BODY_BYTES)
+    try:
+        params = report_engine.build_report(body, request.headers.get("x-client-version"))
+    except report_engine.ReportValidationError as exc:
+        raise _report_error(400, exc.code, exc.message)
+
+    try:
+        report_id = await submit_content_report(user_token, user_id, params)
+    except ReportingUnavailableError:
+        raise _report_error(503, "REPORTING_UNAVAILABLE", "Reporting is not available yet. Please try again later.")
+    except ReportLimitError:
+        raise _report_error(
+            429, "REPORT_LIMIT_REACHED",
+            f"You have sent the maximum of {report_engine.MAX_REPORTS_PER_DAY} reports for today. Thank you.",
+        )
+    except DatabaseError:
+        logger.error("report_content_endpoint: database failure (user_id=%s)", user_id)
+        raise _report_error(502, "REPORT_FAILED", "Could not send your report. Please try again.")
+
+    logger.info("report_content_endpoint: report filed category=%s platform=%s (user_id=%s)",
+                params["p_category"], params["p_platform"], user_id)
+    return JSONResponse(
+        content={"status": "received", "report_id": report_id},
+        status_code=201,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/favicon.ico", include_in_schema=False)
