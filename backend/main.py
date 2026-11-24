@@ -52,6 +52,7 @@ from backend.database import (
 from backend import notes_engine, notes_ai, share_engine
 from backend import state_limits, quota_service, usage_telemetry
 from backend import entitlements, http_client
+from backend import client_access
 from backend.ai import config as ai_config, gateway as ai_gateway, prompts as ai_prompts, verify as ai_verify
 from backend.ai import router as ai_router
 from backend import database as _database_module
@@ -68,6 +69,11 @@ app = FastAPI(title="Kloriz Academic Assistant")
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
+
+# Report 2 X-06 / X-28: CORS allow-list for the bundled Android app (https://localhost), the optional
+# X-Client-Version gate (inert unless MIN_ANDROID_VERSION is set) and GET /api/app-config.
+# See backend/client_access.py. Same-origin web requests are unaffected.
+client_access.install(app)
 
 # ---------------------------------------------------------------------------
 # Config constants (MVP-tunable; move to env vars if these need to change

@@ -18,10 +18,33 @@ Set these as server-side environment variables (never in the browser, HTML, git 
 | `USAGE_WRITE_KEY` | for usage telemetry | server-side secret that lets the backend write usage rows through `record_ai_usage_events()` (migration 0011). Without it chat/quiz/quotas work, but usage rows are **not recorded** (one warning is logged). Setup in section 2a |
 | `PDF_CONTEXT_*`, `QUIZ_DEFINITION_*` | no | in-memory limits, see section 4 |
 | `THREADPOOL_MAX_THREADS` | no | ceiling on simultaneous streamed answers per process, see section 5 |
+| `CORS_EXTRA_ORIGINS` | no | comma-separated EXTRA origins allowed to call the API from a browser engine on another origin (for example `https://app.example.com`). The Android app origin `https://localhost` is always allowed and needs no setting. Exact origins only: a wildcard, a path or a missing scheme is ignored with a warning. See section 1a |
+| `MIN_ANDROID_VERSION` | no | oldest Android build still allowed, like `1.2.0`. Unset (default) = nobody is ever refused. Older builds get HTTP 400 with the error code `APP_UPDATE_REQUIRED` on `/api/` calls. See section 1a |
+| `LATEST_ANDROID_VERSION` | no | newest published Android build, shown to the app by `GET /api/app-config` for a soft update prompt. Never reported below the minimum |
 
 No service-role key exists anywhere in the application, and none should be added to the request
 path. Check readiness (booleans only, never values): `GET /readyz` (503 when Supabase/Gemini are not
 configured). Liveness: `GET /healthz`.
+
+### 1a. Android app access: CORS and the minimum app version
+
+The website is served by this server, so its calls are same-origin and need no CORS. The bundled Android
+app (Capacitor) is served from the phone, so its calls are cross-origin. `backend/client_access.py` handles this:
+
+- **CORS allow-list.** `https://localhost` (the Capacitor Android origin) is always allowed. Nothing else is,
+  unless added through `CORS_EXTRA_ORIGINS`. Credentials/cookies are not allowed (the API uses the
+  `Authorization` header). `X-Request-ID` and `Retry-After` are readable by the app. The Android project must set
+  `server.androidScheme` to `https` explicitly instead of relying on a default.
+- **Retiring an old app build.** The app sends `X-Client-Version: android/1.2.3`. If `MIN_ANDROID_VERSION` is set
+  and the build is older, every `/api/` call is answered HTTP `400` with `{"detail": {"code": "APP_UPDATE_REQUIRED", ...}}`
+  before any login, database or AI work. The app must act on `detail.code`, not on the status number alone (an ordinary
+  validation error is also a 400). A request with no header (the website) or an unreadable header is never
+  refused. `/healthz`, `/readyz`, pages, static files and `GET /api/app-config` are never refused.
+- **`GET /api/app-config`.** Public, contains only the version policy (`api_version`, `android.min_version`,
+  `android.latest_version`). It does no database or AI work.
+
+Changing `MIN_ANDROID_VERSION` or `CORS_EXTRA_ORIGINS` needs a restart of the service. Rollback: remove the variable
+and restart; with `MIN_ANDROID_VERSION` unset the gate refuses nobody.
 
 ## 2. Database migrations
 
