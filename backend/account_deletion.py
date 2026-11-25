@@ -31,16 +31,32 @@ WHAT IT DOES NOT DO
     question for counsel - see docs/ACCOUNT_DELETION.md "Open legal questions".
     Payments are not live yet, so no real payment record can exist today.
 
-RE-AUTHENTICATION ("recent login")
+RE-AUTHENTICATION ("recent login") - FAILS CLOSED
   Deleting an account is irreversible, so a stolen-but-still-valid access token
   must not be enough. The caller must have SIGNED IN within the last
-  REAUTH_WINDOW_SECONDS. Supabase access tokens carry an `amr` claim listing each
-  authentication method with the time it happened; a refreshed token keeps the
-  original sign-in time, so this measures the login, not the token. If `amr` is
-  absent we fall back to `iat`. Reading the claims is safe because the token has
-  ALREADY been verified by Supabase Auth in get_current_user_and_token(); this
-  module only reads the payload, it never trusts an unverified token on its own.
-  No password is ever sent to or handled by this backend.
+  REAUTH_WINDOW_SECONDS (default 600, set with ACCOUNT_DELETE_REAUTH_WINDOW_SECONDS,
+  allowed range 30-900).
+
+  The evidence is Supabase's `amr` claim: a list of {method, timestamp} entries,
+  one per authentication method used. ONLY entries for an interactive sign-in
+  method count (AUTH_METHODS below). Deliberately NOT evidence:
+    * `iat` (issued-at): a token REFRESH issues a new token with a new `iat`
+      without the student having signed in again, so `iat` proves nothing;
+    * an `amr` entry whose method is `token_refresh` (Supabase documents it as a
+      possible method value): it records a refresh, not a login;
+    * `anonymous`, `email_change` and any method this code does not know;
+    * an `amr` that is a plain list of strings (no timestamps), or missing.
+  If no qualifying entry with a usable timestamp exists, the answer is "not
+  recent" and the endpoint refuses (403 REAUTH_REQUIRED). It never guesses.
+
+  Reading the claims is safe because the token has ALREADY been verified by
+  Supabase Auth in get_current_user_and_token(); this module only reads the
+  payload, it never trusts an unverified token on its own. No password is ever
+  sent to or handled by this backend.
+
+  WHAT IS NOT PROVEN OFFLINE: how a real Supabase project fills `amr` after a
+  token refresh. docs/ACCOUNT_DELETION.md "Staging check" makes the operator
+  prove it with scripts/check_jwt_claims.py before deletion is enabled.
 """
 
 import base64
@@ -60,10 +76,19 @@ logger = logging.getLogger("kognit.account_deletion")
 
 SERVICE_ROLE_ENV = "SUPABASE_SERVICE_ROLE_KEY"
 CONFIRMATION_WORD = "DELETE"
-# A sign-in older than this must be repeated before deleting. 10 minutes is long
-# enough to read the dialog and short enough that a borrowed, unlocked device
-# or a leaked token is not enough.
-REAUTH_WINDOW_SECONDS = 10 * 60
+# A sign-in older than the window must be repeated before deleting. The default 10
+# minutes is long enough to read the dialog and short enough that a borrowed,
+# unlocked device or a leaked token is not enough.
+REAUTH_WINDOW_ENV = "ACCOUNT_DELETE_REAUTH_WINDOW_SECONDS"
+REAUTH_WINDOW_DEFAULT_SECONDS = 10 * 60
+REAUTH_WINDOW_MIN_SECONDS = 30
+REAUTH_WINDOW_MAX_SECONDS = 15 * 60
+# Methods that mean "the student really signed in". Anything else in `amr` (notably
+# token_refresh, anonymous, email_change) is ignored on purpose - see the module docstring.
+AUTH_METHODS = frozenset({
+    "password", "oauth", "otp", "magiclink", "recovery", "sso/saml", "email/signup",
+    "mfa/totp", "mfa/phone", "mfa/webauthn",
+})
 MAX_REQUEST_BODY_BYTES = 1024
 ADMIN_TIMEOUT_SECONDS = 15.0
 
@@ -93,26 +118,42 @@ def _payload(token: str) -> Optional[dict]:
         return None
 
 
+def reauth_window_seconds() -> int:
+    """The configured window, clamped to 30-900 s. A bad value falls back to the
+    default - it can never silently widen the window past the maximum."""
+    raw = os.getenv(REAUTH_WINDOW_ENV, "").strip()
+    if not raw:
+        return REAUTH_WINDOW_DEFAULT_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        return REAUTH_WINDOW_DEFAULT_SECONDS
+    return max(REAUTH_WINDOW_MIN_SECONDS, min(REAUTH_WINDOW_MAX_SECONDS, value))
+
+
 def login_age_seconds(token: str, now: Optional[float] = None) -> Optional[float]:
-    """Seconds since the student last SIGNED IN, or None if it can not be
-    determined (None means 'treat as not recent' - fail closed)."""
+    """Seconds since the student last SIGNED IN, or None when there is no usable
+    evidence (None means 'not recent' - the caller must fail closed)."""
     claims = _payload(token or "")
     if claims is None:
         return None
-    current = time.time() if now is None else now
-    stamps = []
     amr = claims.get("amr")
-    if isinstance(amr, list):
-        for entry in amr:
-            ts = entry.get("timestamp") if isinstance(entry, dict) else None
-            if isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts > 0:
-                stamps.append(float(ts))
-    if not stamps:
-        iat = claims.get("iat")
-        if isinstance(iat, (int, float)) and not isinstance(iat, bool) and iat > 0:
-            stamps.append(float(iat))
+    if not isinstance(amr, list):
+        return None
+    stamps = []
+    for entry in amr:
+        if not isinstance(entry, dict):
+            continue  # plain-string amr entries carry no timestamp
+        method = entry.get("method")
+        ts = entry.get("timestamp")
+        if not isinstance(method, str) or method.strip().lower() not in AUTH_METHODS:
+            continue
+        if isinstance(ts, bool) or not isinstance(ts, (int, float)) or ts <= 0:
+            continue
+        stamps.append(float(ts))
     if not stamps:
         return None
+    current = time.time() if now is None else now
     age = current - max(stamps)
     # A timestamp in the future is a clock problem or tampering, not "recent".
     return age if age >= -60 else None
@@ -120,7 +161,7 @@ def login_age_seconds(token: str, now: Optional[float] = None) -> Optional[float
 
 def login_is_recent(token: str, now: Optional[float] = None) -> bool:
     age = login_age_seconds(token, now)
-    return age is not None and age <= REAUTH_WINDOW_SECONDS
+    return age is not None and age <= reauth_window_seconds()
 
 
 async def delete_auth_user(user_id: str) -> str:

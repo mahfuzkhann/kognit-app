@@ -6,8 +6,11 @@ Nothing here is legal advice: items under "Open legal questions" need qualified 
 
 ## What happens when a student deletes their account
 
-1. The app asks the student to type `DELETE` and to have signed in within the last 10 minutes
+1. The app asks the student to type `DELETE` and to have **signed in** within the last 10 minutes
    (otherwise the server answers `403 REAUTH_REQUIRED` and the app asks them to sign in again).
+   "Signed in" is proven only by an interactive sign-in entry in the token's `amr` claim. A token
+   refresh, the token's issue time (`iat`) and anything unreadable are **not** evidence: the check
+   fails closed.
 2. `POST /api/account/delete` with `{"confirm": "DELETE"}` and the student's normal access token.
    The account deleted is **always** the token's user. The body can not name anyone else.
 3. The server calls Supabase's admin API once (`DELETE /auth/v1/admin/users/<id>`, hard delete).
@@ -77,18 +80,37 @@ The server can not do this; the consolidated `app.js` must.
 4. Without it, the endpoint answers `503 ACCOUNT_DELETION_UNAVAILABLE` and nothing else is affected.
 5. If it is ever exposed: rotate it in the Supabase dashboard immediately and update the secret.
 
-## Staging check (required before the first real student uses this)
+## Staging check (required before deletion is enabled for real students)
 
-Use a **disposable account on a staging Supabase project**, not production data:
+Use a **disposable account on a staging Supabase project**, never production data.
+
+**A. Prove the re-authentication evidence (the part the code cannot prove offline)**
+1. Set `ACCOUNT_DELETE_REAUTH_WINDOW_SECONDS=60` on the staging server (allowed 30-900; default 600).
+2. Sign in as the test user in the web app. Copy the access token from DevTools -> Application ->
+   Local Storage -> `sb-...-auth-token` -> `access_token`.
+3. Run `python scripts/check_jwt_claims.py` and paste the token (input hidden; nothing is stored or
+   printed back). Expected: `amr present: yes`, an entry such as `method='password'` marked `COUNTS`
+   with an age of a few seconds, and `Verdict: RECENT`.
+4. Wait more than 60 seconds. In the app force a session refresh (or wait for the automatic one),
+   copy the NEW token and run the script again. **Expected: the sign-in age keeps growing** (not reset
+   to ~0) and the verdict becomes `NOT RECENT`. If the age resets to ~0 after a refresh, Supabase is
+   re-stamping the sign-in time on refresh: **stop - do not enable deletion** and tell the engineer.
+5. Call `POST /api/account/delete` with `{"confirm":"DELETE"}` and the refreshed token. Expected:
+   `403 REAUTH_REQUIRED`, and nothing deleted.
+6. Repeat steps 2-3 for a Google (OAuth) test user. Expected: an `oauth` entry that `COUNTS`.
+7. If `amr` is missing or has no timestamps for either path, deletion can not be enabled safely;
+   the endpoint keeps answering `REAUTH_REQUIRED` (fail closed) and a different re-authentication
+   design is needed.
+
+**B. Prove the deletion itself**
 1. Sign up a test user; create a project/chat, a quiz, a note, a share link, a report.
 2. Sign in again (fresh login), call `POST /api/account/delete` with `{"confirm":"DELETE"}`.
 3. In the Supabase SQL editor confirm zero rows for that user id in every table above and that
-   the user is gone from Authentication → Users; confirm the share link now shows "not found".
+   the user is gone from Authentication -> Users; confirm the share link now shows "not found".
 4. Confirm the same token now returns 401 and that signing in with the old password fails.
 5. Confirm a second user's data is untouched.
-This also verifies the one assumption the tests can not: that a real Supabase access token carries
-the sign-in time (`amr` claim) the "recent login" check reads. If it does not, the check falls back to
-the token's issue time; if neither exists the endpoint refuses with `REAUTH_REQUIRED`.
+
+Record the date, the Supabase project, and the observed results in the decision log.
 
 ## API contract (for the frontend)
 
@@ -99,7 +121,7 @@ the token's issue time; if neither exists the endpoint refuses with `REAUTH_REQU
 | 200 | — (`{"status":"deleted"}`) | Done. Sign out, clear browser data, show the goodbye screen |
 | 400 | `ACCOUNT_DELETE_CONFIRMATION_REQUIRED` | The typed word was wrong |
 | 401 | — | Not signed in, or **already deleted** after an earlier success — treat as done if a deletion was in progress |
-| 403 | `REAUTH_REQUIRED` | Ask the student to sign in again, then retry |
+| 403 | `REAUTH_REQUIRED` | No proof of a recent interactive sign-in (or the proof is unreadable). Ask the student to sign in again, then retry |
 | 429 | — | More than 3 attempts in 10 minutes |
 | 502 | `ACCOUNT_DELETE_FAILED` | Nothing was deleted; safe to retry |
 | 503 | `ACCOUNT_DELETION_UNAVAILABLE` | Server not configured; show "contact support" |

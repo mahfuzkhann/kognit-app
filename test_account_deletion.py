@@ -68,34 +68,83 @@ class TestConfirmation:
 class TestLoginAge:
     NOW = 1_800_000_000.0
 
-    def test_uses_the_newest_amr_timestamp(self):
-        tok = make_token(claims={"amr": [{"method": "oauth", "timestamp": self.NOW - 5000},
-                                         {"method": "password", "timestamp": self.NOW - 100}]})
+    @staticmethod
+    def amr(*entries, **extra):
+        return make_token(claims={"amr": [{"method": m, "timestamp": t} for m, t in entries], **extra})
+
+    def test_uses_the_newest_interactive_sign_in(self):
+        tok = self.amr(("oauth", self.NOW - 5000), ("password", self.NOW - 100))
         assert ad.login_age_seconds(tok, self.NOW) == pytest.approx(100)
 
-    def test_amr_wins_over_a_fresh_iat_so_a_token_refresh_does_not_count_as_a_login(self):
+    @pytest.mark.parametrize("method", sorted(ad.AUTH_METHODS))
+    def test_every_interactive_method_counts(self, method):
+        assert ad.login_is_recent(self.amr((method, self.NOW - 10)), self.NOW)
+
+    def test_a_token_refresh_is_not_a_login_even_when_it_is_brand_new(self):
+        """THE attack the directive describes: a stolen session keeps refreshing, so the token is always
+        fresh - but the student has not signed in. Only the old password entry may count."""
+        tok = self.amr(("password", self.NOW - 86400), ("token_refresh", self.NOW - 1), iat=self.NOW - 1)
+        assert ad.login_age_seconds(tok, self.NOW) == pytest.approx(86400)
+        assert not ad.login_is_recent(tok, self.NOW)
+
+    @pytest.mark.parametrize("method", ["token_refresh", "anonymous", "email_change", "", "unknown", "PASSWORD2", None, 5])
+    def test_non_login_or_unknown_methods_never_count(self, method):
+        tok = make_token(claims={"amr": [{"method": method, "timestamp": self.NOW - 1}]})
+        assert ad.login_age_seconds(tok, self.NOW) is None
+
+    def test_a_fresh_iat_alone_is_never_evidence(self):
+        for tok in (make_token(iat=self.NOW - 1), make_token(amr_ts=None, iat=self.NOW), make_token(claims={"iat": self.NOW, "auth_time": self.NOW})):
+            assert ad.login_age_seconds(tok, self.NOW) is None
+            assert not ad.login_is_recent(tok, self.NOW)
+
+    def test_a_stale_amr_with_a_fresh_iat_is_not_recent(self):
         tok = make_token(amr_ts=self.NOW - 5000, iat=self.NOW - 1)
         assert ad.login_age_seconds(tok, self.NOW) == pytest.approx(5000)
         assert not ad.login_is_recent(tok, self.NOW)
 
-    def test_falls_back_to_iat_when_amr_is_absent(self):
-        assert ad.login_age_seconds(make_token(iat=self.NOW - 42), self.NOW) == pytest.approx(42)
-
-    @pytest.mark.parametrize("tok", ["", "abc", "a.b.c", "a..c", None, "a.%%%.c", make_token(), make_token(claims={"amr": "x"}),
-                                     make_token(claims={"amr": [{"timestamp": "yesterday"}]}),
-                                     make_token(claims={"amr": [{"timestamp": True}]}),
-                                     make_token(claims={"iat": -5}), make_token(claims={"iat": "now"})])
-    def test_unreadable_or_missing_claims_fail_closed(self, tok):
+    @pytest.mark.parametrize("tok", ["", "abc", "a.b.c", "a..c", None, "a.%%%.c", make_token(),
+                                     make_token(claims={"amr": "password"}),
+                                     make_token(claims={"amr": ["password", "otp"]}),          # RFC 8176 string form: no timestamps
+                                     make_token(claims={"amr": [{"method": "password"}]}),    # no timestamp
+                                     make_token(claims={"amr": [{"method": "password", "timestamp": "yesterday"}]}),
+                                     make_token(claims={"amr": [{"method": "password", "timestamp": True}]}),
+                                     make_token(claims={"amr": [{"method": "password", "timestamp": -5}]}),
+                                     make_token(claims={"amr": [{"method": "password", "timestamp": 0}]}),
+                                     make_token(claims={"amr": [None, 5, "x", []]})])
+    def test_missing_or_unreadable_evidence_fails_closed(self, tok):
         assert ad.login_age_seconds(tok, self.NOW) is None
         assert not ad.login_is_recent(tok, self.NOW)
 
     def test_a_timestamp_in_the_future_is_not_recent(self):
-        assert not ad.login_is_recent(make_token(amr_ts=self.NOW + 3600), self.NOW)
+        assert not ad.login_is_recent(self.amr(("password", self.NOW + 3600)), self.NOW)
 
-    def test_window_boundary(self):
-        edge = ad.REAUTH_WINDOW_SECONDS
-        assert ad.login_is_recent(make_token(amr_ts=self.NOW - edge), self.NOW)
-        assert not ad.login_is_recent(make_token(amr_ts=self.NOW - edge - 1), self.NOW)
+    def test_default_window_boundary(self, monkeypatch):
+        monkeypatch.delenv(ad.REAUTH_WINDOW_ENV, raising=False)
+        edge = ad.REAUTH_WINDOW_DEFAULT_SECONDS
+        assert ad.login_is_recent(self.amr(("password", self.NOW - edge)), self.NOW)
+        assert not ad.login_is_recent(self.amr(("password", self.NOW - edge - 1)), self.NOW)
+
+
+class TestReauthWindowConfig:
+    @pytest.mark.parametrize("raw,expected", [
+        (None, 600), ("", 600), ("   ", 600), ("abc", 600), ("60", 60), ("30", 30), ("900", 900),
+        ("5", 30),          # below the floor -> raised to 30, never 0 ("always recent")
+        ("0", 30), ("-100", 30),
+        ("3600", 900),      # above the ceiling -> capped, a config typo can not widen the window
+        ("99999999", 900), ("1e3", 600), ("60.5", 600),
+    ])
+    def test_window_is_clamped(self, monkeypatch, raw, expected):
+        if raw is None:
+            monkeypatch.delenv(ad.REAUTH_WINDOW_ENV, raising=False)
+        else:
+            monkeypatch.setenv(ad.REAUTH_WINDOW_ENV, raw)
+        assert ad.reauth_window_seconds() == expected
+
+    def test_a_shorter_window_is_honoured_by_the_check(self, monkeypatch):
+        monkeypatch.setenv(ad.REAUTH_WINDOW_ENV, "60")
+        now = 1_800_000_000.0
+        tok = lambda age: make_token(claims={"amr": [{"method": "password", "timestamp": now - age}]})
+        assert ad.login_is_recent(tok(59), now) and not ad.login_is_recent(tok(61), now)
 
 
 # ===========================================================================
@@ -259,9 +308,21 @@ class TestEndpoint:
         assert client.post("/api/account/delete", json={"confirm": "DELETE", "pad": "x" * 4000}).status_code == 413
         assert admin.calls == []
 
-    @pytest.mark.parametrize("token", [fresh_token(age=ad.REAUTH_WINDOW_SECONDS + 5), "opaque-token", make_token(),
+    @pytest.mark.parametrize("token", [fresh_token(age=ad.REAUTH_WINDOW_DEFAULT_SECONDS + 5), "opaque-token", make_token(),
                                        make_token(amr_ts=time.time() - 86400, iat=time.time())])
     def test_an_old_login_must_sign_in_again_first(self, client, admin, token):
+        as_user(token=token)
+        r = client.post("/api/account/delete", json={"confirm": "DELETE"})
+        assert r.status_code == 403 and r.json()["detail"]["code"] == "REAUTH_REQUIRED"
+        assert admin.calls == []
+
+    @pytest.mark.parametrize("token", [
+        make_token(iat=time.time()),                                                    # fresh token, no sign-in evidence
+        make_token(claims={"amr": [{"method": "password", "timestamp": time.time() - 7200},
+                                   {"method": "token_refresh", "timestamp": time.time() - 1}]}, iat=time.time()),
+        make_token(claims={"amr": ["password"]}, iat=time.time()),
+    ])
+    def test_a_refreshed_token_without_a_fresh_sign_in_is_refused(self, client, admin, token):
         as_user(token=token)
         r = client.post("/api/account/delete", json={"confirm": "DELETE"})
         assert r.status_code == 403 and r.json()["detail"]["code"] == "REAUTH_REQUIRED"
@@ -419,3 +480,35 @@ class TestStaticGuards:
                     tables.add(m.group(1))
         missing = sorted(t for t in tables if f"`{t}`" not in doc)
         assert missing == [], f"docs/ACCOUNT_DELETION.md does not list: {missing}"
+
+# ===========================================================================
+# 6. the staging diagnostic script
+# ===========================================================================
+
+class TestClaimsScript:
+    def _run(self, monkeypatch, capsys, token):
+        import getpass
+        import importlib.util
+        monkeypatch.setattr(getpass, "getpass", lambda prompt="": token)
+        spec = importlib.util.spec_from_file_location("check_jwt_claims", os.path.join(REPO, "scripts", "check_jwt_claims.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        code = mod.main()
+        return code, capsys.readouterr().out
+
+    def test_never_prints_the_token_or_identity_and_ignores_a_refresh(self, monkeypatch, capsys):
+        now = time.time()
+        tok = make_token(claims={"sub": "SECRET-USER-ID", "email": "secret@x.test", "session_id": "SECRET-SESSION",
+                                 "amr": [{"method": "password", "timestamp": now - 3000},
+                                         {"method": "token_refresh", "timestamp": now - 1}]}, iat=now - 1)
+        code, out = self._run(monkeypatch, capsys, tok)
+        assert code == 0
+        for secret in (tok, "SECRET-USER-ID", "secret@x.test", "SECRET-SESSION", tok.split(".")[1]):
+            assert secret not in out
+        assert "NOT RECENT" in out and "ignored" in out and "COUNTS" in out
+
+    def test_reports_recent_for_a_real_sign_in_and_rejects_garbage(self, monkeypatch, capsys):
+        code, out = self._run(monkeypatch, capsys, fresh_token(age=5))
+        assert code == 0 and "Verdict             : RECENT" in out
+        code, out = self._run(monkeypatch, capsys, "not-a-jwt")
+        assert code == 2
