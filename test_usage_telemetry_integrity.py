@@ -156,7 +156,12 @@ class TestStaticGuards:
     def test_no_service_role_key_is_used_or_exposed(self):
         for p in self._source_files(".py", ".js", ".html"):
             text = p.read_text(errors="ignore")
-            assert not re.search(r"SERVICE_ROLE|service_role_key|SUPABASE_SERVICE", text, re.I) or p.name == "payments.py", p
+            # payments.py only MENTIONS the role in a comment. backend/account_deletion.py is the ONE
+            # module allowed to read the service-role key (account deletion needs Supabase's admin API;
+            # approved by the Founder's directive, isolated and separately guarded in
+            # test_account_deletion.py). Nothing in static/ or templates/ may ever mention it.
+            allowed = p.name == "payments.py" or (p.parent.name == "backend" and p.name == "account_deletion.py")
+            assert not re.search(r"SERVICE_ROLE|service_role_key|SUPABASE_SERVICE", text, re.I) or allowed, p
 
     def test_the_write_key_never_reaches_the_browser(self):
         for p in self._source_files(".js", ".html"):

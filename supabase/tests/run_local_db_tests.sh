@@ -47,6 +47,7 @@ echo "re-applying idempotent migration 0018 (must succeed twice)"
 psql -v ON_ERROR_STOP=1 -X -q -f "$repo"/supabase/migrations/0018_content_reports.sql >/dev/null
 psql -v ON_ERROR_STOP=1 -X -q -f "$here/plan_final_0016_test.sql"
 psql -v ON_ERROR_STOP=1 -X -q -f "$here/content_reports_0018_test.sql"
+psql -v ON_ERROR_STOP=1 -X -q -f "$here/account_deletion_cascade_test.sql"
 psql -v ON_ERROR_STOP=1 -X -q -f "$here/engine2_behaviour_test.sql"
 psql -v ON_ERROR_STOP=1 -X -q -f "$here/quota_weekly_and_flashcards_test.sql"
 psql -v ON_ERROR_STOP=1 -X -q -f "$here/quota_behaviour_test.sql"

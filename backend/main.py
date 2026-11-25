@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -53,7 +54,7 @@ from backend.database import (
     ReportLimitError,
 )
 from backend import notes_engine, notes_ai, share_engine, report_engine
-from backend import state_limits, quota_service, usage_telemetry
+from backend import state_limits, quota_service, usage_telemetry, account_deletion
 from backend import entitlements, http_client
 from backend import client_access
 from backend.ai import config as ai_config, gateway as ai_gateway, prompts as ai_prompts, verify as ai_verify
@@ -66,6 +67,11 @@ from backend.next_step_engine import compute_next_steps
 from typing import Optional, Tuple
 
 logging.basicConfig(level=logging.INFO)
+# PRIVACY: httpx logs every outbound request URL at INFO. Our Supabase calls carry the
+# student's user id (and note / chat ids) in the query string, so with INFO on every
+# request would write those ids into the logs. WARNING keeps failures, drops the URLs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("kognit.main")
 
 app = FastAPI(title="Kloriz Academic Assistant")
@@ -401,6 +407,9 @@ RATE_LIMIT_CONFIG = {
     # AI-CONTENT REPORTS: one cheap database call (no AI). 5/minute is far above
     # real use; the database separately caps an account at 20 reports per 24h.
     "report": (5, 60),
+    # ACCOUNT DELETION: irreversible, so deliberately tight. Each attempt is one
+    # Supabase admin call; a real student needs one.
+    "account_delete": (3, 600),
     # POCKET NOTES: topic suggestions, flashcards and mini-quizzes each cost
     # one provider call. Same order of magnitude as quiz_generation. Applied
     # ONLY when a call is actually about to be made - returning an already
@@ -3446,6 +3455,75 @@ async def report_content_endpoint(
         status_code=201,
         headers={"Cache-Control": "no-store"},
     )
+
+
+# ---------------------------------------------------------------------------
+# ACCOUNT DELETION - POST /api/account/delete
+# The privileged work lives in backend/account_deletion.py (the only module that
+# reads the service-role key). Inventory + policy: docs/ACCOUNT_DELETION.md.
+# The account deleted is ALWAYS the verified token's user; the body can not name
+# another one.
+# ---------------------------------------------------------------------------
+
+def _account_error(status_code: int, code: str, message: str) -> HTTPException:
+    return HTTPException(status_code=status_code, detail={"code": code, "message": message})
+
+
+async def _rate_limited_account_delete(
+    user_and_token: Tuple[str, str] = Depends(get_current_user_and_token)
+) -> Tuple[str, str]:
+    user_id, _token = user_and_token
+    _check_rate_limit(user_id, "account_delete")
+    return user_and_token
+
+
+def _purge_user_memory(user_id: str) -> None:
+    """Drops everything this process still holds in memory for the user: PDF text,
+    quiz answer keys and rate-limit counters. Database rows are removed by the
+    cascade; this covers state that never reached the database."""
+    _pdf_contexts.discard_user(active_pdf_contexts, user_id)
+    _quiz_definitions.discard_user(active_quiz_definitions, user_id)
+    with _rate_limit_lock:
+        for key in [k for k in _rate_limit_buckets if k[0] == user_id]:
+            del _rate_limit_buckets[key]
+
+
+@app.post("/api/account/delete")
+async def delete_account_endpoint(
+    request: Request,
+    user_and_token: Tuple[str, str] = Depends(_rate_limited_account_delete),
+):
+    """Permanently deletes the signed-in student's account and all their data.
+    Requires the typed confirmation word AND a sign-in within the last 10 minutes.
+    Safe to retry: a repeat after success is answered 401 by the normal token check
+    (the user no longer exists) and the app treats that as 'already deleted'."""
+    user_id, user_token = user_and_token
+    body = await _read_json_body(request, max_bytes=account_deletion.MAX_REQUEST_BODY_BYTES)
+    if not isinstance(body, dict) or not account_deletion.confirmation_is_valid(body.get("confirm")):
+        raise _account_error(
+            400, "ACCOUNT_DELETE_CONFIRMATION_REQUIRED",
+            f"Type {account_deletion.CONFIRMATION_WORD} to confirm that you want to delete your account.",
+        )
+    if not account_deletion.login_is_recent(user_token):
+        raise _account_error(
+            403, "REAUTH_REQUIRED",
+            "For your security, please sign in again, then delete your account.",
+        )
+    try:
+        outcome = await account_deletion.delete_auth_user(user_id)
+    except account_deletion.AccountDeletionUnavailable:
+        raise _account_error(503, "ACCOUNT_DELETION_UNAVAILABLE",
+                             "Account deletion is not available right now. Please contact support.")
+    except account_deletion.AccountDeletionFailed:
+        raise _account_error(502, "ACCOUNT_DELETE_FAILED",
+                             "We could not delete your account. Nothing was deleted - please try again.")
+
+    _purge_user_memory(user_id)
+    # A short one-way fingerprint, not the id: the deleted account's id must not
+    # live on in the logs.
+    logger.info("account deleted outcome=%s ref=%s", outcome,
+                hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:10])
+    return JSONResponse(content={"status": "deleted"}, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/favicon.ico", include_in_schema=False)

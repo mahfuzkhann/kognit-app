@@ -235,6 +235,15 @@ class BoundedPdfContexts:
         with self._lock:
             self._drop_locked(contexts, (user_id, chat_id))
 
+    def discard_user(self, contexts: dict, user_id: str) -> int:
+        """Forgets EVERYTHING held for one user (account deletion). Returns how
+        many chat contexts were dropped. Safe if the user has nothing stored."""
+        with self._lock:
+            chats = contexts.pop(user_id, None)
+            for key in [k for k in self._last_used if k[0] == user_id]:
+                del self._last_used[key]
+            return len(chats) if isinstance(chats, dict) else 0
+
     def prune(self, contexts: dict) -> int:
         """Full sweep; returns the number of expired entries removed."""
         with self._lock:
@@ -299,6 +308,16 @@ class BoundedQuizDefinitions:
     def _drop_locked(self, definitions: dict, quiz_id: str) -> None:
         definitions.pop(quiz_id, None)
         self._stored_at.pop(quiz_id, None)
+
+    def discard_user(self, definitions: dict, user_id: str) -> int:
+        """Forgets every quiz definition (answer keys included) that belongs to
+        one user, in-flight or not (account deletion). Returns how many."""
+        with self._lock:
+            mine = [q for q, d in definitions.items()
+                    if isinstance(d, dict) and d.get("user_id") == user_id]
+            for quiz_id in mine:
+                self._drop_locked(definitions, quiz_id)
+            return len(mine)
 
     def _expired(self, definitions: dict, quiz_id: str, now: float) -> bool:
         stored = self._stored_at.get(quiz_id)
