@@ -160,3 +160,17 @@ render as math and stay safe against hostile HTML, and the Quizzes UI uses white
 accents (dark and light theme, hover/focus/selected/results) without touching the shared
 indigo token other sections use. `test_nav_views.mjs` additionally covers the Your Topics
 states (loading, logged out, error + retry, empty, populated, refresh after a saved quiz).
+
+## Central API client (`static/js/api.js`)
+
+`test_api_client.mjs` (plain Node 18+, no jsdom, no network, no npm install needed) loads the real `api.js`
+into an isolated `vm` context with a controllable fake `fetch` that aborts like a browser's. It covers
+configuration (web vs Android), path safety, headers, authentication and the one-shot token refresh,
+error parsing, retry policy, timeouts / cancellation / offline, streaming and the app-config / update check.
+`fixtures/app_config.contract.json` is the real `/api/app-config` output; `test_api_contract.py` fails if it
+drifts from the backend. Contract: `docs/API_CLIENT.md`.
+
+Run: `node test_api_client.mjs`
+
+It can NOT prove how a real Android WebView handles CORS preflights or aborts; that needs the device test in
+the Android batch. `api.js` is not loaded by any page yet - it is wired in with the consolidated `app.js`.
