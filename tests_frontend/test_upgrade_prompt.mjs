@@ -245,7 +245,7 @@ console.log("\n4. The modal");
 const MARKED_SRC = fs.readFileSync(path.join(HERE, "node_modules", "marked", "lib", "marked.umd.js"), "utf8");
 const SRC = {
     stream: read("static/js/stream-render.js"), purify: read("static/js/vendor/purify.min.js"),
-    feedback: FEEDBACK, app: read("static/js/app.js"), store: read("static/js/notes-store.js"),
+    feedback: FEEDBACK, sync: read("static/js/project-sync.js"), app: read("static/js/app.js"), store: read("static/js/notes-store.js"),
     notes: read("static/js/notes.js"), nav: read("static/js/nav-views.js"),
     i18n: read("static/js/i18n.js"), menu: read("static/js/profile-menu.js"),
 };
@@ -306,12 +306,12 @@ async function boot(api) {
     const query = { select: () => query, order: async () => ({ data: [], error: null }), upsert: async () => ({ error: null }), delete: () => query, eq: async () => ({ error: null }) };
     w.supabase = { createClient: () => ({ auth: {
         getSession: async () => ({ data: { session: { access_token: "tok", user: { id: "user-1" } } } }),
-        onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }), signOut: async () => ({}) }, from: () => query }) };
+        onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }), signOut: async () => ({}) }, rpc: async () => ({ data: { status: "ok", version: 1, updated_at: "t" }, error: null }), from: () => query }) };
     w.eval(MARKED_SRC);
     w.Element.prototype.getClientRects = function () { return this.isConnected ? [{}] : []; };
     w.MathJax = Object.assign(w.MathJax || {}, { typesetPromise: async () => {}, typesetClear: () => {}, startup: { promise: Promise.resolve() } });
     const add = (src) => { const s = w.document.createElement("script"); s.textContent = src; w.document.body.appendChild(s); };
-    add(SRC.stream); add(SRC.purify); add(SRC.feedback); add(SRC.app);
+    add(SRC.stream); add(SRC.purify); add(SRC.feedback); add(SRC.sync); add(SRC.app);
     w.openAuthModal = () => {};
     add(SRC.store); add(SRC.notes); add(SRC.nav); add(SRC.i18n); add(SRC.menu);
     w.document.dispatchEvent(new w.Event("DOMContentLoaded"));

@@ -11,7 +11,7 @@ const read = (rel) => fs.readFileSync(path.join(ROOT, rel), "utf8");
 const MARKED_SRC = fs.readFileSync(path.join(HERE, "node_modules", "marked", "lib", "marked.umd.js"), "utf8");
 const SRC = {
     stream: read("static/js/stream-render.js"), purify: read("static/js/vendor/purify.min.js"),
-    feedback: read("static/js/feedback.js"), app: read("static/js/app.js"),
+    feedback: read("static/js/feedback.js"), sync: read("static/js/project-sync.js"), app: read("static/js/app.js"),
     store: read("static/js/notes-store.js"), notes: read("static/js/notes.js"), nav: read("static/js/nav-views.js"),
     uicore: read("static/js/ui-core.js"), shell: read("static/js/shell.js"), share: read("static/js/share.js"),
 };
@@ -59,7 +59,7 @@ async function boot(opts = {}) {
         signUp: async () => ({ data: { user: { id: "u2", identities: [{}] }, session: null }, error: null }),
         signInWithOAuth: async () => ({ error: null }),
     };
-    w.supabase = { createClient: () => ({ auth: env.auth, from: () => query }) };
+    w.supabase = { createClient: () => ({ auth: env.auth, rpc: async (name, args) => (env.rpc ? env.rpc(name, args) : { data: { status: "ok", version: 1, updated_at: "t" }, error: null }), from: () => query }) };
     w.eval(MARKED_SRC);
     w.Element.prototype.getClientRects = function () { return this.isConnected ? [{}] : []; };
     w.MathJax = Object.assign(w.MathJax || {}, { typesetPromise: async () => {}, typesetClear: () => {}, startup: { promise: Promise.resolve() } });
@@ -70,7 +70,7 @@ async function boot(opts = {}) {
     // one - and a single Escape would be handled twice. A real page loads it exactly once.
     if (w.document.readyState === "loading") await new Promise((r) => w.document.addEventListener("DOMContentLoaded", r, { once: true }));
     const add = (src) => { const s = w.document.createElement("script"); s.textContent = src; w.document.body.appendChild(s); };
-    add(SRC.stream); add(SRC.purify); add(SRC.feedback); add(SRC.app); add(SRC.store); add(SRC.notes); add(SRC.nav); add(SRC.uicore); add(SRC.shell); add(SRC.share);
+    add(SRC.stream); add(SRC.purify); add(SRC.feedback); add(SRC.sync); add(SRC.app); add(SRC.store); add(SRC.notes); add(SRC.nav); add(SRC.uicore); add(SRC.shell); add(SRC.share);
     w.document.dispatchEvent(new w.Event("DOMContentLoaded"));
     await sleep(80);
 

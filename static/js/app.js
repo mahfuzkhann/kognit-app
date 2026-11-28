@@ -15,6 +15,20 @@ let isSignUpMode = false;
 // never touched by Phase 5A-5E mastery/insight logic).
 let currentProfile = null;
 
+// NOTEBOOK SYNC (docs/SYNC_PROTOCOL.md, static/js/project-sync.js): every save
+// of a notebook goes through the version-checked save_user_project RPC
+// (migration 0019). The saver is the ONLY writer of user_projects rows; it keeps
+// one save in flight per notebook, merges conflicts instead of overwriting, and
+// never mints a new id for a retry. `activeGenerations` is declared further down
+// (the callbacks only run later, long after it exists).
+const projectSaver = KognitSync.createSaver({
+    rpc: (args) => supabaseClient.rpc("save_user_project", args),
+    getBusyChatIds: () => new Set(activeGenerations.keys()),
+    onIdChanged: (from, to) => {
+        if (activeProjectId === from) activeProjectId = to;
+    }
+});
+
 // ==================== APP STATE ====================
 let currentMode = "direct";
 let projects = [];
@@ -188,8 +202,10 @@ window.renameProject = async function(projId, newTitle) {
     proj.title = clean;
 
     if (currentUser) {
+        projectSaver.noteRenamed(projId);   // a conflict merge must keep the name typed here
         const savedRemotely = await syncProjectToDatabase(proj);
         if (!savedRemotely) {
+            projectSaver.clearRenamed(projId);
             proj.title = previousTitle;
             return { ok: false, reason: "sync" };
         }
@@ -408,6 +424,9 @@ async function loadProjectsFromDatabase() {
                 id: p.id,
                 title: p.title,
                 chats: p.chats || [],
+                // Last version the server confirmed. NEVER invented client-side:
+                // it is what makes a later save a compare-and-set.
+                version: typeof p.version === "number" ? p.version : (p.version != null && isFinite(Number(p.version)) ? Number(p.version) : null),
                 // Server-side "last saved" time. Only used to show
                 // "Updated ..." on the Notebooks page and to sort it.
                 updated_at: p.updated_at || null
@@ -573,31 +592,47 @@ async function saveProjectsToStorage() {
     return { cachedLocally, savedRemotely, signedIn: !!currentUser };
 }
 
+// Short, non-blocking notice (never a native alert). Falls back to the console
+// only when the feedback module is not present.
+function notifySync(text, kind) {
+    const fb = window.KlorizFeedback;
+    if (fb && typeof fb.toast === "function") fb.toast(text, { kind: kind || "info" });
+}
+
+// Saves ONE notebook through the version-checked RPC. Returns true only when
+// the server holds the notebook afterwards (saved / merged with another
+// device's changes / re-created). Never throws; a network failure keeps the
+// working copy and the SAME expected version, so the next save is safe.
 async function syncProjectToDatabase(project) {
     if (!currentUser) return false;
 
-    const payload = {
-        id: project.id,
-        user_id: currentUser.id,
-        title: project.title,
-        chats: project.chats,
-        updated_at: new Date().toISOString()
-    };
-
-    // P1-4: returns true only when the upsert is confirmed, and never
-    // throws (a network failure used to surface as an unhandled promise
-    // rejection). Callers that ignore the result behave exactly as before.
     try {
-        const { error } = await supabaseClient
-            .from("user_projects")
-            .upsert(payload, { onConflict: "id" });
+        const result = await projectSaver.saveProject(project);
 
-        if (error) {
-            console.error("Supabase Sync Error:", error.message);
-            return false;
+        if (result.status === "saved") return true;
+
+        if (result.status === "merged" || result.status === "recreated") {
+            // Another device changed this notebook (or deleted it). The working copy
+            // was merged IN PLACE - nothing was dropped. Refresh what is on screen,
+            // unless an answer is being written into the open chat right now.
+            renderHistoryList();
+            if (activeProjectId === project.id && activeChatId && !activeGenerations.has(activeChatId)) {
+                loadChat(activeProjectId, activeChatId);
+            }
+            notifySync(result.status === "merged"
+                ? "Synced with changes from your other device."
+                : "This notebook was removed on another device - it has been restored from this one.", "info");
+            return true;
         }
-        project.updated_at = payload.updated_at;
-        return true;
+
+        if (result.status === "conflict_unresolved") {
+            notifySync("Couldn't sync yet - your chats are safe on this device. We'll try again.", "warning");
+        } else if (result.status === "rejected" && result.reason === "too_large") {
+            notifySync("This notebook is too large to sync. Remove some images or start a new notebook.", "warning");
+        } else if (result.status === "rejected") {
+            console.error("Notebook sync rejected:", result.reason);
+        }
+        return false;
     } catch (e) {
         console.error("Supabase Sync Error:", e && e.message ? e.message : e);
         return false;
@@ -2826,11 +2861,14 @@ function renderEmptyChatGreeting(chatBox) {
 window.createNewProject = function(title) {
     const requestedTitle = typeof title === "string" ? normalizeNotebookTitle(title) : "";
     const newProj = {
-        id: "proj_" + Date.now(),
+        id: KognitSync.newId(),
+        createdAt: Date.now(),
+        version: null,
         title: requestedTitle || DEFAULT_NEW_NOTEBOOK_TITLE,
         chats: [
             {
-                id: "chat_" + Date.now(),
+                id: KognitSync.newId(),
+                createdAt: Date.now(),
                 title: "New Chat",
                 // PHASE 5: no more hardcoded welcome message here - an
                 // empty chat now gets its greeting from
@@ -2859,7 +2897,8 @@ window.createNewChat = function(projectId = null) {
     if (!project) return;
 
     const newChat = {
-        id: "chat_" + Date.now(),
+        id: KognitSync.newId(),
+        createdAt: Date.now(),
         title: "New Chat",
         // PHASE 5: see comment above createNewProject.
         messages: []
@@ -2884,6 +2923,8 @@ function getOrCreateDefaultProject() {
     if (!defaultProject) {
         defaultProject = {
             id: DEFAULT_PROJECT_ID,
+            createdAt: Date.now(),
+            version: null,
             title: "Recent Chats",
             chats: []
         };
@@ -2906,7 +2947,8 @@ window.createStandaloneChat = function() {
     const defaultProject = getOrCreateDefaultProject();
 
     const newChat = {
-        id: "chat_" + Date.now(),
+        id: KognitSync.newId(),
+        createdAt: Date.now(),
         title: "New Chat",
         // PHASE 5: see comment above createNewProject.
         messages: []
@@ -3156,10 +3198,9 @@ function applyPDFStatusUI(chat) {
 // createNewChat/createStandaloneChat). Returns null for any id that is not
 // in that format, so no time is ever guessed.
 function getChatCreatedAt(chat) {
-    const match = /^chat_(\d{10,})$/.exec((chat && chat.id) || "");
-    if (!match) return null;
-    const ms = Number(match[1]);
-    return Number.isFinite(ms) ? ms : null;
+    // New chats carry an explicit createdAt (their UUID id has no time in it);
+    // legacy "chat_<ms>" ids keep their derived time. Never guessed.
+    return KognitSync.createdAtOf(chat, "chat");
 }
 
 // "now", "2m ago", "3h ago", "1d ago", "2w ago", "5mo ago", "1y ago".
@@ -3322,6 +3363,7 @@ function renderProjectCard(proj) {
         const saveProjectTitle = () => {
             if (input.value.trim()) {
                 proj.title = input.value.trim();
+                projectSaver.noteRenamed(proj.id);
                 saveProjectsToStorage();
             }
             editingProjectId = null;
@@ -3583,6 +3625,9 @@ function deleteChat(projId, chatId) {
     const proj = projects.find(p => p.id === projId);
     if (!proj) return;
     proj.chats = proj.chats.filter(c => c.id !== chatId);
+    // A chat deleted here must not come back when this notebook is merged with
+    // another device's copy.
+    projectSaver.noteChatDeleted(projId, chatId);
     saveProjectsToStorage();
 
     if (proj.chats.length === 0) {

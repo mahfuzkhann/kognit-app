@@ -130,7 +130,7 @@ const BASE = `http://127.0.0.1:${server.address().port}/`;
 const SUPABASE_STUB = `window.supabase = { createClient: () => ({ auth: {
   getSession: async () => ({ data: { session: { access_token: "tok", user: { id: "user-1", email: "t@example.com" } } } }),
   onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }), signOut: async () => ({}) },
-  from: () => { const q = { select: () => q, order: async () => ({ data: [], error: null }), upsert: async () => ({ error: null }), delete: () => q, eq: async () => ({ error: null }) }; return q; } }) };`;
+  rpc: async () => ({ data: { status: "ok", version: 1, updated_at: "t" }, error: null }), from: () => { const q = { select: () => q, order: async () => ({ data: [], error: null }), upsert: async () => ({ error: null }), delete: () => q, eq: async () => ({ error: null }) }; return q; } }) };`;
 
 const browser = await puppeteer.launch({
     executablePath: EXE, headless: true,

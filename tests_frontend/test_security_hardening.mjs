@@ -39,6 +39,7 @@ const MARKED_SRC = fs.readFileSync(path.join(NODE_MODULES, "marked", "lib", "mar
 const PURIFY_SRC = fs.readFileSync(path.join(ROOT, "static/js/vendor/purify.min.js"), "utf8");
 const STREAM_SRC = fs.readFileSync(path.join(ROOT, "static/js/stream-render.js"), "utf8");
 const APP_SRC = fs.readFileSync(path.join(ROOT, "static/js/app.js"), "utf8");
+const SYNC_SRC = fs.readFileSync(path.join(ROOT, "static/js/project-sync.js"), "utf8");
 const FEEDBACK_SRC = fs.readFileSync(path.join(ROOT, "static/js/feedback.js"), "utf8");
 const TEMPLATE = fs.readFileSync(path.join(ROOT, "templates/index.html"), "utf8");
 
@@ -84,6 +85,15 @@ async function boot(opts = {}) {
                 signOut: async () => { log.signOuts++; return {}; },
             },
             from: () => query,
+            // Notebook saves now go through the version-checked RPC (migration 0019).
+            // `log.upserts` keeps its name: it records every notebook write the app sends.
+            rpc: async (name, args) => {
+                if (name !== "save_user_project") throw new Error("unexpected rpc " + name);
+                log.upserts.push({ id: args.p_id, title: args.p_title, chats: args.p_chats, expected: args.p_expected_version });
+                if (opts.upsertResult === "throw") throw new Error("network down");
+                if (opts.upsertResult === "error") return { data: null, error: { code: "500", message: "rls denied" } };
+                return { data: { status: "ok", version: (args.p_expected_version || 0) + 1, updated_at: "t" }, error: null };
+            },
         }),
     };
 
@@ -93,6 +103,7 @@ async function boot(opts = {}) {
     add(STREAM_SRC);
     if (!opts.noPurify) add(PURIFY_SRC);
     add(FEEDBACK_SRC);
+    add(SYNC_SRC);
     add(APP_SRC);
     w.document.dispatchEvent(new w.Event("DOMContentLoaded"));
     await sleep(60);

@@ -88,7 +88,7 @@ const BASE = `http://127.0.0.1:${server.address().port}/`;
 const supabaseStub = (signedIn) => `window.supabase = { createClient: () => ({ auth: {
   getSession: async () => ({ data: { session: ${signedIn ? '{ access_token: "tok", user: { id: "user-1", email: "t@example.com" } }' : "null"} } }),
   onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }), signOut: async () => ({}) },
-  from: () => { const q = { select: () => q, order: async () => ({ data: [], error: null }), upsert: async () => ({ error: null }), delete: () => q, eq: async () => ({ error: null }) }; return q; } }) };`;
+  rpc: async () => ({ data: { status: "ok", version: 1, updated_at: "t" }, error: null }), from: () => { const q = { select: () => q, order: async () => ({ data: [], error: null }), upsert: async () => ({ error: null }), delete: () => q, eq: async () => ({ error: null }) }; return q; } }) };`;
 
 const MATRIX_Q = { id: 3, question: "A = \\begin{bmatrix} 2 & 5 & 8 & -1 \\\\ 3 & -4 & 7 \\\\ 0 & 1 & 6 \\end{bmatrix} ম্যাট্রিক্সটির ট্রেস (Trace) কত?", options: ["4", "12", "8", "-4"], correct_index: 0, explanation: "Trace = sum of the diagonal." };
 const QUESTIONS = [

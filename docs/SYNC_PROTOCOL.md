@@ -1,8 +1,11 @@
 # Notebook / chat synchronization protocol (version-checked, compare-and-set)
 
-Status: **database side implemented and tested** (migration `0019_project_versioning_cas.sql`).
-**Browser side not yet implemented** - it arrives with the consolidated `app.js`. Until then the app still
-saves with the old plain upsert; the new trigger already makes those old writes visible to version checks.
+Status: **database side** (migration `0019_project_versioning_cas.sql`) **and browser side** (`static/js/project-sync.js`,
+used by `static/js/app.js`) implemented. Browser logic is covered by `tests_frontend/test_project_sync.mjs` (merge rule +
+saver against a fake server that mirrors the RPC) and `tests_frontend/test_sync_integration.mjs` (the real `app.js` in jsdom).
+NOT yet verified: two real browsers/devices against a real Supabase project (needs migration 0019 applied first).
+Migration 0019 MUST be applied before this app.js is deployed - without `save_user_project` every save fails and notebooks
+stay on the device only.
 
 ## The problem (verified in `static/js/app.js`, `syncProjectToDatabase`)
 
@@ -52,7 +55,7 @@ Guarantees (proved on real PostgreSQL, `supabase/tests/project_cas_0019_test.sql
 - Old cached app versions that still `upsert`/`update` directly cannot slip past: a trigger bumps `version`
   on every update that did not bump it itself.
 
-## Client algorithm (to be implemented in `app.js`)
+## Client algorithm (implemented in `project-sync.js`)
 
 State per notebook: `version` (last confirmed) and the working copy.
 1. **Save**: call the RPC with `expected = version` (`null` if never saved). On `ok` store the returned version.

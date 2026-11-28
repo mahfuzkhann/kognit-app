@@ -455,7 +455,8 @@
         var ms = Date.parse(p.updated_at);
         return isFinite(ms) ? ms : null;
     }
-    function createdMs(p) { return idTimestamp(p.id, "proj"); }
+    function explicitMs(x) { return (x && typeof x.createdAt === "number" && isFinite(x.createdAt) && x.createdAt > 0) ? x.createdAt : null; }
+    function createdMs(p) { return explicitMs(p) || idTimestamp(p.id, "proj"); }
     function activityMs(p) { return updatedMs(p) || createdMs(p) || 0; }
 
     function relativeTime(ms, now) {
@@ -952,7 +953,7 @@
             var text = el("span", "nb-chat-text");
             text.appendChild(el("span", "nb-chat-title", chat.title || "Untitled chat"));
             var bits = [];
-            var started = idTimestamp(chat.id, "chat");
+            var started = explicitMs(chat) || idTimestamp(chat.id, "chat");
             if (started) bits.push("Started " + relativeTime(started));
             var msgs = (chat.messages || []).length;
             bits.push(msgs === 0 ? "No messages yet" : msgs + (msgs === 1 ? " message" : " messages"));

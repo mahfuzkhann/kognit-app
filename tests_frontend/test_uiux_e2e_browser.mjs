@@ -95,7 +95,7 @@ window.supabase = { createClient: () => ({
     signUp: async () => ({ data: { user: { identities: [{}] }, session: null }, error: null }),
     signInWithOAuth: async () => ({ error: null }),
   },
-  from: () => { const q = { select: () => q, order: async () => ({ data: [], error: null }), upsert: async () => ({ error: null }), delete: () => q, eq: async () => ({ error: null }) }; return q; },
+  rpc: async () => ({ data: { status: "ok", version: 1, updated_at: "t" }, error: null }), from: () => { const q = { select: () => q, order: async () => ({ data: [], error: null }), upsert: async () => ({ error: null }), delete: () => q, eq: async () => ({ error: null }) }; return q; },
 }) };`;
 
 const THIRD_PARTY = [];   // every request that left for a host other than the app / CDN stubs

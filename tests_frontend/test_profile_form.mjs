@@ -44,7 +44,7 @@ const SRC = {
     stream: read("static/js/stream-render.js"),
     purify: read("static/js/vendor/purify.min.js"),
     feedback: read("static/js/feedback.js"),   // loaded before app.js on the real page
-    app: read("static/js/app.js"),
+    sync: read("static/js/project-sync.js"), app: read("static/js/app.js"),
     store: read("static/js/notes-store.js"),
     notes: read("static/js/notes.js"),
     nav: read("static/js/nav-views.js"),
@@ -101,14 +101,14 @@ async function boot({ profile = { name: "Rahman Khan", user_class: "Class 10", s
             onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }),
             signOut: async () => ({}),
         },
-        from: () => query,
+        rpc: async () => ({ data: { status: "ok", version: 1, updated_at: "t" }, error: null }), from: () => query,
     }) };
     w.eval(MARKED_SRC);
     w.Element.prototype.getClientRects = function () { return this.isConnected ? [{}] : []; };
     w.MathJax = Object.assign(w.MathJax || {}, { typesetPromise: async () => {}, typesetClear: () => {}, startup: { promise: Promise.resolve() } });
 
     const add = (src) => { const s = w.document.createElement("script"); s.textContent = src; w.document.body.appendChild(s); };
-    add(SRC.stream); add(SRC.purify); add(SRC.feedback); add(SRC.app);
+    add(SRC.stream); add(SRC.purify); add(SRC.feedback); add(SRC.sync); add(SRC.app);
     w.openAuthModal = () => {};
     add(SRC.store); add(SRC.notes); add(SRC.nav);
     w.document.dispatchEvent(new w.Event("DOMContentLoaded"));

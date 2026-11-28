@@ -47,7 +47,7 @@
    ============================================================ */
 "use strict";
 
-const SW_VERSION = "2026-11-21.1";
+const SW_VERSION = "2026-11-28.1";
 const SHELL_CACHE = "kognit-shell-" + SW_VERSION;
 const CDN_CACHE = "kognit-cdn-" + SW_VERSION;
 const CACHE_PREFIX = "kognit-";
@@ -72,6 +72,7 @@ const CORE_URLS = [
     "/static/js/stream-render.js",
     "/static/js/vendor/purify.min.js",
     "/static/js/feedback.js",
+    "/static/js/project-sync.js",
     "/static/js/app.js",
     "/static/js/notes-store.js",
     "/static/js/notes.js",
