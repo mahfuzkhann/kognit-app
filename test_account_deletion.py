@@ -177,6 +177,7 @@ def admin(monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", factory)
     monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
     monkeypatch.setenv(ad.SERVICE_ROLE_ENV, SERVICE_KEY)
+    monkeypatch.setenv(ad.ENABLED_ENV, "true")   # the operator's switch; individual tests turn it off
     return fake
 
 
@@ -326,6 +327,13 @@ class TestEndpoint:
         as_user(token=token)
         r = client.post("/api/account/delete", json={"confirm": "DELETE"})
         assert r.status_code == 403 and r.json()["detail"]["code"] == "REAUTH_REQUIRED"
+        assert admin.calls == []
+
+    def test_switch_off_by_default_even_when_fully_configured_nothing_runs(self, client, admin, monkeypatch):
+        as_user()
+        monkeypatch.delenv(ad.ENABLED_ENV)
+        r = client.post("/api/account/delete", json={"confirm": "DELETE"})
+        assert r.status_code == 503 and r.json()["detail"]["code"] == "ACCOUNT_DELETION_UNAVAILABLE"
         assert admin.calls == []
 
     def test_not_configured_is_503_and_keeps_all_in_memory_data(self, client, admin, monkeypatch):
@@ -512,3 +520,42 @@ class TestClaimsScript:
         assert code == 0 and "Verdict             : RECENT" in out
         code, out = self._run(monkeypatch, capsys, "not-a-jwt")
         assert code == 2
+
+# ===========================================================================
+# 7. the operator's switch and what the app is told about it
+# ===========================================================================
+
+class TestAvailabilitySwitch:
+    @pytest.mark.parametrize("value,expected", [
+        ("true", True), ("TRUE", True), ("1", True), ("yes", True), ("on", True), (" true ", True),
+        ("", False), ("false", False), ("0", False), ("no", False), ("enabled", False), ("truee", False), ("2", False),
+    ])
+    def test_only_explicit_true_values_enable_it(self, monkeypatch, value, expected):
+        monkeypatch.setenv(ad.ENABLED_ENV, value)
+        assert ad.is_enabled() is expected
+
+    def test_it_is_off_when_the_variable_is_missing(self, monkeypatch):
+        monkeypatch.delenv(ad.ENABLED_ENV, raising=False)
+        assert ad.is_enabled() is False
+
+    @pytest.mark.parametrize("missing", ["SUPABASE_URL", ad.SERVICE_ROLE_ENV, ad.ENABLED_ENV])
+    def test_available_needs_the_switch_and_the_url_and_the_key(self, monkeypatch, missing):
+        monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+        monkeypatch.setenv(ad.SERVICE_ROLE_ENV, SERVICE_KEY)
+        monkeypatch.setenv(ad.ENABLED_ENV, "true")
+        assert ad.is_available() is True
+        monkeypatch.delenv(missing)
+        assert ad.is_available() is False
+
+    def test_app_config_reports_only_availability_never_a_secret(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+        monkeypatch.setenv(ad.SERVICE_ROLE_ENV, SERVICE_KEY)
+        monkeypatch.delenv(ad.ENABLED_ENV, raising=False)
+        r = client.get("/api/app-config")
+        assert r.json()["features"] == {"account_deletion": False}
+        monkeypatch.setenv(ad.ENABLED_ENV, "true")
+        r = client.get("/api/app-config")
+        assert r.json()["features"] == {"account_deletion": True}
+        assert SERVICE_KEY not in r.text and "supabase.co" not in r.text
+        monkeypatch.delenv(ad.SERVICE_ROLE_ENV)
+        assert client.get("/api/app-config").json()["features"] == {"account_deletion": False}, "switch on but not configured: still off"

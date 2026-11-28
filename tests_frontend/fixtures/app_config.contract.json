@@ -3,5 +3,8 @@
   "android": {
     "min_version": "0.0.0",
     "latest_version": null
+  },
+  "features": {
+    "account_deletion": false
   }
 }

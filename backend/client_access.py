@@ -55,6 +55,8 @@ from fastapi import APIRouter, FastAPI
 from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 
+from backend import account_deletion
+
 logger = logging.getLogger("kognit.client_access")
 
 # --------------------------------------------------------------------------- CORS
@@ -255,12 +257,17 @@ def build_app_config() -> dict:
             "min_version": format_version(min_android_version()),
             "latest_version": format_version(latest) if latest is not None else None,
         },
+        # Server-side feature switches the app may show or hide. Booleans only - never a secret.
+        # account_deletion is true ONLY when the operator enabled it AND the server is configured to do it.
+        "features": {
+            "account_deletion": account_deletion.is_available(),
+        },
     }
 
 
 @router.get("/api/app-config")
 async def app_config():
-    """Public and secret-free: version policy only. No database, no AI, no student data."""
+    """Public and secret-free: version policy and feature switches (booleans) only. No database, no AI, no student data."""
     return JSONResponse(content=build_app_config(), headers={"Cache-Control": "no-cache"})
 
 

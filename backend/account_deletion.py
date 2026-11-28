@@ -79,6 +79,7 @@ CONFIRMATION_WORD = "DELETE"
 # A sign-in older than the window must be repeated before deleting. The default 10
 # minutes is long enough to read the dialog and short enough that a borrowed,
 # unlocked device or a leaked token is not enough.
+ENABLED_ENV = "ACCOUNT_DELETION_ENABLED"
 REAUTH_WINDOW_ENV = "ACCOUNT_DELETE_REAUTH_WINDOW_SECONDS"
 REAUTH_WINDOW_DEFAULT_SECONDS = 10 * 60
 REAUTH_WINDOW_MIN_SECONDS = 30
@@ -102,6 +103,18 @@ class AccountDeletionUnavailable(Exception):
 class AccountDeletionFailed(Exception):
     """Supabase refused or could not be reached. Nothing was deleted (the
     cascade is one transaction), so the student can safely try again."""
+
+
+def is_enabled() -> bool:
+    """The operator's switch. OFF unless ACCOUNT_DELETION_ENABLED is exactly true/1/yes/on.
+    It is turned on only AFTER the staging checks in docs/ACCOUNT_DELETION.md have passed."""
+    return os.getenv(ENABLED_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def is_available() -> bool:
+    """Switch on AND the server is fully configured to do it. Only this is ever reported to the
+    app (/api/app-config), so the app never offers a deletion that would fail with 503."""
+    return bool(is_enabled() and os.getenv("SUPABASE_URL", "").strip() and os.getenv(SERVICE_ROLE_ENV, "").strip())
 
 
 def confirmation_is_valid(value) -> bool:

@@ -3498,6 +3498,10 @@ async def delete_account_endpoint(
     Safe to retry: a repeat after success is answered 401 by the normal token check
     (the user no longer exists) and the app treats that as 'already deleted'."""
     user_id, user_token = user_and_token
+    # The operator's switch (ACCOUNT_DELETION_ENABLED + service key). Off = nothing below runs.
+    if not account_deletion.is_available():
+        raise _account_error(503, "ACCOUNT_DELETION_UNAVAILABLE",
+                             "Account deletion is not available right now. Please contact support.")
     body = await _read_json_body(request, max_bytes=account_deletion.MAX_REQUEST_BODY_BYTES)
     if not isinstance(body, dict) or not account_deletion.confirmation_is_valid(body.get("confirm")):
         raise _account_error(

@@ -17,6 +17,7 @@ Set these as server-side environment variables (never in the browser, HTML, git 
 | `QUOTA_MODE` | no | `enforce` (default) or `off` |
 | `USAGE_WRITE_KEY` | for usage telemetry | server-side secret that lets the backend write usage rows through `record_ai_usage_events()` (migration 0011). Without it chat/quiz/quotas work, but usage rows are **not recorded** (one warning is logged). Setup in section 2a |
 | `SUPABASE_SERVICE_ROLE_KEY` | for account deletion | **Privileged**: bypasses Row Level Security on every table. Lets `POST /api/account/delete` remove a student's auth user (and, through cascades, all their data). Set it ONLY in the hosting provider's secret settings; never in git, chat, the browser or any committed file. Read in exactly one file (`backend/account_deletion.py`). Without it deleting an account answers 503 and nothing else is affected. Setup, inventory and the required staging check: `docs/ACCOUNT_DELETION.md` |
+| `ACCOUNT_DELETION_ENABLED` | optional (default off) | Operator switch for account deletion: only `true`/`1`/`yes`/`on` enable it, and it also needs `SUPABASE_SERVICE_ROLE_KEY`. Off -> the endpoint answers 503 and `/api/app-config` reports `features.account_deletion: false`. Turn on in production only after the staging check in `docs/ACCOUNT_DELETION.md` |
 | `ACCOUNT_DELETE_REAUTH_WINDOW_SECONDS` | optional | How recent a student's interactive sign-in must be to delete an account: 30-900 s, default 600. Values outside the range are clamped. Staging check in `docs/ACCOUNT_DELETION.md` |
 | `PDF_CONTEXT_*`, `QUIZ_DEFINITION_*` | no | in-memory limits, see section 4 |
 | `THREADPOOL_MAX_THREADS` | no | ceiling on simultaneous streamed answers per process, see section 5 |
@@ -51,7 +52,7 @@ and restart; with `MIN_ANDROID_VERSION` unset the gate refuses nobody.
 ## 2. Database migrations
 
 Apply in numeric order in the Supabase SQL editor. Run each file once, except `0002, 0004, 0006,
-0008, 0009, 0010, 0011, 0012, 0014, 0015, 0016, 0017, 0018`, which are safe to re-run (re-running `0016` or `0017`
+0008, 0009, 0010, 0011, 0012, 0014, 0015, 0016, 0017, 0018, 0019`, which are safe to re-run (re-running `0016` or `0017`
 re-asserts the plan numbers / prices it sets, so apply them once and tune afterwards).
 
 1. `0001`–`0007` — existing schema.
@@ -84,6 +85,12 @@ re-asserts the plan numbers / prices it sets, so apply them once and tune afterw
    there is no admin screen yet - open *Table Editor -> content_reports* in the Supabase dashboard (newest
    first; filter `status = 'new'`) and set `status` to `reviewing`, `actioned` or `dismissed`. Check it
    regularly once the app is in closed testing: nothing alerts you when a report arrives.
+13. `0019_project_versioning_cas.sql` — version-checked saving of notebooks/chats: adds `user_projects.version`
+   (existing rows become 1), a trigger that bumps it on any update that did not bump it itself (so old cached
+   app versions can not slip past), and `save_user_project()` (SECURITY INVOKER, so RLS applies), the atomic
+   compare-and-set save. Purely additive; no data is rewritten; safe to re-run. **Apply it BEFORE deploying the
+   consolidated `app.js`** that calls it. Protocol: `docs/SYNC_PROTOCOL.md`. Run `verify_schema.sql` afterwards
+   (it now lists the `version` column).
 
 After applying, run `supabase/verify_schema.sql` (expect **zero rows**) and
 `supabase/verify_policies.sql` (query 1 must return **zero rows**; review any policy it lists — a

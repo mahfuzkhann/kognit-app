@@ -18,7 +18,7 @@
 --   details        which table.column entries are affected
 --
 -- Re-run this after applying a migration; when it returns zero rows you are in step
--- with the repository. (0002, 0004, 0006, 0008, 0009, 0010, 0011, 0013 and 0018 are safe to run twice. 0001,
+-- with the repository. (0002, 0004, 0006, 0008, 0009, 0010, 0011, 0013, 0018 and 0019 are safe to run twice. 0001,
 -- 0003, 0005 and 0007 create policies - run each of those only once.)
 --
 -- ALSO RUN supabase/verify_policies.sql after 0010: it reports any row level
@@ -176,7 +176,8 @@ with expected (table_name, column_name, added_by, relaxed_by) as (
     ('user_projects', 'updated_at', '0010_user_projects_baseline.sql', null),
     ('usage_write_keys', 'created_at', '0011_quota_notes_meter_and_telemetry_integrity.sql', null),
     ('usage_write_keys', 'key_hash', '0011_quota_notes_meter_and_telemetry_integrity.sql', null),
-    ('user_projects', 'user_id', '0010_user_projects_baseline.sql', null)
+    ('user_projects', 'user_id', '0010_user_projects_baseline.sql', null),
+    ('user_projects', 'version', '0019_project_versioning_cas.sql', null)
 ),
 column_problems as (
   select e.table_name,

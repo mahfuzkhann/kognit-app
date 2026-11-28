@@ -490,6 +490,15 @@ await check("the REAL backend app-config fixture is understood (contract)", asyn
     const c = await h.api.getAppConfig();
     eq(c.apiVersion, 1); eq(c.apiVersionSupported, true); eq(c.android.minVersion, APP_CONFIG_FIXTURE.android.min_version); eq(c.android.latestVersion, null);
     eq(h.calls[0].url, "/api/app-config"); assert(!("Authorization" in h.calls[0].headers), "public endpoint: no token");
+    eq(c.features.accountDeletion, APP_CONFIG_FIXTURE.features.account_deletion, "feature switch understood");
+});
+await check("feature switches: only a literal boolean true enables a feature; anything else is off", async () => {
+    const base = { api_version: 1, android: { min_version: "1.0.0", latest_version: null } };
+    for (const [features, expected] of [[{ account_deletion: true }, true], [{ account_deletion: false }, false], [{}, false], [undefined, false],
+                                        [null, false], ["true", false], [{ account_deletion: "true" }, false], [{ account_deletion: 1 }, false], [[true], false]]) {
+        const h = load(); h.reply(jsonResponse(200, features === undefined ? base : { ...base, features }));
+        eq((await h.api.getAppConfig()).features.accountDeletion, expected, JSON.stringify(features));
+    }
 });
 await check("app-config is cached; force refetches", async () => {
     const h = load(); h.reply(jsonResponse(200, APP_CONFIG_FIXTURE), jsonResponse(200, APP_CONFIG_FIXTURE));

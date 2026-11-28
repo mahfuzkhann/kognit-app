@@ -69,6 +69,23 @@ The server can not do this; the consolidated `app.js` must.
 | Hosting / server logs | Error log lines contain the student's pseudonymous user id (a UUID) - never email, token, password, chat or document text. The deletion itself logs only a one-way fingerprint. httpx request URLs (which carry ids) are no longer logged. Log retention is set by the hosting provider | Counsel: set a log retention period and state it in the Privacy Policy |
 | Content already shared with others | A share link is removed, but anyone who copied the text keeps it | State in the Privacy Policy |
 
+## The activation switch (`ACCOUNT_DELETION_ENABLED`)
+
+The founder decided account deletion ships as a real feature. It is nevertheless **off until the operator turns
+it on**, because the two things below can only be proven on a real Supabase staging project:
+(1) that a token refresh does not satisfy the "recent sign-in" check, (2) that deleting a test account removes
+everything and nothing else.
+
+- `ACCOUNT_DELETION_ENABLED` unset / anything but `true`, `1`, `yes`, `on` -> **off**: the endpoint answers
+  `503 ACCOUNT_DELETION_UNAVAILABLE` before doing anything, and `/api/app-config` reports
+  `features.account_deletion: false`.
+- On **and** `SUPABASE_URL` **and** `SUPABASE_SERVICE_ROLE_KEY` present -> `features.account_deletion: true` and the
+  app offers the full flow. Switch on but not configured stays **off** (the app never offers a deletion that would fail).
+- Order of operations: configure staging -> run the staging check below -> record the result -> only then set
+  `ACCOUNT_DELETION_ENABLED=true` on production. Turning it off again is immediate and loses nothing.
+- Engineering status: the whole backend path and its safeguards are implemented and unit/database tested.
+  **Live Supabase behaviour has NOT been verified**, so production activation is not yet shown to be safe.
+
 ## Setting up the privileged key (the Founder does this, never in chat)
 
 1. Supabase dashboard → Project Settings → API → copy the **service_role** key.

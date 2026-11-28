@@ -46,7 +46,7 @@ refuses to send requests (`ApiError.kind === "config"`) instead of guessing.
 | Update required | HTTP **400** AND `detail.code == "APP_UPDATE_REQUIRED"`. The **code** decides; an ordinary 400 is not an update requirement | both test files + the real gate response |
 | Request id | **Read** from the response header `X-Request-ID` (exposed by CORS). **Never sent**: the server ignores inbound ids and Android's CORS allow-list is `Authorization, Content-Type, X-Client-Version` only | contract test sends a real preflight with `x-request-id` and sees it rejected |
 | Headers sent | only `Authorization`, `Content-Type`, `X-Client-Version`, `Accept` | contract test compares with `CORS_ALLOWED_HEADERS` |
-| App config | `GET /api/app-config` -> `{"api_version":1,"android":{"min_version","latest_version"}}`, public, no token | fixture generated from the backend, compared in both languages |
+| App config | `GET /api/app-config` -> `{"api_version":1,"android":{"min_version","latest_version"},"features":{"account_deletion":bool}}`, public, no token. `features` are server-side switches (booleans only); the client turns a feature on only for a literal `true` | fixture generated from the backend, compared in both languages |
 | Auth | `Authorization: Bearer <JWT>`; credentials are never cookies (`credentials: "omit"`) | tests |
 | Errors | `{"detail": "text"}` or `{"detail": {"code","message",...}}`; validation lists are never echoed | tests |
 

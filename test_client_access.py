@@ -361,7 +361,9 @@ class TestAppConfig:
     def test_default_shape_and_values(self, client):
         r = client.get("/api/app-config")
         assert r.status_code == 200
-        assert r.json() == {"api_version": 1, "android": {"min_version": "0.0.0", "latest_version": None}}
+        # B06 extended the contract with a `features` block (booleans only). Off by default.
+        assert r.json() == {"api_version": 1, "android": {"min_version": "0.0.0", "latest_version": None},
+                            "features": {"account_deletion": False}}
 
     def test_it_needs_no_authentication(self, client, monkeypatch):
         async def _boom(*a, **k):
@@ -398,7 +400,9 @@ class TestAppConfig:
         monkeypatch.setenv("GEMINI_API_KEY", "super-secret-value")
         body = client.get("/api/app-config").text
         assert "super-secret-value" not in body
-        assert set(client.get("/api/app-config").json()) == {"api_version", "android"}
+        assert set(client.get("/api/app-config").json()) == {"api_version", "android", "features"}
+        assert set(client.get("/api/app-config").json()["features"]) == {"account_deletion"}
+        assert all(isinstance(v, bool) for v in client.get("/api/app-config").json()["features"].values())
         assert set(client.get("/api/app-config").json()["android"]) == {"min_version", "latest_version"}
 
 

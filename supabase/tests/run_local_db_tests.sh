@@ -43,10 +43,14 @@ echo "re-applying idempotent migration 0017 (must succeed twice)"
 psql -v ON_ERROR_STOP=1 -X -q -f "$repo"/supabase/migrations/0017_final_yearly_price.sql >/dev/null
 # 0018 (content reports) is applied after 0017, then re-applied once; its behaviour test runs below.
 apply_one "$repo"/supabase/migrations/0018_content_reports.sql
+apply_one "$repo"/supabase/migrations/0019_project_versioning_cas.sql
+echo "re-applying idempotent migration 0019 (must succeed twice)"
+psql -v ON_ERROR_STOP=1 -X -q -f "$repo"/supabase/migrations/0019_project_versioning_cas.sql >/dev/null
 echo "re-applying idempotent migration 0018 (must succeed twice)"
 psql -v ON_ERROR_STOP=1 -X -q -f "$repo"/supabase/migrations/0018_content_reports.sql >/dev/null
 psql -v ON_ERROR_STOP=1 -X -q -f "$here/plan_final_0016_test.sql"
 psql -v ON_ERROR_STOP=1 -X -q -f "$here/content_reports_0018_test.sql"
+psql -v ON_ERROR_STOP=1 -X -q -f "$here/project_cas_0019_test.sql"
 psql -v ON_ERROR_STOP=1 -X -q -f "$here/account_deletion_cascade_test.sql"
 psql -v ON_ERROR_STOP=1 -X -q -f "$here/engine2_behaviour_test.sql"
 psql -v ON_ERROR_STOP=1 -X -q -f "$here/quota_weekly_and_flashcards_test.sql"
@@ -57,3 +61,4 @@ bash "$here/concurrency_test.sh" 24
 bash "$here/concurrency_notes_test.sh" 24
 bash "$here/concurrency_quiz_flashcards_test.sh" 24
 bash "$here/concurrency_photo_pdf_test.sh" 24
+bash "$here/concurrency_project_cas_test.sh" 24

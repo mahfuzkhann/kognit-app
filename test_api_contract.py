@@ -145,9 +145,10 @@ class TestAppConfigContract:
         monkeypatch.setenv("MIN_ANDROID_VERSION", "1.3.0")
         monkeypatch.setenv("LATEST_ANDROID_VERSION", "1.5.0")
         body = TestClient(main_module.app).get("/api/app-config").json()
-        for needle in ("data.api_version", "android.min_version", "android.latest_version"):
+        for needle in ("data.api_version", "android.min_version", "android.latest_version", "data.features", "account_deletion"):
             assert needle in js_code(), needle
         assert body["api_version"] == 1 and body["android"] == {"min_version": "1.3.0", "latest_version": "1.5.0"}
+        assert set(body["features"]) == {"account_deletion"} and isinstance(body["features"]["account_deletion"], bool)
         assert re.search(r"SUPPORTED_API_VERSION\s*=\s*(\d+)", js()).group(1) == str(ca.API_VERSION)
 
     def test_app_config_is_public_and_not_cached_by_intermediaries(self):

@@ -523,7 +523,9 @@
         return {
             apiVersion: typeof data.api_version === "number" ? data.api_version : null,
             apiVersionSupported: data.api_version === SUPPORTED_API_VERSION,
-            android: { minVersion: android.min_version, latestVersion: latest }
+            android: { minVersion: android.min_version, latestVersion: latest },
+            // Server-side switches. Only a literal boolean true turns a feature on (a string "true" or 1 does not).
+            features: { accountDeletion: !!(data.features && typeof data.features === "object" && data.features.account_deletion === true) }
         };
     }
 
